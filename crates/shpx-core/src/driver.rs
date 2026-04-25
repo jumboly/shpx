@@ -41,6 +41,22 @@ pub trait Driver: Send + Sync + 'static {
         crs: Option<Crs>,
         opts: &WriteOpts,
     ) -> Result<Box<dyn LayerWriter>>;
+
+    /// バルクロード経路で出力レイヤを開く。`BulkLoadWriter` を実装する Driver のみ
+    /// `Some(...)` を返す。default 実装は `Ok(None)` で、CLI 側は本メソッドの戻り値が
+    /// `None` なら通常の [`open_write`](Self::open_write) 経路にフォールバックする。
+    ///
+    /// 引数は [`open_write`](Self::open_write) と同一。Driver 内部では同じ初期化処理を
+    /// 通すことを想定している（戻り値の dyn 型だけが違う）。
+    fn open_bulk_write(
+        &self,
+        _uri: &Uri,
+        _schema: SchemaRef,
+        _crs: Option<Crs>,
+        _opts: &WriteOpts,
+    ) -> Result<Option<Box<dyn BulkLoadWriter>>> {
+        Ok(None)
+    }
 }
 
 /// レイヤ読み出し: 先頭でスキーマを確定し、その後バッチを順に列挙する。

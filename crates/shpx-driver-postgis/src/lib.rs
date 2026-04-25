@@ -7,11 +7,12 @@
 
 use arrow_schema::SchemaRef;
 use shpx_core::{
-    Capabilities, Crs, Driver, LayerReader, LayerWriter, ReadOpts, Result, StringEncoding, Uri,
-    WriteOpts,
+    BulkLoadWriter, Capabilities, Crs, Driver, LayerReader, LayerWriter, ReadOpts, Result,
+    StringEncoding, Uri, WriteOpts,
 };
 
 pub mod conn;
+pub mod copy_binary;
 pub mod options;
 pub mod reader;
 pub mod runtime;
@@ -47,15 +48,15 @@ impl Driver for PostgisDriver {
             read: true,
             write: true,
             random_access: false,
-            // 行単位 INSERT のみ。`BulkLoadWriter` (COPY BINARY) を実装したら true に切り替える。
-            bulk_load: false,
+            // cycle 2 で `BulkLoadWriter` (COPY BINARY) 対応。
+            bulk_load: true,
             supports_blob: true,
-            // numeric ↔ Decimal の bind/decode を実装するまでは false に揃える。
-            // true にすると pipeline 側が「無損失で扱える」と誤判断する。
-            supports_decimal: false,
+            // cycle 2 で Decimal128 ↔ numeric の bind/decode を実装。
+            supports_decimal: true,
             supports_timestamp_tz: true,
             string_encoding: StringEncoding::Fixed("utf-8"),
-            max_decimal_precision: None,
+            // Decimal128 の Arrow 表現に合わせて 38 を上限にする。Decimal256 は未対応。
+            max_decimal_precision: Some(38),
         }
     }
 
@@ -73,6 +74,17 @@ impl Driver for PostgisDriver {
     ) -> Result<Box<dyn LayerWriter>> {
         let w = writer::PostgisWriter::open(uri, schema, crs.as_ref(), opts)?;
         Ok(Box::new(w))
+    }
+
+    fn open_bulk_write(
+        &self,
+        uri: &Uri,
+        schema: SchemaRef,
+        crs: Option<Crs>,
+        opts: &WriteOpts,
+    ) -> Result<Option<Box<dyn BulkLoadWriter>>> {
+        let w = writer::PostgisWriter::open(uri, schema, crs.as_ref(), opts)?;
+        Ok(Some(Box::new(w)))
     }
 }
 
@@ -94,10 +106,10 @@ mod tests {
         assert!(caps.read && caps.write);
         assert!(caps.supports_blob);
         assert!(caps.supports_timestamp_tz);
-        assert!(
-            !caps.bulk_load,
-            "BulkLoadWriter (COPY BINARY) を実装したら true に切り替える"
-        );
+        // cycle 2 で BulkLoadWriter (COPY BINARY) と Decimal128 が両方対応済み。
+        assert!(caps.bulk_load);
+        assert!(caps.supports_decimal);
+        assert_eq!(caps.max_decimal_precision, Some(38));
         match caps.string_encoding {
             StringEncoding::Fixed(label) => assert_eq!(label, "utf-8"),
             StringEncoding::Configurable(_) => panic!("must be utf-8 fixed"),

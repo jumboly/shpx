@@ -11,9 +11,7 @@
 //!     cargo test -p shpx-driver-postgis --locked
 //! ```
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow_array::{
     builder::{
@@ -23,65 +21,13 @@ use arrow_array::{
     types::{Float64Type, Int32Type, TimestampMicrosecondType},
     Array, ArrayRef, RecordBatch,
 };
-use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
-use shpx_core::{
-    schema::{GeometryMeta, GeometryType, GEOMETRY_META_KEY},
-    Crs, Driver, ReadOpts, Uri, WriteOpts,
-};
-use shpx_driver_postgis::{conn, PostgisDriver};
+use arrow_schema::{DataType, Field, TimeUnit};
+use shpx_core::{schema::GeometryType, Crs, Driver, ReadOpts, Uri};
+use shpx_driver_postgis::PostgisDriver;
 use shpx_geom::wkb::{self, Geom};
 
-/// `SHPX_TEST_PG_URL` 環境変数を返す。未設定なら `None`。
-fn pg_url() -> Option<String> {
-    std::env::var("SHPX_TEST_PG_URL")
-        .ok()
-        .filter(|s| !s.is_empty())
-}
-
-/// テストごとに衝突しないテーブル名を作る。
-fn unique_table(prefix: &str) -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{prefix}_{}_{nanos}", std::process::id())
-}
-
-fn uri_with_table(base_url: &str, table: &str) -> Uri {
-    let sep = if base_url.contains('?') { '&' } else { '?' };
-    Uri::from_path(format!("{base_url}{sep}table={table}"))
-}
-
-fn schema_with_geom(extras: Vec<Field>, gt: GeometryType, crs: Option<Crs>) -> SchemaRef {
-    let mut fields = extras;
-    let mut g = Field::new("geom", DataType::Binary, true);
-    let mut m = HashMap::new();
-    m.insert(
-        GEOMETRY_META_KEY.to_string(),
-        GeometryMeta::wkb(gt, crs).to_json().unwrap(),
-    );
-    g.set_metadata(m);
-    fields.push(g);
-    Arc::new(Schema::new(fields))
-}
-
-fn write_opts() -> WriteOpts {
-    WriteOpts {
-        overwrite: true,
-        ..Default::default()
-    }
-}
-
-/// 失敗しても無視する best-effort なテーブル削除。テスト終了時に呼ぶ。
-fn cleanup(base_url: &str, table: &str) {
-    let Ok(client) = conn::connect(base_url) else {
-        return;
-    };
-    let _ = conn::batch_execute(
-        &client,
-        &format!("DROP TABLE IF EXISTS \"public\".\"{table}\""),
-    );
-}
+mod common;
+use common::{cleanup, pg_url, schema_with_geom, unique_table, uri_with_table, write_opts};
 
 #[test]
 fn point_with_attributes_roundtrip() {

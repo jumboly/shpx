@@ -1,11 +1,93 @@
 //! `shpx convert <src> <dst>` の実装。
 
-use shpx_core::{schema::find_geometry_column, Crs, Error, ReadOpts, Result, Uri, WriteOpts};
+use arrow_schema::SchemaRef;
+use shpx_core::{
+    schema::find_geometry_column, Crs, Driver, Error, LayerReader, LayerWriter, ReadOpts, Result,
+    Uri, WriteOpts,
+};
 use shpx_geom::{parse_target_crs, Reprojector};
 
-use crate::cli::ConvertArgs;
+use crate::cli::{ConvertArgs, InsertModeArg};
 use crate::commands::parse_src_crs;
 use crate::registry;
+
+struct BatchCounters {
+    rows: u64,
+    batches: u64,
+}
+
+/// 出力経路（bulk / batch）共通の入力。`Driver::open_*_write` への引数と、
+/// reader 側の reproject / geometry index をまとめる。
+struct PipelineCtx<'a> {
+    dst_driver: &'a dyn Driver,
+    dst_uri: &'a Uri,
+    writer_schema: SchemaRef,
+    writer_crs: Option<Crs>,
+    write_opts: &'a WriteOpts,
+    reader: &'a mut dyn LayerReader,
+    reprojector: Option<&'a Reprojector>,
+    geom_idx: Option<usize>,
+}
+
+fn run_bulk(ctx: PipelineCtx<'_>, counters: &mut BatchCounters) -> Result<()> {
+    let PipelineCtx {
+        dst_driver,
+        dst_uri,
+        writer_schema,
+        writer_crs,
+        write_opts,
+        reader,
+        reprojector,
+        geom_idx,
+    } = ctx;
+    let mut bulk = dst_driver
+        .open_bulk_write(dst_uri, writer_schema, writer_crs, write_opts)?
+        .ok_or_else(|| {
+            Error::driver_msg(
+                dst_driver.name(),
+                "driver advertised bulk_load but open_bulk_write returned None",
+            )
+        })?;
+    let mut iter = reader.batches().map(|batch_res| {
+        let batch = batch_res?;
+        let batch = if let (Some(r), Some(gi)) = (reprojector, geom_idx) {
+            r.transform_batch(&batch, gi)?
+        } else {
+            batch
+        };
+        counters.rows += batch.num_rows() as u64;
+        counters.batches += 1;
+        Result::Ok(batch)
+    });
+    bulk.bulk_write(&mut iter)?;
+    bulk.finish()
+}
+
+fn run_batch(ctx: PipelineCtx<'_>, counters: &mut BatchCounters) -> Result<()> {
+    let PipelineCtx {
+        dst_driver,
+        dst_uri,
+        writer_schema,
+        writer_crs,
+        write_opts,
+        reader,
+        reprojector,
+        geom_idx,
+    } = ctx;
+    let mut writer = dst_driver.open_write(dst_uri, writer_schema, writer_crs, write_opts)?;
+    for batch in reader.batches() {
+        let batch = batch?;
+        let batch = if let (Some(r), Some(gi)) = (reprojector, geom_idx) {
+            r.transform_batch(&batch, gi)?
+        } else {
+            batch
+        };
+        counters.rows += batch.num_rows() as u64;
+        counters.batches += 1;
+        writer.write_batch(&batch)?;
+    }
+    LayerWriter::finish(writer)
+}
 
 pub fn run(args: ConvertArgs) -> Result<()> {
     let src_uri = Uri::from_path(args.src.clone());
@@ -67,22 +149,42 @@ pub fn run(args: ConvertArgs) -> Result<()> {
     };
 
     let geom_idx = find_geometry_column(&reader_schema)?.map(|(i, _, _)| i);
-    let mut writer = dst_driver.open_write(&dst_uri, writer_schema, writer_crs, &write_opts)?;
 
-    let mut total_rows: u64 = 0;
-    let mut total_batches: u64 = 0;
-    for batch in reader.batches() {
-        let batch = batch?;
-        let batch = if let (Some(r), Some(gi)) = (reprojector.as_ref(), geom_idx) {
-            r.transform_batch(&batch, gi)?
-        } else {
-            batch
-        };
-        total_rows += batch.num_rows() as u64;
-        total_batches += 1;
-        writer.write_batch(&batch)?;
+    // 出力 driver が bulk 経路を持つかを capabilities で確認し、`--insert-mode` と組み合わせて分岐する。
+    let bulk_supported = dst_driver.capabilities().bulk_load;
+    let use_bulk = match args.insert_mode {
+        InsertModeArg::Auto => bulk_supported,
+        InsertModeArg::Bulk => {
+            if !bulk_supported {
+                return Err(Error::driver_msg(
+                    dst_driver.name(),
+                    "driver does not support bulk insert; use --insert-mode=batch or =auto",
+                ));
+            }
+            true
+        }
+        InsertModeArg::Batch => false,
+    };
+
+    let mut counters = BatchCounters {
+        rows: 0,
+        batches: 0,
+    };
+    let ctx = PipelineCtx {
+        dst_driver,
+        dst_uri: &dst_uri,
+        writer_schema,
+        writer_crs,
+        write_opts: &write_opts,
+        reader: reader.as_mut(),
+        reprojector: reprojector.as_ref(),
+        geom_idx,
+    };
+    if use_bulk {
+        run_bulk(ctx, &mut counters)?;
+    } else {
+        run_batch(ctx, &mut counters)?;
     }
-    writer.finish()?;
 
     tracing::info!(
         target: "shpx::cli",
@@ -90,9 +192,10 @@ pub fn run(args: ConvertArgs) -> Result<()> {
         dst = %args.dst,
         from = src_driver.name(),
         to = dst_driver.name(),
-        rows = total_rows,
-        batches = total_batches,
+        rows = counters.rows,
+        batches = counters.batches,
         reproject = reprojector.is_some(),
+        insert_mode = if use_bulk { "bulk" } else { "batch" },
         "convert ok"
     );
     Ok(())

@@ -1,32 +1,45 @@
-//! PostGIS の `LayerWriter` 実装。
+//! PostGIS の `LayerWriter` / `BulkLoadWriter` 実装。
 //!
-//! 行単位 prepared INSERT を 1 トランザクション per `write_batch` で発行する。
-//! geometry 列は `Crs::epsg_code()` の SRID で EWKB 化して `ST_GeomFromEWKB($N)` に bind。
-//! 真の bulk load (`COPY BINARY`) は v0.3 cycle 2 の `BulkLoadWriter` で対応する。
+//! - **batch 経路** (`LayerWriter::write_batch`): 行単位 prepared INSERT を 1 トランザクション
+//!   per `write_batch` で発行する。geometry 列は `Crs::epsg_code()` の SRID で EWKB 化して
+//!   `ST_GeomFromEWKB($N)` に bind。Decimal128 は [`PgNumeric`] newtype を `ToSql` で bind。
+//! - **bulk 経路** (`BulkLoadWriter::bulk_write`, v0.3 cycle 2): `COPY <table> FROM STDIN BINARY`
+//!   を 1 接続 = 1 COPY セッションで張り、[`copy_binary::BulkRowEncoder`] が組み立てた行
+//!   バイト列を `tokio_postgres::CopyInSink<Bytes>` に送り続ける。
 
 use arrow_array::{
     cast::AsArray,
     types::{
-        Date32Type, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type,
+        Date32Type, Decimal128Type, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type,
         TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
         TimestampSecondType,
     },
-    Array, ArrowPrimitiveType, PrimitiveArray, RecordBatch,
+    Array, RecordBatch,
 };
 use arrow_schema::{DataType, Field, SchemaRef, TimeUnit};
+use bytes::{Bytes, BytesMut};
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use futures_util::SinkExt;
 use shpx_core::{
     schema::{find_geometry_column, GeometryMeta, GeometryType},
-    Crs, Error, LayerWriter, OnLoss, Result, Uri, WriteOpts,
+    BulkLoadWriter, Crs, Error, LayerWriter, OnLoss, Result, Uri, WriteOpts,
 };
 use shpx_geom::ewkb;
 use tokio_postgres::{types::ToSql, Client, Statement};
 
 use crate::conn;
+use crate::copy_binary::{write_copy_header, write_copy_trailer, BulkRowEncoder, PgNumeric};
 use crate::options::ResolvedWriteOpts;
 use crate::runtime::runtime;
 use crate::type_map::{arrow_to_decl, geom_type_to_decl_name};
-use crate::util::{apply_on_loss, driver_err, driver_msg, loss_kind, quote_ident, quote_qualified};
+use crate::util::{
+    apply_on_loss, driver_err, driver_msg, loss_kind, primitive, quote_ident, quote_qualified,
+};
+
+/// bulk 経路で 1 回の `sink.send` に詰める batch 数（行ではなく batch 数）。`feed` を
+/// 呼びまくると per-batch overhead が支配するので、ある程度の塊で送る。`BytesMut` を
+/// reuse するため allocation は溜まらない。
+const COPY_FLUSH_THRESHOLD_BYTES: usize = 64 * 1024;
 
 pub struct PostgisWriter {
     client: Option<Client>,
@@ -126,6 +139,60 @@ impl LayerWriter for PostgisWriter {
     }
 }
 
+impl BulkLoadWriter for PostgisWriter {
+    fn bulk_write(&mut self, batches: &mut dyn Iterator<Item = Result<RecordBatch>>) -> Result<()> {
+        let Self {
+            client,
+            schema,
+            geom_index,
+            attr_indices,
+            qualified,
+            srid,
+            ..
+        } = self;
+        let client = client
+            .as_mut()
+            .ok_or_else(|| driver_msg("bulk_write called after finish"))?;
+
+        let copy_sql = build_copy_sql(schema, attr_indices, *geom_index, qualified);
+        let encoder =
+            BulkRowEncoder::new(schema.clone(), attr_indices.clone(), *geom_index, *srid)?;
+
+        let rt = runtime()?;
+        rt.block_on(async {
+            let sink = client
+                .copy_in::<_, Bytes>(copy_sql.as_str())
+                .await
+                .map_err(|e| driver_err(&e))?;
+            futures_util::pin_mut!(sink);
+
+            // 先頭にヘッダ。
+            let mut buf = BytesMut::with_capacity(COPY_FLUSH_THRESHOLD_BYTES);
+            write_copy_header(&mut buf);
+
+            for batch_res in batches {
+                let batch = batch_res?;
+                for row in 0..batch.num_rows() {
+                    encoder.encode_row(&batch, row, &mut buf)?;
+                    if buf.len() >= COPY_FLUSH_THRESHOLD_BYTES {
+                        let chunk = buf.split().freeze();
+                        sink.send(chunk).await.map_err(|e| driver_err(&e))?;
+                    }
+                }
+            }
+
+            // 末尾トレーラ + 残バッファを送る。
+            write_copy_trailer(&mut buf);
+            if !buf.is_empty() {
+                sink.send(buf.freeze()).await.map_err(|e| driver_err(&e))?;
+            }
+            // sink.finish() はサーバ側で COPY を確定させる（暗黙トランザクションで commit）。
+            sink.as_mut().finish().await.map_err(|e| driver_err(&e))?;
+            Ok::<_, Error>(())
+        })
+    }
+}
+
 impl Drop for PostgisWriter {
     fn drop(&mut self) {
         if self.client.is_some() {
@@ -176,6 +243,26 @@ fn build_create_table_sql(
         "CREATE TABLE {qualified} (\n  {}\n)",
         cols.join(",\n  ")
     ))
+}
+
+/// `COPY <qualified> ("col1", ..., "geom") FROM STDIN BINARY` を組み立てる。
+/// 列順は `attr_indices` の後に geometry 列という規約で、bulk encoder の `field_order` と
+/// 一致させる必要がある。
+fn build_copy_sql(
+    schema: &SchemaRef,
+    attr_indices: &[usize],
+    geom_index: usize,
+    qualified: &str,
+) -> String {
+    let mut col_names: Vec<String> = attr_indices
+        .iter()
+        .map(|&i| quote_ident(schema.field(i).name()))
+        .collect();
+    col_names.push(quote_ident(schema.field(geom_index).name()));
+    format!(
+        "COPY {qualified} ({}) FROM STDIN (FORMAT BINARY)",
+        col_names.join(", ")
+    )
 }
 
 fn build_insert_sql(
@@ -269,6 +356,15 @@ fn arrow_to_pg_value(
                 Box::new(Some(dt))
             }
         }
+        DataType::Decimal128(_p, s) => {
+            let v: i128 = primitive::<Decimal128Type>(array, row);
+            let scale = u8::try_from(*s).map_err(|_| {
+                Error::Schema(format!(
+                    "field `{name}`: Decimal128 scale {s} not supported (must be 0..=38)"
+                ))
+            })?;
+            Box::new(Some(PgNumeric::from_i128_scale(v, scale)))
+        }
         other => {
             return Err(Error::Schema(format!(
                 "field `{name}`: unsupported Arrow type for PostGIS writer: {other:?}"
@@ -319,18 +415,11 @@ fn make_null(dt: &DataType) -> Box<dyn ToSql + Sync> {
         DataType::Date32 => Box::new(Option::<NaiveDate>::None),
         DataType::Timestamp(_, None) => Box::new(Option::<NaiveDateTime>::None),
         DataType::Timestamp(_, Some(_)) => Box::new(Option::<DateTime<Utc>>::None),
+        DataType::Decimal128(_, _) => Box::new(Option::<PgNumeric>::None),
         // arrow_to_decl が同じ DataType セットを reject するので、ここには到達しない。
         // 未対応型を見たら schema validation のバグなので fail-fast で止める。
         other => unreachable!("make_null reached for unsupported DataType: {other:?}"),
     }
-}
-
-fn primitive<T: ArrowPrimitiveType>(array: &dyn Array, row: usize) -> T::Native {
-    let arr = array
-        .as_any()
-        .downcast_ref::<PrimitiveArray<T>>()
-        .expect("primitive downcast");
-    arr.value(row)
 }
 
 #[cfg(test)]

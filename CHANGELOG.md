@@ -4,11 +4,15 @@
 
 ## [Unreleased]
 
-v0.3 マイルストーン「PostGIS」の cycle 1 進捗。
+v0.3 マイルストーン「PostGIS」の cycle 1 + cycle 2 進捗。
 
 ### Added
 
-- **shpx-driver-postgis (v0.3 cycle 1)**: PostgreSQL + PostGIS の最小 reader / writer。`pg://` / `postgres://` / `postgresql://` URL で接続し、`?table=schema.name` または環境変数 `SHPX_PG_TABLE` でテーブルを指定する。`tokio-postgres` (`with-chrono-0_4` feature) を採用し、driver crate 内 `OnceLock<tokio::runtime::Runtime>` で multi-thread runtime を 1 個共有して `block_on` で同期化する。reader は `SELECT ST_AsEWKB(geom), ... FROM tbl` を発行し、writer は `--overwrite` で `DROP TABLE IF EXISTS` → `CREATE TABLE` → 1 トランザクション + prepared `INSERT INTO ... VALUES (..., ST_GeomFromEWKB($N))` を行う。サポート型: Boolean / Int16-64 / Float32-64 / Utf8 / Binary / Date32 / Timestamp(_, None|UTC) / geometry。SRID は `Crs::epsg_code()` または `geometry_columns` view → 先頭行 `ST_SRID()` の順で解決する。COPY BINARY (cycle 2)、`--where`/`--select`/`--query`、`--create-table`、GIST index、未登録 EPSG の `spatial_ref_sys` 自動 INSERT、Z/M / Decimal は cycle 2/3 で対応。詳細は `docs/POSTGIS.md` 参照。
+- **shpx-driver-postgis (v0.3 cycle 2)**: PostgreSQL の binary COPY format を自前エンコードする `BulkLoadWriter` 経路。`crates/shpx-driver-postgis/src/copy_binary.rs` に `BulkRowEncoder` と各型の big-endian エンコーダ（bool / int2-8 / float4-8 / text / bytea / date / timestamp / timestamptz / numeric / geometry-EWKB）を実装。`tokio_postgres::CopyInSink<Bytes>` で `COPY <table> (<cols>) FROM STDIN BINARY` に流し込み、複数 `RecordBatch` をまたいで 1 接続 = 1 COPY セッションで送る。`Capabilities::bulk_load = true` / `supports_decimal = true` に切替。
+- **shpx-driver-postgis (Decimal128)**: Arrow `Decimal128(p, s)` ↔ PG `numeric(p, s)` を双方向対応。binary 表現は NBASE=10000 の `PgNumeric { ndigits, weight, sign, dscale, digits[] }` で、`PgNumeric` は `tokio_postgres::types::ToSql` を独自実装し batch / bulk 両経路で同じ encode 結果を共有する。reader は PG `NUMERIC` OID + `pg_attribute.atttypmod` から `(p, s)` を復元（typmod=-1 のときは `(38, 0)` フォールバック）。decimal(38, 10) bit-identical 往復テスト追加。
+- **shpx-cli (`--insert-mode=auto|bulk|batch`)**: `convert` サブコマンドに insert mode を追加。既定 `auto` は driver の `Capabilities::bulk_load` が true なら bulk、そうでなければ batch（silently fallback）。`bulk` 明示時は非対応 driver でエラー。`batch` 明示時は常に `LayerWriter::write_batch` 経路。PostGIS 以外の driver は現状 batch 一択のため挙動は変わらない。
+- **shpx-core**: `Driver::open_bulk_write` メソッドを default impl (`Ok(None)`) 付きで `Driver` trait に追加。`BulkLoadWriter` を実装する driver はこれを override して `Box<dyn BulkLoadWriter>` を返す。CLI 側は `Capabilities::bulk_load` でゲートしてから呼び出す。
+- **shpx-driver-postgis (v0.3 cycle 1)**: PostgreSQL + PostGIS の最小 reader / writer。`pg://` / `postgres://` / `postgresql://` URL で接続し、`?table=schema.name` または環境変数 `SHPX_PG_TABLE` でテーブルを指定する。`tokio-postgres` (`with-chrono-0_4` feature) を採用し、driver crate 内 `OnceLock<tokio::runtime::Runtime>` で multi-thread runtime を 1 個共有して `block_on` で同期化する。reader は `SELECT ST_AsEWKB(geom), ... FROM tbl` を発行し、writer は `--overwrite` で `DROP TABLE IF EXISTS` → `CREATE TABLE` → 1 トランザクション + prepared `INSERT INTO ... VALUES (..., ST_GeomFromEWKB($N))` を行う。サポート型: Boolean / Int16-64 / Float32-64 / Utf8 / Binary / Date32 / Timestamp(_, None|UTC) / geometry。SRID は `Crs::epsg_code()` または `geometry_columns` view → 先頭行 `ST_SRID()` の順で解決する。`--where`/`--select`/`--query`、`--create-table`、GIST index、未登録 EPSG の `spatial_ref_sys` 自動 INSERT、Z/M は cycle 3 で対応。詳細は `docs/POSTGIS.md` 参照。
 - **shpx-geom**: PostGIS EWKB (Extended WKB) の encode/decode を `ewkb` モジュールに追加。`encode_with_srid` で標準 WKB に SRID flag (`0x20000000`) を立て SRID i32 を挿入、`strip_srid` / `decode` で EWKB から SRID と標準 WKB を分離する。Z/M flag は cycle 1 では `Error::Geometry` で拒否する。
 - **shpx-core**: `Uri::from_path` に URL スキーム検出を追加。先頭が `<scheme>://` 形式なら scheme を抽出し、`pg`/`postgres`/`postgresql` は `pg` に正規化する。ローカルパスの拡張子推論は従来通り。`Uri::is_url()` ヘルパ追加。
 
@@ -20,7 +24,7 @@ v0.3 マイルストーン「PostGIS」の cycle 1 進捗。
 
 - workspace MSRV は 1.85 据え置き。`tokio` / `tokio-postgres` / `postgres-types` / `bytes` / `futures-util` を `[workspace.dependencies]` に追加。
 - `docker-compose.yml` をリポジトリルートに追加（ローカル開発用 PostGIS）。
-- CI (`.github/workflows/ci.yml`): test job に `services.postgis` を追加し、`SHPX_TEST_PG_URL=pg://shpx:shpx@localhost:5432/shpx_test` を環境変数で渡す。`shpx-driver-postgis/tests/roundtrip.rs` は env 未設定なら eprintln + return で skip するため、PostGIS が無いローカル環境でも `cargo test` は緑のまま。
+- CI (`.github/workflows/ci.yml`): test job に `services.postgis` を追加し、`SHPX_TEST_PG_URL=pg://shpx:shpx@localhost:5432/shpx_test` を環境変数で渡す。`shpx-driver-postgis/tests/roundtrip.rs` および cycle 2 で追加した `tests/bulk_roundtrip.rs` は env 未設定なら eprintln + return で skip するため、PostGIS が無いローカル環境でも `cargo test` は緑のまま。
 
 ## [0.2.0] - 2026-04-25
 

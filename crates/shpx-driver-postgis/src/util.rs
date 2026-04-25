@@ -1,5 +1,6 @@
 //! ドライバ共通ユーティリティ。GPKG/FGB driver の `util.rs` と同形パターン。
 
+use arrow_array::{Array, ArrowPrimitiveType, PrimitiveArray};
 use shpx_core::{Error, OnLoss, Result};
 
 /// このドライバの識別名（`Driver::name` 戻り値、`Error::Driver.name`、tracing target に使う）。
@@ -65,6 +66,16 @@ pub fn quote_qualified(schema: &str, table: &str) -> String {
 pub fn quote_literal(s: &str) -> String {
     let escaped = s.replace('\'', "''");
     format!("'{escaped}'")
+}
+
+/// Arrow primitive 配列の指定行から native 値を取り出す。downcast 失敗は schema mismatch で
+/// プログラムバグなので panic（呼び出し側で `DataType` を確認済みである前提）。
+pub fn primitive<T: ArrowPrimitiveType>(array: &dyn Array, row: usize) -> T::Native {
+    array
+        .as_any()
+        .downcast_ref::<PrimitiveArray<T>>()
+        .expect("primitive downcast")
+        .value(row)
 }
 
 #[cfg(test)]

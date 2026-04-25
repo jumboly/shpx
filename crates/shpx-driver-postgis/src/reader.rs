@@ -12,8 +12,9 @@ use std::sync::Arc;
 
 use arrow_array::{
     builder::{
-        ArrayBuilder, BinaryBuilder, BooleanBuilder, Date32Builder, Float32Builder, Float64Builder,
-        Int16Builder, Int32Builder, Int64Builder, StringBuilder, TimestampMicrosecondBuilder,
+        ArrayBuilder, BinaryBuilder, BooleanBuilder, Date32Builder, Decimal128Builder,
+        Float32Builder, Float64Builder, Int16Builder, Int32Builder, Int64Builder, StringBuilder,
+        TimestampMicrosecondBuilder,
     },
     ArrayRef, RecordBatch,
 };
@@ -27,6 +28,7 @@ use shpx_geom::ewkb;
 use tokio_postgres::{types::Type as PgType, Client, Row};
 
 use crate::conn;
+use crate::copy_binary::PgNumeric;
 use crate::options::ResolvedReadOpts;
 use crate::type_map::{geom_type_from_st_name, pg_to_arrow};
 use crate::util::{driver_msg, quote_ident, quote_qualified};
@@ -115,6 +117,8 @@ struct ColumnInfo {
     type_name: String,
     /// `tokio_postgres::types::Type` から得た PgType。geometry/geography の場合は本フィールドを参照しない。
     pg_type: PgType,
+    /// `pg_attribute.atttypmod`。`numeric` で precision/scale を取り出すのに使う。-1 は未指定。
+    typmod: i32,
     /// PostGIS の geometry/geography 列か。
     is_geometry: bool,
     /// NOT NULL 制約。
@@ -127,7 +131,7 @@ fn describe_columns(client: &Client, schema: &str, table: &str) -> Result<Vec<Co
     // 詳細型 (Point/Polygon 等) は取れないが、geometry/geography 判定には十分。
     // PgType への変換は OID 経由で `Type::from_oid` を使う（tokio-postgres が builtin OID を解決）。
     let sql = "
-        SELECT a.attname, a.atttypid, a.attnotnull, t.typname
+        SELECT a.attname, a.atttypid, a.atttypmod, a.attnotnull, t.typname
         FROM pg_attribute a
         JOIN pg_class c ON c.oid = a.attrelid
         JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -150,6 +154,9 @@ fn describe_columns(client: &Client, schema: &str, table: &str) -> Result<Vec<Co
             .map_err(|e| driver_msg(e.to_string()))?;
         let oid: u32 = row
             .try_get("atttypid")
+            .map_err(|e| driver_msg(e.to_string()))?;
+        let typmod: i32 = row
+            .try_get("atttypmod")
             .map_err(|e| driver_msg(e.to_string()))?;
         let notnull: bool = row
             .try_get("attnotnull")
@@ -175,11 +182,37 @@ fn describe_columns(client: &Client, schema: &str, table: &str) -> Result<Vec<Co
             name,
             type_name: typname,
             pg_type,
+            typmod,
             is_geometry: is_geom,
             nullable: !notnull,
         });
     }
     Ok(out)
+}
+
+/// PG `numeric` の `pg_attribute.atttypmod` から `(precision, scale)` を取り出す。
+///
+/// レイアウト: `atttypmod = ((p << 16) | s) + VARHDRSZ` で VARHDRSZ = 4。
+/// `atttypmod = -1`（未指定）または precision が 38 を超えるなど Decimal128 に
+/// 収まらない場合は `(38, 0)` フォールバック。
+///
+/// PG13 以降は scale が負（trailing zero round to integer）も許されるが、Arrow Decimal128
+/// で素直に表現できないため `(38, 0)` フォールバックする。
+fn numeric_typmod_to_p_s(typmod: i32) -> (u8, u8) {
+    if typmod < 0 {
+        return (38, 0);
+    }
+    let m = typmod - 4;
+    let p = (m >> 16) & 0xFFFF;
+    let s = m & 0xFFFF;
+    if !(1..=38).contains(&p) || !(0..=38).contains(&s) || s > p {
+        return (38, 0);
+    }
+    // 1..=38 に bound 済みなので u8 に必ず収まる。
+    (
+        u8::try_from(p).expect("precision fits u8"),
+        u8::try_from(s).expect("scale fits u8"),
+    )
 }
 
 /// geometry 列の SRID と代表 geometry 型を 2 query で取得する:
@@ -251,13 +284,20 @@ fn build_arrow_schema(
             f.set_metadata(m);
             fields.push(f);
         } else {
-            let dt = pg_to_arrow(&c.pg_type).map_err(|e| {
-                if let Error::Schema(msg) = e {
-                    Error::Schema(format!("column `{}` ({}): {}", c.name, c.type_name, msg))
-                } else {
-                    e
-                }
-            })?;
+            let dt = if c.pg_type == PgType::NUMERIC {
+                let (p, s) = numeric_typmod_to_p_s(c.typmod);
+                // Arrow Decimal128 は precision: u8、scale: i8。p <= 38, s <= p ≤ 38 のため i8 に必ず収まる。
+                let s_i8 = i8::try_from(s).expect("scale 0..=38 fits i8");
+                DataType::Decimal128(p, s_i8)
+            } else {
+                pg_to_arrow(&c.pg_type).map_err(|e| {
+                    if let Error::Schema(msg) = e {
+                        Error::Schema(format!("column `{}` ({}): {}", c.name, c.type_name, msg))
+                    } else {
+                        e
+                    }
+                })?
+            };
             fields.push(Field::new(&c.name, dt, c.nullable));
         }
     }
@@ -318,7 +358,15 @@ fn rows_to_record_batch(
                     None => bb.append_null(),
                 }
             } else {
-                append_value(builders[i].as_mut(), &c.pg_type, row, i, &c.name)?;
+                let field = schema.field(i);
+                append_value(
+                    builders[i].as_mut(),
+                    &c.pg_type,
+                    field.data_type(),
+                    row,
+                    i,
+                    &c.name,
+                )?;
             }
         }
     }
@@ -347,7 +395,12 @@ fn make_builder(dt: &DataType) -> Box<dyn ArrayBuilder> {
         DataType::Timestamp(TimeUnit::Microsecond, Some(_)) => {
             Box::new(TimestampMicrosecondBuilder::new().with_timezone("UTC"))
         }
-        // cycle 1 でサポート外の型は schema 構築段階で reject されるので、ここに来た時点でバグ。
+        DataType::Decimal128(p, s) => Box::new(
+            Decimal128Builder::new()
+                .with_precision_and_scale(*p, *s)
+                .expect("validated by build_arrow_schema"),
+        ),
+        // サポート外の型は schema 構築段階で reject されるので、ここに来た時点でバグ。
         other => panic!("make_builder: unexpected DataType {other:?}"),
     }
 }
@@ -356,6 +409,7 @@ fn make_builder(dt: &DataType) -> Box<dyn ArrayBuilder> {
 fn append_value(
     builder: &mut dyn ArrayBuilder,
     pg_type: &PgType,
+    target_dt: &DataType,
     row: &Row,
     col: usize,
     name: &str,
@@ -483,6 +537,30 @@ fn append_value(
                 None => b.append_null(),
             }
         }
+        PgType::NUMERIC => {
+            let b = builder
+                .as_any_mut()
+                .downcast_mut::<Decimal128Builder>()
+                .unwrap();
+            let v: Option<PgNumeric> = row.try_get(col).map_err(read_err)?;
+            let scale = match target_dt {
+                DataType::Decimal128(_, s) => u8::try_from(*s).map_err(|_| {
+                    driver_msg(format!("column `{name}`: invalid Decimal128 scale {s}"))
+                })?,
+                other => {
+                    return Err(Error::Schema(format!(
+                        "column `{name}`: NUMERIC mapped to non-Decimal128 type: {other:?}"
+                    )));
+                }
+            };
+            match v {
+                Some(n) => {
+                    let i = n.to_i128_with_scale(scale)?;
+                    b.append_value(i);
+                }
+                None => b.append_null(),
+            }
+        }
         ref other => {
             return Err(Error::Schema(format!(
                 "column `{name}`: unsupported PostgreSQL type at runtime: {} (OID {})",
@@ -527,6 +605,7 @@ mod tests {
                 name: "name".into(),
                 type_name: "text".into(),
                 pg_type: PgType::TEXT,
+                typmod: -1,
                 is_geometry: false,
                 nullable: true,
             },
@@ -534,6 +613,7 @@ mod tests {
                 name: "geom".into(),
                 type_name: "geometry".into(),
                 pg_type: PgType::BYTEA,
+                typmod: -1,
                 is_geometry: true,
                 nullable: true,
             },
@@ -543,6 +623,22 @@ mod tests {
             sql,
             "SELECT \"name\", ST_AsEWKB(\"geom\") AS \"geom\" FROM \"public\".\"t\""
         );
+    }
+
+    #[test]
+    fn numeric_typmod_decode() {
+        // numeric(10, 2): typmod = ((10 << 16) | 2) + 4 = 655_366
+        assert_eq!(numeric_typmod_to_p_s(655_366), (10, 2));
+        // numeric(38, 10): typmod = ((38 << 16) | 10) + 4 = 2_490_382
+        assert_eq!(numeric_typmod_to_p_s(2_490_382), (38, 10));
+        // unknown typmod → fallback
+        assert_eq!(numeric_typmod_to_p_s(-1), (38, 0));
+        // out-of-range precision (39) → fallback
+        let p39_s0 = ((39_i32) << 16) + 4;
+        assert_eq!(numeric_typmod_to_p_s(p39_s0), (38, 0));
+        // s > p → fallback (numeric(5, 10) is invalid for Decimal128)
+        let p5_s10 = ((5_i32) << 16) | 0xA;
+        assert_eq!(numeric_typmod_to_p_s(p5_s10 + 4), (38, 0));
     }
 
     #[test]

@@ -64,6 +64,13 @@ pub struct ConvertArgs {
     /// 入力 CRS が解決できないとエラーになるため `--src-crs` と併用すること。
     #[arg(long)]
     pub reproject: Option<String>,
+
+    /// 出力 driver の bulk 経路を使うかどうか。`auto` (既定) は `Capabilities::bulk_load`
+    /// が真の driver で bulk 経路、それ以外は batch 経路。`bulk` 明示時は非対応 driver で
+    /// エラー。`batch` 明示時は常に行単位経路。PostGIS は cycle 2 で bulk 経路 (COPY BINARY)
+    /// 対応のため、既定で COPY BINARY が使われる。
+    #[arg(long, value_enum, default_value_t = InsertModeArg::Auto)]
+    pub insert_mode: InsertModeArg,
 }
 
 #[derive(clap::Args, Debug)]
@@ -114,4 +121,15 @@ impl From<OnLossArg> for OnLoss {
             OnLossArg::Skip => OnLoss::Skip,
         }
     }
+}
+
+/// `--insert-mode` の値。
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InsertModeArg {
+    /// driver が bulk_load 対応なら bulk、そうでなければ batch にフォールバックする。
+    Auto,
+    /// 必ず bulk 経路を使う。bulk 非対応 driver ではエラー。
+    Bulk,
+    /// 必ず batch (`LayerWriter::write_batch`) 経路を使う。
+    Batch,
 }

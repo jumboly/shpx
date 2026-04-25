@@ -72,8 +72,8 @@
 
 **サブ cycle 構成** (v0.2 と同じく cycle ごとに `/clear` して clean に再開する):
 
-- **cycle 1 — 基盤と最小往復**: `shpx-core::Uri` の URL スキーム検出、CLI 引数 String 化、`shpx-geom::ewkb` 追加、`shpx-driver-postgis` の最小 reader (`SELECT *`) + 行 INSERT writer (`ST_GeomFromEWKB`)、`docker compose` + GitHub Actions services + `SHPX_TEST_PG_URL` env-gated integration テスト。詳細は `docs/POSTGIS.md` 参照。
-- **cycle 2 — COPY BINARY と BulkLoadWriter**: `crates/shpx-driver-postgis/src/copy_binary.rs` で pg binary COPY format の自前エンコーダ（bool / int{2,4,8} / float{4,8} / text / bytea / numeric / date / timestamp / timestamptz / geometry-EWKB の big-endian 直書き）。`BulkLoadWriter::bulk_write` を実装し、`shpx-cli/src/commands/convert.rs` に bulk path 分岐を追加。`--insert-mode=bulk|batch` で挙動切替。`ogr2ogr` 比 50% 以上のベンチを取る。
+- **cycle 1 — 基盤と最小往復**（完了）: `shpx-core::Uri` の URL スキーム検出、CLI 引数 String 化、`shpx-geom::ewkb` 追加、`shpx-driver-postgis` の最小 reader (`SELECT *`) + 行 INSERT writer (`ST_GeomFromEWKB`)、`docker compose` + GitHub Actions services + `SHPX_TEST_PG_URL` env-gated integration テスト。詳細は `docs/POSTGIS.md` 参照。
+- **cycle 2 — COPY BINARY と BulkLoadWriter**（完了）: `crates/shpx-driver-postgis/src/copy_binary.rs` で pg binary COPY format の自前エンコーダ（bool / int{2,4,8} / float{4,8} / text / bytea / numeric / date / timestamp / timestamptz / geometry-EWKB の big-endian 直書き）。`BulkLoadWriter::bulk_write` を `PostgisWriter` で実装、`Driver::open_bulk_write` を `shpx-core` に追加し driver で override。`shpx-cli` に `--insert-mode=auto|bulk|batch` を追加（既定 `auto`、bulk_load 対応 driver なら bulk、それ以外は silently batch）。Decimal128 を batch / bulk 両経路でサポートし、`Capabilities::supports_decimal = true` に。decimal(38, 10) / timestamptz / bytea が bit-identical 往復することを env-gated 統合テストで確認。`ogr2ogr 50%` の正式ベンチは cycle 3 完了時に再計測する。
 - **cycle 3 — reader/writer 拡張と未登録 EPSG**: `--where '<sql>'` / `--select col1,col2` / `--query '<sql>'`、`--create-table=if-not-exists|always|never`、GIST index 自動生成オプション、未登録 EPSG の `spatial_ref_sys` 自動 INSERT（`--on-loss` 連携）。完了基準の全項目クリアでリリース。
 
 ---

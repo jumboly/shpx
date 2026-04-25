@@ -11,19 +11,37 @@ use shpx_core::{Error, Result};
 use tokio_postgres::types::Type as PgType;
 
 /// Arrow DataType を PostgreSQL の宣言型へ。
-pub fn arrow_to_decl(dt: &DataType) -> Result<&'static str> {
+///
+/// `Decimal128(p, s)` は `numeric(p, s)` のように precision/scale 込みで返すため
+/// 戻り値は `String`（cycle 1 までは `&'static str` で十分だったが cycle 2 で拡張）。
+pub fn arrow_to_decl(dt: &DataType) -> Result<String> {
     Ok(match dt {
-        DataType::Boolean => "boolean",
-        DataType::Int16 => "smallint",
-        DataType::Int32 => "integer",
-        DataType::Int64 => "bigint",
-        DataType::Float32 => "real",
-        DataType::Float64 => "double precision",
-        DataType::Utf8 | DataType::LargeUtf8 => "text",
-        DataType::Binary | DataType::LargeBinary => "bytea",
-        DataType::Date32 => "date",
-        DataType::Timestamp(_, None) => "timestamp",
-        DataType::Timestamp(_, Some(_)) => "timestamptz",
+        DataType::Boolean => "boolean".to_string(),
+        DataType::Int16 => "smallint".to_string(),
+        DataType::Int32 => "integer".to_string(),
+        DataType::Int64 => "bigint".to_string(),
+        DataType::Float32 => "real".to_string(),
+        DataType::Float64 => "double precision".to_string(),
+        DataType::Utf8 | DataType::LargeUtf8 => "text".to_string(),
+        DataType::Binary | DataType::LargeBinary => "bytea".to_string(),
+        DataType::Date32 => "date".to_string(),
+        DataType::Timestamp(_, None) => "timestamp".to_string(),
+        DataType::Timestamp(_, Some(_)) => "timestamptz".to_string(),
+        DataType::Decimal128(p, s) => {
+            // PG numeric の precision は 1..=1000、scale は 0..=p。Arrow Decimal128 は precision: u8、
+            // scale: i8。Decimal128 として有効な p は 1..=38、s は 0..=p（負スケールは未対応）。
+            if *p == 0 || *p > 38 {
+                return Err(Error::Schema(format!(
+                    "Decimal128 precision must be 1..=38, got {p}"
+                )));
+            }
+            let s_u = u8::try_from(*s).map_err(|_| {
+                Error::Schema(format!(
+                    "Decimal128 scale out of range (must be 0..=p): {s}"
+                ))
+            })?;
+            format!("numeric({p}, {s_u})")
+        }
         other => {
             return Err(Error::Schema(format!(
                 "unsupported Arrow type for PostGIS writer: {other:?}"
@@ -125,8 +143,22 @@ mod tests {
     }
 
     #[test]
-    fn arrow_to_decl_rejects_decimal() {
-        assert!(arrow_to_decl(&DataType::Decimal128(10, 2)).is_err());
+    fn arrow_to_decl_decimal128() {
+        assert_eq!(
+            arrow_to_decl(&DataType::Decimal128(10, 2)).unwrap(),
+            "numeric(10, 2)"
+        );
+        assert_eq!(
+            arrow_to_decl(&DataType::Decimal128(38, 10)).unwrap(),
+            "numeric(38, 10)"
+        );
+    }
+
+    #[test]
+    fn arrow_to_decl_rejects_decimal128_out_of_range() {
+        // p > 38 is not supported by Decimal128 in shpx-driver-postgis (would need Decimal256).
+        assert!(arrow_to_decl(&DataType::Decimal128(39, 0)).is_err());
+        assert!(arrow_to_decl(&DataType::Decimal128(0, 0)).is_err());
     }
 
     #[test]

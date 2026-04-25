@@ -13,7 +13,7 @@ GDAL 非依存・Rust 製の空間データ相互変換 CLI。Arrow RecordBatch 
 | GeoJSON (`.geojson`) | ✓ | ✓ | – |
 | GeoJSON Lines (`.geojsonl` / `.ndjson` / `.jsonl`) | ✓ | ✓ | – |
 | CSV w/ WKT (`.csv` / `.tsv`) | ✓ | ✓ | – |
-| PostGIS (`pg://` / `postgres://` / `postgresql://`) | ✓ | ✓ | (cycle 2 で COPY BINARY) |
+| PostGIS (`pg://` / `postgres://` / `postgresql://`) | ✓ | ✓ | COPY BINARY |
 | SQL Server (`mssql://`) | ✓ | ✓ | staging table → bulk_insert |
 | SpatiaLite (`sqlite://`) | ✓ | ✓ | TX batch |
 
@@ -60,7 +60,7 @@ shpx drivers
 ## ステータス
 
 v0.2.0 リリース済み（2026-04-25）。次マイルストーン v0.3 は PostGIS ドライバ。
-**v0.3 cycle 1 (進行中)**: `pg://` / `postgres://` / `postgresql://` URL での read/write、SHP / Parquet ↔ PostGIS の最小往復、行 INSERT writer。COPY BINARY は cycle 2、`--where`/`--select`/`--query` 等は cycle 3 で対応予定。詳細は [docs/POSTGIS.md](docs/POSTGIS.md) と [docs/ROADMAP.md](docs/ROADMAP.md)、変更履歴は [CHANGELOG.md](CHANGELOG.md)。
+**v0.3 cycle 2 (進行中)**: `pg://` / `postgres://` / `postgresql://` URL での read/write、`COPY BINARY` 自前エンコーダによる `BulkLoadWriter`、`--insert-mode=auto|bulk|batch` CLI フラグ、Decimal128(p, s) ↔ `numeric(p, s)` の双方向対応（bit-identical）。`--where`/`--select`/`--query`、`--create-table` 制御、GIST index、未登録 EPSG の自動 INSERT は cycle 3 で対応予定。詳細は [docs/POSTGIS.md](docs/POSTGIS.md) と [docs/ROADMAP.md](docs/ROADMAP.md)、変更履歴は [CHANGELOG.md](CHANGELOG.md)。
 
 ## ライセンス
 
