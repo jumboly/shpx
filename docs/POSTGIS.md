@@ -4,7 +4,7 @@ PostgreSQL + PostGIS 拡張のテーブルを `shpx-driver-postgis` が担当す
 
 `Driver` trait は同期 API なので、driver crate 内で `tokio` ランタイムを 1 個保持し、各メソッドの先頭で `block_on` する形で同期化する。利用者から見えるインターフェースは他ドライバと完全に同じ。
 
-## 対応範囲（v0.3 cycle 3b 時点）
+## 対応範囲（v0.3 リリース時点）
 
 - 読み:
   - `pg://user:pass@host:port/db?table=<name>` で接続 → 1 テーブル全件 SELECT
@@ -201,11 +201,10 @@ Z/M / GeometryCollection は `shpx-geom::wkb` 自体が未対応のため、Post
 - CRS 無し → `apply_on_loss("missing-crs-on-postgis", ...)`
 - 未登録 EPSG → cycle 3b で `spatial_ref_sys` への自動 INSERT を実装（WKT 解決可能な場合のみ、ベストエフォート）
 
-## スコープ外（cycle 3c 以降）
+## スコープ外（v0.4 以降）
 
-v0.3 cycle 3b 完了時点で以下は未対応:
+v0.3 リリース時点で以下は未対応:
 
-- **1000 万行 × 10 属性のベンチで `ogr2ogr` の 50% 以上の速度**（cycle 3c で計測 / 完了基準確定）
 - **`--create-table=never` での列スキーマ事前検証**（現状は INSERT/COPY 時の PG エラー任せ）
 - **streaming reader**（現状は全件 in-memory）
 - Z/M 座標、GeometryCollection

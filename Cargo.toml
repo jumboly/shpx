@@ -19,7 +19,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 # MSRV。CI でこのバージョンと最新 stable の双方を検証する。
 # flatgeobuf 6.0 (FGB ドライバが依存) が `rust-version = 1.85` を要求するため、

@@ -4,7 +4,13 @@
 
 ## [Unreleased]
 
-v0.3 マイルストーン「PostGIS」の cycle 1 + cycle 2 + cycle 3a + cycle 3b 進捗。残るは cycle 3c（ベンチと完了基準確定）（`docs/ROADMAP.md` 参照）。
+## [0.3.0] - 2026-04-25
+
+v0.3 マイルストーン「PostGIS」のリリース。`shpx-driver-postgis` で PostgreSQL + PostGIS の read/write を提供し、COPY BINARY 経路の `BulkLoadWriter` と Decimal128 / timestamptz / bytea / EWKB の bit-identical 往復、`--where` / `--select` / `--query` reader、`--create-table` / `--create-index` writer、未登録 EPSG の `spatial_ref_sys` 自動 INSERT までを含む。10M 行 × 10 属性ベンチ（`scripts/bench-vs-ogr.sh`）で `ogr2ogr` の約 2.2 倍の速度（shpx 28.46 s / ogr2ogr 62.84 s / 比 0.453）を計測し、ROADMAP の v0.3 完了基準（`shpx ≤ 2.0 × ogr2ogr`）をクリア。詳細は `docs/POSTGIS.md` の Benchmark 節。
+
+### Performance
+
+- **shpx-driver-postgis (v0.3 cycle 3c)**: `crates/shpx-driver-postgis/benches/copy_binary.rs` + `gen.rs` で criterion ベンチ harness を整備（10 列 × 任意行数の合成 Parquet を `target/bench-data/` にキャッシュ生成、`SHPX_BENCH_ROWS` で行数切替、`SHPX_TEST_PG_URL` env-gate）。`scripts/bench-vs-ogr.sh` は同 Parquet を shpx と ogr2ogr 双方に流して `/usr/bin/time -p` の wall-clock 中央値を比較し、完了基準を `shpx_secs <= 2.0 * ogr_secs` で判定する。`.github/workflows/bench-smoke.yml` を `workflow_dispatch` 専用で追加し、CI 上で bench infra の smoke 確認が可能。`tests/bulk_roundtrip.rs::bulk_all_types_together` でベンチスキーマと 1:1 揃った 10 列同居 1k 行の bit-identical 往復テストを追加し、bench データの回帰検出器を兼ねる。
 
 ### Added
 
@@ -77,6 +83,7 @@ v0.1 マイルストーン「コア骨格 / SHP ↔ GeoParquet PoC」のリリ�
 - PostGIS / SQL Server / SpatiaLite / GeoPackage / GeoJSON / FlatGeobuf / CSV は後続マイルストーン (v0.2–v0.5) で対応する。
 - ライセンスは v1.0 までに最終決定する（MIT / Apache-2.0 dual を想定）。
 
-[Unreleased]: https://github.com/jumboly/shpx/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/jumboly/shpx/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/jumboly/shpx/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jumboly/shpx/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jumboly/shpx/releases/tag/v0.1.0

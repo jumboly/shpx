@@ -59,8 +59,7 @@ shpx drivers
 
 ## ステータス
 
-v0.2.0 リリース済み（2026-04-25）。次マイルストーン v0.3 は PostGIS ドライバ。
-**v0.3 cycle 2 (進行中)**: `pg://` / `postgres://` / `postgresql://` URL での read/write、`COPY BINARY` 自前エンコーダによる `BulkLoadWriter`、`--insert-mode=auto|bulk|batch` CLI フラグ、Decimal128(p, s) ↔ `numeric(p, s)` の双方向対応（bit-identical）。`--where`/`--select`/`--query`、`--create-table` 制御、GIST index、未登録 EPSG の自動 INSERT は cycle 3 で対応予定。詳細は [docs/POSTGIS.md](docs/POSTGIS.md) と [docs/ROADMAP.md](docs/ROADMAP.md)、変更履歴は [CHANGELOG.md](CHANGELOG.md)。
+v0.3.0 リリース済み（2026-04-25）。`shpx-driver-postgis` で `pg://` / `postgres://` / `postgresql://` URL に対応した PostGIS read/write を提供。`COPY BINARY` 自前エンコーダによる `BulkLoadWriter`、`--insert-mode=auto|bulk|batch` / `--where` / `--select` / `--query` / `--create-table` / `--create-index` の各 CLI フラグ、Decimal128(38, 10) / timestamptz / bytea / EWKB の bit-identical 往復、未登録 EPSG の `spatial_ref_sys` 自動 INSERT を含む。10M 行ベンチで `ogr2ogr` の約 2.2 倍の速度（`docs/POSTGIS.md` の Benchmark 節）。次マイルストーン v0.4 は SQL Server (`mssql://`) ドライバ。詳細は [docs/POSTGIS.md](docs/POSTGIS.md) と [docs/ROADMAP.md](docs/ROADMAP.md)、変更履歴は [CHANGELOG.md](CHANGELOG.md)。
 
 ## ライセンス
 
