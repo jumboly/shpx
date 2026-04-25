@@ -1,0 +1,5 @@
+# 開発時は stable channel を使う。
+# MSRV (Minimum Supported Rust Version) は Cargo.toml の workspace.package.rust-version で指定。
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

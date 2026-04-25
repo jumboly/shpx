@@ -1,0 +1,30 @@
+[package]
+name = "shpx-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "shpx CLI（convert / info サブコマンド）"
+
+[lints]
+workspace = true
+
+# CLI バイナリ名は `shpx`。crate 名と分けることでパッケージ名衝突を避ける。
+[[bin]]
+name = "shpx"
+path = "src/main.rs"
+
+[dependencies]
+shpx-core           = { path = "../shpx-core" }
+shpx-geom           = { path = "../shpx-geom" }
+shpx-driver-shp     = { path = "../shpx-driver-shp" }
+shpx-driver-parquet = { path = "../shpx-driver-parquet" }
+clap                = { workspace = true }
+tracing             = { workspace = true }
+tracing-subscriber  = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+tempfile   = { workspace = true }

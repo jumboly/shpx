@@ -1,0 +1,21 @@
+[package]
+name = "shpx-driver-parquet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "shpx 用 GeoParquet ドライバ"
+
+[lints]
+workspace = true
+
+[dependencies]
+shpx-core    = { path = "../shpx-core" }
+shpx-geom    = { path = "../shpx-geom" }
+arrow        = { workspace = true }
+arrow-array  = { workspace = true }
+arrow-schema = { workspace = true }
+parquet      = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }

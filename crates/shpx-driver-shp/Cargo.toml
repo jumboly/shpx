@@ -1,0 +1,20 @@
+[package]
+name = "shpx-driver-shp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "shpx 用 Shapefile (.shp/.dbf/.prj/.cpg) ドライバ"
+
+[lints]
+workspace = true
+
+[dependencies]
+shpx-core    = { path = "../shpx-core" }
+shpx-geom    = { path = "../shpx-geom" }
+arrow-array  = { workspace = true }
+arrow-schema = { workspace = true }
+shapefile    = { workspace = true }
+encoding_rs  = { workspace = true }
+chrono       = { workspace = true }

@@ -1,0 +1,80 @@
+# shpx ワークスペース定義
+#
+# 各ドライバとコアを 1 つの cargo workspace でまとめる。
+# 設計詳細は docs/DESIGN.md を参照。
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/shpx-core",
+    "crates/shpx-geom",
+    "crates/shpx-driver-shp",
+    "crates/shpx-driver-parquet",
+    "crates/shpx-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# MSRV。CI でこのバージョンと最新 stable の双方を検証する。
+rust-version = "1.79"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jumboly/shpx"
+authors = ["shpx contributors"]
+
+[workspace.dependencies]
+# Arrow / Parquet は workspace 全体でバージョンを揃えるため pin する。
+# 公開クレート同士で型が共有されるので、ここを統一しないと workspace 内で
+# `arrow_array::RecordBatch` の不一致が起こる。
+arrow         = "54"
+arrow-array   = "54"
+arrow-schema  = "54"
+parquet       = { version = "54", features = ["arrow"] }
+
+# フォーマット固有
+shapefile     = "0.6"
+
+# CLI / エラー / シリアライズ
+clap          = { version = "4.5", features = ["derive", "wrap_help"] }
+thiserror     = "1"
+serde         = { version = "1", features = ["derive"] }
+serde_json    = "1"
+
+# 文字エンコーディング（cpg ファイル経由の DBF 文字列復号に利用）
+encoding_rs   = "0.8"
+
+# 日時
+chrono        = { version = "0.4", default-features = false, features = ["std"] }
+
+# WKT1 (.prj) から EPSG コードを抽出するヒューリスティクスに利用
+regex         = "1"
+
+# ログ
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# テスト用
+tempfile      = "3"
+assert_cmd    = "2"
+predicates    = "3"
+
+[workspace.lints.rust]
+# `unsafe` は明示的に許可するモジュール以外で禁止。
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+# 既定で広めに warn にし、ノイズが大きい lint は各クレートで個別に allow する。
+all     = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# pedantic のうち実用上ノイズが大きいものを allow する。
+module_name_repetitions = "allow"
+must_use_candidate      = "allow"
+missing_errors_doc      = "allow"
+missing_panics_doc      = "allow"
+# 日本語コメント中の英単語・カタカナを誤検出するため allow。
+doc_markdown            = "allow"
+
+[profile.release]
+lto       = "thin"
+codegen-units = 1
+strip     = "debuginfo"

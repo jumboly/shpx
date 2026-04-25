@@ -1,0 +1,18 @@
+[package]
+name = "shpx-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "shpx 中核トレイト・型・エラー定義"
+
+[lints]
+workspace = true
+
+[dependencies]
+arrow-array  = { workspace = true }
+arrow-schema = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
