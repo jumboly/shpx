@@ -37,8 +37,6 @@ while [ $# -gt 0 ]; do
 done
 
 : "${SHPX_TEST_PG_URL:?SHPX_TEST_PG_URL must be set (e.g. pg://shpx:shpx@localhost:5432/shpx_test)}"
-SHPX_BIN_DEFAULT="cargo run -q -p shpx-cli --release --"
-SHPX_BIN="${SHPX_BIN:-$SHPX_BIN_DEFAULT}"
 OGR2OGR_BIN="${OGR2OGR_BIN:-ogr2ogr}"
 
 # Parquet driver の有無を最初に確認（無ければ早期失敗）。
@@ -47,16 +45,27 @@ if ! "$OGR2OGR_BIN" --formats 2>/dev/null | grep -qi "Parquet"; then
     exit 1
 fi
 
-# bench データを ensure する（criterion bench を 1 回流すことで gen.rs が走る）。
 cd "$(dirname "$0")/.."
 WORKSPACE="$(pwd)"
 BENCH_DATA_DIR="$WORKSPACE/target/bench-data"
 INPUT="$BENCH_DATA_DIR/points_${ROWS}.parquet"
 
+# shpx は release バイナリを直接呼ぶ。`cargo run` のオーバーヘッド (依存解析や
+# fingerprint チェックの 0.5〜1 秒) を計測ノイズとして混ぜない。
+if [ -z "${SHPX_BIN:-}" ]; then
+    SHPX_BIN_PATH="$WORKSPACE/target/release/shpx"
+    if [ ! -x "$SHPX_BIN_PATH" ]; then
+        echo "==> building shpx (release) ..."
+        cargo build --release -p shpx-cli >&2
+    fi
+    SHPX_BIN="$SHPX_BIN_PATH"
+fi
+
+# bench input parquet が無ければ criterion harness の `ensure_parquet` を呼ぶために
+# `cargo bench --quick` を 1 回起動する。bench main の中で gen.rs が動き、その後
+# 1 イテレーション (i.e. PG への書き込みも 1 回) が発火するが、計測本走前なので問題ない。
 if [ ! -f "$INPUT" ]; then
-    echo "==> generating $INPUT (rows=$ROWS) via cargo bench --no-run prep ..."
-    # criterion harness 内 ensure_parquet を呼ぶための短絡として、bench を sample_size 1 で走らせる。
-    # 既存生成済みでない場合のみ。
+    echo "==> generating $INPUT (rows=$ROWS) via cargo bench prep ..."
     SHPX_BENCH_ROWS="$ROWS" cargo bench -q -p shpx-driver-postgis --bench copy_binary -- \
         --quick --warm-up-time 1 --measurement-time 1 || true
 fi
