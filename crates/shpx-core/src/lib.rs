@@ -6,4 +6,16 @@
 //!
 //! 設計の詳細は `docs/DESIGN.md` を参照。
 
-// 中身は後続コミットで実装する。
+pub mod capabilities;
+pub mod crs;
+pub mod driver;
+pub mod error;
+pub mod opts;
+pub mod uri;
+
+pub use capabilities::{Capabilities, StringEncoding};
+pub use crs::{Crs, WktFlavor};
+pub use driver::{BulkLoadWriter, Driver, LayerReader, LayerWriter};
+pub use error::{Error, Result};
+pub use opts::{OnLoss, ReadOpts, WriteOpts};
+pub use uri::Uri;
