@@ -12,6 +12,7 @@ use shpx_core::{inventory, Driver, DriverRegistration, Error, Uri};
 // リンクする。これらを `use _` しないとリンカが未参照と判断して
 // crate ごと strip し、`inventory::iter` が空になる。
 use shpx_driver_csv as _;
+use shpx_driver_geojson as _;
 use shpx_driver_parquet as _;
 use shpx_driver_shp as _;
 
@@ -102,6 +103,34 @@ mod tests {
         let d = select_driver(&Uri::from_path("/tmp/sample.tsv"));
         assert!(d.is_some());
         assert_eq!(d.unwrap().name(), "csv");
+    }
+
+    #[test]
+    fn select_driver_for_geojson() {
+        let d = select_driver(&Uri::from_path("/tmp/sample.geojson"));
+        assert!(d.is_some());
+        assert_eq!(d.unwrap().name(), "geojson");
+    }
+
+    #[test]
+    fn select_driver_for_geojsonl() {
+        let d = select_driver(&Uri::from_path("/tmp/sample.geojsonl"));
+        assert!(d.is_some());
+        assert_eq!(d.unwrap().name(), "geojson");
+    }
+
+    #[test]
+    fn select_driver_for_ndjson() {
+        let d = select_driver(&Uri::from_path("/tmp/sample.ndjson"));
+        assert!(d.is_some());
+        assert_eq!(d.unwrap().name(), "geojson");
+    }
+
+    #[test]
+    fn select_driver_for_jsonl() {
+        let d = select_driver(&Uri::from_path("/tmp/sample.jsonl"));
+        assert!(d.is_some());
+        assert_eq!(d.unwrap().name(), "geojson");
     }
 
     #[test]

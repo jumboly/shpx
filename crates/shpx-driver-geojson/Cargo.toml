@@ -1,0 +1,26 @@
+[package]
+name = "shpx-driver-geojson"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "shpx 用 GeoJSON / GeoJSON Lines (NDJSON) ドライバ"
+
+[lints]
+workspace = true
+
+[dependencies]
+shpx-core    = { path = "../shpx-core" }
+shpx-geom    = { path = "../shpx-geom" }
+arrow-array  = { workspace = true }
+arrow-schema = { workspace = true }
+chrono       = { workspace = true }
+geojson      = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+tracing      = { workspace = true }
+
+[dev-dependencies]
+tempfile           = { workspace = true }
+tracing-subscriber = { workspace = true }
