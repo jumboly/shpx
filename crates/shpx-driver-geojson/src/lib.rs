@@ -48,15 +48,12 @@ impl Driver for GeoJsonDriver {
         Capabilities {
             read: true,
             write: true,
-            // FeatureCollection / GeoJSONL のいずれも先頭から逐次読みのため。
             random_access: false,
             bulk_load: false,
-            // GeoJSON はバイナリ列を表現できない（base64 経由は v1 で検討、`docs/GEOJSON.md` 参照）。
+            // base64 経由でのバイナリ表現は v1 で検討（`docs/GEOJSON.md` 参照）。
             supports_blob: false,
-            // Decimal は JSON Number へ正確に詰めると f64 経由で精度欠落する。
-            // 文字列降格 (Warn 経路) に留めるため driver capability としては未サポート扱い。
+            // Decimal は JSON Number に詰めると f64 経由で精度欠落するため、文字列降格に留める。
             supports_decimal: false,
-            // ISO 8601 文字列で +HH:MM オフセットを保持できる（CSV と同じ）。
             supports_timestamp_tz: true,
             // RFC 8259 / RFC 7946 上 JSON は UTF-8 固定。
             string_encoding: StringEncoding::Fixed("utf-8"),

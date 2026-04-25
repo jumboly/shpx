@@ -1,9 +1,7 @@
 //! GeoJSON / GeoJSONL 固有オプションの解決。
 //!
-//! v0.2 サイクル 2 では指定可能なドライバ固有オプションが少ないため、
-//! 暫定で **環境変数経由** で受け取る（CSV と同じ方針）。
-//! 次サイクル以降 `WriteOpts.driver_specific` を導入する計画
-//! （`docs/GEOJSON.md` の Future work 参照）。
+//! `WriteOpts` / `ReadOpts` に driver-specific 拡張機構が無いため、
+//! 暫定で環境変数経由で受け取る（`docs/GEOJSON.md` 参照）。
 
 use shpx_core::{ReadOpts, Result, Uri, WriteOpts};
 
@@ -24,12 +22,10 @@ pub enum OutputFormat {
 
 impl OutputFormat {
     /// scheme（拡張子の小文字化結果）から出力形式を決める。
-    /// 未知 scheme は `FeatureCollection` を既定にする（呼び出し元で scheme は検証済みの想定）。
     #[must_use]
     pub fn from_scheme(scheme: &str) -> Self {
         match scheme {
             "geojsonl" | "ndjson" | "jsonl" => Self::Lines,
-            // "geojson" およびその他は FeatureCollection 扱い。
             _ => Self::FeatureCollection,
         }
     }

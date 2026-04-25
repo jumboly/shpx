@@ -1,8 +1,8 @@
 //! ドライバ共通ユーティリティ。
 //!
-//! `shpx-driver-csv` / `shpx-driver-shp` の同名ファイルとほぼ同じ構造を取る。
-//! 損失処理 / Date32 変換 / 文字列 → `Error::Driver` ラップは 3 ドライバで重複しており、
-//! v0.3 で `shpx-core` 側に切り出す予定（`docs/GEOJSON.md` の Future work 参照）。
+//! 損失処理 / Date32 変換 / 文字列 → `Error::Driver` ラップは
+//! `shpx-driver-csv` / `shpx-driver-shp` と重複しており、`shpx-core` 側への
+//! 切り出しを検討中（`docs/GEOJSON.md` の Future work 参照）。
 
 use std::sync::OnceLock;
 
@@ -13,15 +13,13 @@ pub const DRIVER_NAME: &str = "geojson";
 
 /// 損失種別の識別子。
 pub mod loss_kind {
-    /// GeoJSON はバイナリ列を表現できないため、geometry 以外の `Binary` 列は損失扱いにする。
     pub const BINARY_ON_GEOJSON: &str = "binary-on-geojson";
-    /// `List` / `Struct` 等の構造化列は v0.2 サイクル 2 では未サポート。
     pub const STRUCTURED_ON_GEOJSON: &str = "structured-on-geojson";
-    /// JSON `number` は IEEE754 で精度が落ちるため Decimal は文字列降格 (Warn) または skip。
+    /// JSON `number` は IEEE754 で精度が落ちるため Decimal は文字列降格または skip。
     pub const DECIMAL_ON_GEOJSON: &str = "decimal-on-geojson";
-    /// `UInt64` で `i64::MAX` を超える値（JSON `number` で正確に表現できないため）。
+    /// `UInt64` で `i64::MAX` を超える値（JSON Number で `as_i64()` が None を返し roundtrip しないため）。
     pub const UINT64_OVERFLOW_ON_GEOJSON: &str = "uint64-overflow-on-geojson";
-    /// `f32`/`f64` の `NaN` / `Infinity`（RFC 8259 で JSON Number 表現禁止）。
+    /// RFC 8259 で JSON Number として禁じられている NaN / Infinity。
     pub const NONFINITE_FLOAT_ON_GEOJSON: &str = "nonfinite-float-on-geojson";
 }
 
@@ -56,7 +54,6 @@ pub fn apply_on_loss(kind: &'static str, field: &str, on_loss: OnLoss) -> Result
 }
 
 /// Date32 (`days since 1970-01-01`) ↔ `NaiveDate` 変換のヘルパ。
-/// CSV / SHP ドライバ側と同じ実装の複製（v0.3 で `shpx-core` に集約予定）。
 pub mod date32 {
     use super::OnceLock;
     use chrono::NaiveDate;

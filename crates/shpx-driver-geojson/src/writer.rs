@@ -4,8 +4,8 @@
 //! - GeoJSONL (`.geojsonl` / `.ndjson` / `.jsonl`): 1 行 1 Feature
 //!
 //! いずれの形式でも RFC 7946 §4 に従い、出力 CRS は EPSG:4326 のみ許可する。
-//! それ以外の CRS は [`Error::Crs`] で停止し、ユーザに reproject を促す
-//! （reprojection は v0.3 で追加予定。`docs/GEOJSON.md` の Future work 参照）。
+//! それ以外の CRS は [`Error::Crs`] で停止し、ユーザに upstream での reproject を促す。
+//! （driver 内蔵 reprojection は `docs/GEOJSON.md` の Future work 参照。）
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -60,7 +60,7 @@ impl GeoJsonWriter {
             Some(c) => {
                 return Err(Error::Crs(format!(
                     "geojson writer requires EPSG:4326 (RFC 7946); got {:?}. \
-                     Reproject upstream (`--target-crs EPSG:4326` is planned for v0.3).",
+                     Reproject upstream before writing.",
                     c.epsg_code()
                 )));
             }
@@ -180,10 +180,9 @@ fn build_feature_json(
     skipped_cols: &[usize],
     on_loss: OnLoss,
 ) -> Result<JsonValue> {
-    // properties は schema field 順を保つため、ordered なら preserve_order を有効化する必要がある。
-    // serde_json 既定 (BTreeMap) でも生成順は alphabetical だが、ここでは生成 → そのまま
-    // serialize するため、alphabetical 表示でも roundtrip 後の Arrow 列順は維持される
-    // （reader 側が「最初に出現したキー順」で列を並べる）。
+    // 出力 JSON のキー順は serde_json::Map (BTreeMap) によって alphabetical になる。
+    // roundtrip 時の Arrow 列順は reader 側の「最初の出現順」で復元されるため、
+    // ここで挿入順を保つ必要は無い。
     let mut properties = JsonMap::new();
     for (i, field) in fields.iter().enumerate() {
         if Some(i) == geom_index || skipped_cols.contains(&i) {
@@ -193,15 +192,12 @@ fn build_feature_json(
         properties.insert(field.name().clone(), value);
     }
 
-    // geometry: WKB → Geom → geojson::Geometry → JSON Value
     let geometry = match geom_index {
         Some(gi) if cols[gi].is_null(row) => JsonValue::Null,
         Some(gi) => {
             let bytes = cols[gi].as_binary::<i32>().value(row);
             let geom = wkb::decode(bytes)?;
-            let geometry = geom_to_geometry(&geom);
-            // geojson::Geometry は serde::Serialize なので serde_json::to_value で完了。
-            serde_json::to_value(&geometry).map_err(|e| driver_err(&e))?
+            serde_json::to_value(geom_to_geometry(&geom)).map_err(|e| driver_err(&e))?
         }
         None => JsonValue::Null,
     };
@@ -234,10 +230,10 @@ fn plan_skipped_columns(
             | DataType::LargeList(_)
             | DataType::Struct(_)
             | DataType::Map(_, _) => {
+                // Warn 経路でも JSON 文字列化が未実装のため、Skip 以外は書き出し時に拒否する。
                 if apply_on_loss(loss_kind::STRUCTURED_ON_GEOJSON, f.name(), on_loss)? {
-                    // Warn でも v0.2 では JSON 文字列化を実装しないため、書き出し時に拒否する。
                     return Err(driver_msg(format!(
-                        "structured column `{}` ({:?}) is not supported by GeoJSON writer in v0.2",
+                        "structured column `{}` ({:?}) is not supported by GeoJSON writer",
                         f.name(),
                         f.data_type()
                     )));
@@ -283,7 +279,6 @@ fn arrow_value_to_json(
         ),
         DataType::Float64 => float_to_json(primitive::<Float64Type>(array, row), name, on_loss),
         DataType::Decimal128(_p, s) => {
-            // 文字列降格は損失扱い。Warn で進む、Error で停止、Skip は plan_skipped_columns 側で扱う。
             apply_on_loss(loss_kind::DECIMAL_ON_GEOJSON, name, on_loss)?;
             Ok(JsonValue::String(format_decimal128(
                 primitive::<Decimal128Type>(array, row),
@@ -322,10 +317,8 @@ fn arrow_value_to_json(
                 name,
             )?))
         }
-        DataType::Binary | DataType::LargeBinary => {
-            // plan_skipped_columns で扱い済み。Warn 経路で残った場合は null に潰す。
-            Ok(JsonValue::Null)
-        }
+        // plan_skipped_columns で Skip 経路は除外済み。Warn 経路で残った場合は null に潰す。
+        DataType::Binary | DataType::LargeBinary => Ok(JsonValue::Null),
         other => Err(driver_msg(format!(
             "unsupported Arrow → JSON mapping for field `{name}`: {other:?}"
         ))),
@@ -361,10 +354,9 @@ fn float_to_json(v: f64, field: &str, on_loss: OnLoss) -> Result<JsonValue> {
     Ok(JsonValue::Null)
 }
 
-// 以下は CSV writer から複製。3 ドライバ目で重複が出た時点で `shpx-core` に共通化する予定
-// （プラン K: Future work）。
+// 以下は CSV writer からの複製。3 ドライバで重複したため `shpx-core` への
+// 共通化を `docs/GEOJSON.md` の Future work に記載済み。
 
-/// `Decimal128(p, s)` を文字列に整形する。CSV writer の同名関数と同実装。
 fn format_decimal128(value: i128, scale: i8) -> String {
     if scale <= 0 {
         return value.to_string();

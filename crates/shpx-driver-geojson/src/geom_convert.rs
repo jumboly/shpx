@@ -1,8 +1,7 @@
 //! `geojson::Geometry` ↔ `shpx_geom::Geom` の双方向変換。
 //!
-//! v0.2 サイクル 2 では XY 座標のみをサポートする。3D (Z) / 4D (M) 座標と
-//! `GeometryCollection` は明示的に拒否し、上位に [`shpx_core::Error::Geometry`] を返す。
-//! Z/M 対応は v0.3 で `shpx_geom::Geom` 側を拡張した時点で同時に解禁する。
+//! XY 座標のみ。3D (Z) / 4D (M) 座標と `GeometryCollection` は
+//! [`shpx_core::Error::Geometry`] で拒否する（`shpx_geom::Geom` に対応 variant が無いため）。
 
 use geojson::{Geometry as GjGeometry, Value as GjValue};
 use shpx_core::{Error, Result};
@@ -10,11 +9,13 @@ use shpx_geom::wkb::Geom;
 
 /// `geojson::Geometry` を `shpx_geom::Geom` に変換する。
 ///
-/// - 3D / 4D 座標、`GeometryCollection` は [`Error::Geometry`] で拒否する
-/// - `bbox` / `foreign_members` は読み捨てる（ジオメトリ本体には影響しないため）
+/// `bbox` / `foreign_members` は読み捨てる（ジオメトリ本体には影響しないため）。
 pub fn geometry_to_geom(g: &GjGeometry) -> Result<Geom> {
     match &g.value {
-        GjValue::Point(pos) => Ok(Geom::Point(xy_from_pos(pos)?.0, xy_from_pos(pos)?.1)),
+        GjValue::Point(pos) => {
+            let (x, y) = xy_from_pos(pos)?;
+            Ok(Geom::Point(x, y))
+        }
         GjValue::LineString(positions) => Ok(Geom::LineString(xy_vec(positions)?)),
         GjValue::Polygon(rings) => Ok(Geom::Polygon(xy_rings(rings)?)),
         GjValue::MultiPoint(positions) => Ok(Geom::MultiPoint(xy_vec(positions)?)),
@@ -31,7 +32,7 @@ pub fn geometry_to_geom(g: &GjGeometry) -> Result<Geom> {
                 .collect::<Result<Vec<_>>>()?,
         )),
         GjValue::GeometryCollection(_) => Err(Error::Geometry(
-            "GeometryCollection is not supported in v0.2 cycle 2".into(),
+            "GeometryCollection is not supported".into(),
         )),
     }
 }
@@ -56,13 +57,11 @@ pub fn geom_to_geometry(g: &Geom) -> GjGeometry {
     GjGeometry::new(value)
 }
 
-/// GeoJSON `position` (`[x, y]`) を XY タプルへ取り出す。
-/// 3D / 4D は将来 v0.3 で対応するまでは明示拒否する。
 fn xy_from_pos(pos: &[f64]) -> Result<(f64, f64)> {
     match pos.len() {
         2 => Ok((pos[0], pos[1])),
         n @ (3 | 4) => Err(Error::Geometry(format!(
-            "{n}D coordinates are not supported in v0.2 cycle 2 (Z/M is planned for v0.3)"
+            "{n}D coordinates are not supported (Z/M support is planned for a future version)"
         ))),
         other => Err(Error::Geometry(format!(
             "invalid GeoJSON position: expected 2 elements (x, y), got {other}"

@@ -1,18 +1,10 @@
 //! GeoJSON / GeoJSONL を Arrow `RecordBatch` ストリームとして読み出す。
 //!
-//! v0.2 サイクル 2 では FeatureCollection / 単発 Feature / GeoJSONL のいずれでも
 //! 全 Feature を一度メモリにロードしてから `batches()` で 4096 件ずつ流す
-//! （巨大ファイルの streaming 読みは v0.3 の Future work）。
+//! （巨大ファイルの streaming 読みは `docs/GEOJSON.md` の Future work 参照）。
 //!
 //! 属性 (properties) の Arrow 型は **全 Feature を 1 回スニフ** して決める。
-//! 同列に異なる型が混在する場合の昇格規則は以下:
-//!
-//! - `Int` ↔ `Int` → `Int64`
-//! - `Int` ↔ `Float`（順不問）→ `Float64`
-//! - `Bool` ↔ `Bool` → `Boolean`
-//! - `String` ↔ `String` → `Utf8`
-//! - 異種混在（例: `Int` と `String`）→ `Utf8`（値は `Value::to_string()` で詰める）
-//! - 配列・オブジェクト出現 → `Utf8` へ降格 + `tracing::warn!` を 1 度だけ出す
+//! 昇格規則は `docs/GEOJSON.md` 「properties の型推論」章を参照。
 
 use std::collections::HashMap;
 use std::fs;
@@ -103,27 +95,32 @@ fn read_text(path: &PathBuf) -> Result<String> {
 /// FeatureCollection 全体を `Vec<Feature>` と top-level CRS にパースする。
 /// 単発 `Feature` も許容（1 件入りの Vec として返す）。
 fn parse_feature_collection(body: &str) -> Result<(Vec<Feature>, Option<Crs>)> {
-    let value: JsonValue = serde_json::from_str(body).map_err(|e| driver_err(&e))?;
-
-    // 先に top-level `crs` メンバを抜く。FeatureCollection / Feature どちらにも付与されている場合がある。
-    let crs = value
-        .as_object()
-        .and_then(|o| o.get("crs"))
-        .map(parse_crs_member)
-        .transpose()?
-        .flatten();
-
-    let gj: GeoJson = serde_json::from_value(value).map_err(|e| driver_err(&e))?;
-    let features = match gj {
-        GeoJson::FeatureCollection(fc) => fc.features,
-        GeoJson::Feature(f) => vec![f],
-        GeoJson::Geometry(_) => {
-            return Err(driver_msg(
-                "top-level Geometry is not supported (expected FeatureCollection or Feature)",
-            ));
+    let gj: GeoJson = body.parse().map_err(|e| driver_err(&e))?;
+    match gj {
+        GeoJson::FeatureCollection(fc) => {
+            let crs = fc
+                .foreign_members
+                .as_ref()
+                .and_then(|m| m.get("crs"))
+                .map(parse_crs_member)
+                .transpose()?
+                .flatten();
+            Ok((fc.features, crs))
         }
-    };
-    Ok((features, crs))
+        GeoJson::Feature(f) => {
+            let crs = f
+                .foreign_members
+                .as_ref()
+                .and_then(|m| m.get("crs"))
+                .map(parse_crs_member)
+                .transpose()?
+                .flatten();
+            Ok((vec![f], crs))
+        }
+        GeoJson::Geometry(_) => Err(driver_msg(
+            "top-level Geometry is not supported (expected FeatureCollection or Feature)",
+        )),
+    }
 }
 
 /// GeoJSON Lines (NDJSON) を `Vec<Feature>` にパースする。
@@ -217,24 +214,19 @@ fn parse_crs_name(name: &str) -> Result<Crs> {
 
 /// 全 Feature の properties をスニフして列計画を作る。
 ///
-/// 列順は **最初の出現順**（後続 Feature で初登場するキーは末尾に append）。
-/// すべて null / 配列 / オブジェクトのみだった列は `Utf8` に降格する。
+/// 列順は最初の出現順（後続 Feature で初登場するキーは末尾に append）。
 fn infer_columns(features: &[Feature]) -> Vec<ColumnPlan> {
-    use std::collections::BTreeSet;
-    // 出現順（重複を弾くため BTreeSet で seen 管理しつつ Vec に push）。
     let mut order: Vec<String> = Vec::new();
-    let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut state: HashMap<String, ColumnState> = HashMap::new();
 
     for f in features {
         let Some(props) = &f.properties else { continue };
         for (k, v) in props {
-            if !seen.contains(k) {
-                seen.insert(k.clone());
+            let entry = state.entry(k.clone());
+            if matches!(entry, std::collections::hash_map::Entry::Vacant(_)) {
                 order.push(k.clone());
             }
-            let st = state.entry(k.clone()).or_default();
-            st.update(v, k);
+            entry.or_default().update(v, k);
         }
     }
 
@@ -250,11 +242,8 @@ fn infer_columns(features: &[Feature]) -> Vec<ColumnPlan> {
         .collect()
 }
 
-/// 1 列分の型推論状態。
 #[derive(Debug, Default, Clone)]
 struct ColumnState {
-    /// `null` 以外の値が 1 件でもあったか。
-    has_value: bool,
     /// 累積した代表型。
     inferred: Option<Inferred>,
     /// 配列 / オブジェクトが出現した（→ Utf8 降格 + 警告）。
@@ -274,13 +263,11 @@ enum Inferred {
 impl ColumnState {
     fn update(&mut self, v: &JsonValue, name: &str) {
         match v {
-            JsonValue::Null => {} // 型不変、nullable 判定は build 時に行う
+            JsonValue::Null => {}
             JsonValue::Bool(_) => {
-                self.has_value = true;
                 self.inferred = Some(merge(self.inferred, Inferred::Bool));
             }
             JsonValue::Number(n) => {
-                self.has_value = true;
                 let t = if n.is_i64() || n.as_u64().is_some_and(|v| i64::try_from(v).is_ok()) {
                     Inferred::Int
                 } else {
@@ -289,11 +276,9 @@ impl ColumnState {
                 self.inferred = Some(merge(self.inferred, t));
             }
             JsonValue::String(_) => {
-                self.has_value = true;
                 self.inferred = Some(merge(self.inferred, Inferred::String));
             }
             JsonValue::Array(_) | JsonValue::Object(_) => {
-                self.has_value = true;
                 if !self.saw_structured {
                     tracing::warn!(
                         target: "shpx::geojson",
@@ -309,11 +294,9 @@ impl ColumnState {
     }
 
     fn into_arrow_type(self) -> DataType {
-        // 構造化値が出ていたら強制 Utf8。
         if self.saw_structured {
             return DataType::Utf8;
         }
-        // None は全 null 列。値が無いので最も無害な Utf8 として扱う。
         match self.inferred {
             Some(Inferred::Bool) => DataType::Boolean,
             Some(Inferred::Int) => DataType::Int64,
@@ -348,7 +331,7 @@ fn unify_geometry_type(features: &[Feature]) -> Result<GeometryType> {
             GjValue::MultiPolygon(_) => GeometryType::MultiPolygon,
             GjValue::GeometryCollection(_) => {
                 return Err(Error::Geometry(
-                    "GeometryCollection is not supported in v0.2 cycle 2".into(),
+                    "GeometryCollection is not supported".into(),
                 ));
             }
         };
