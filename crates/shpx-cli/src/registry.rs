@@ -7,7 +7,10 @@ use shpx_core::{Driver, Uri};
 /// ビルド時に組み込まれている全 Driver を返す。
 #[must_use]
 pub fn all_drivers() -> Vec<Box<dyn Driver>> {
-    vec![Box::new(shpx_driver_shp::ShpDriver::new())]
+    vec![
+        Box::new(shpx_driver_shp::ShpDriver::new()),
+        Box::new(shpx_driver_parquet::ParquetDriver::new()),
+    ]
 }
 
 /// URI のスキーム (拡張子) から該当 Driver を解決する。
@@ -48,5 +51,12 @@ mod tests {
     fn all_drivers_includes_shp() {
         let drivers = all_drivers();
         assert!(drivers.iter().any(|d| d.name() == "shp"));
+    }
+
+    #[test]
+    fn select_driver_for_parquet() {
+        let d = select_driver(&Uri::from_path("/tmp/sample.parquet"));
+        assert!(d.is_some());
+        assert_eq!(d.unwrap().name(), "parquet");
     }
 }

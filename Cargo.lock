@@ -1318,6 +1318,8 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 name = "shpx-cli"
 version = "0.1.0"
 dependencies = [
+ "arrow-array",
+ "arrow-schema",
  "assert_cmd",
  "clap",
  "predicates",
@@ -1353,6 +1355,9 @@ dependencies = [
  "serde_json",
  "shpx-core",
  "shpx-geom",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
