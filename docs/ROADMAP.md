@@ -2,7 +2,7 @@
 
 各マイルストーンは「実装 → テスト → 1 commit でリリース可能な状態」を完了基準とする。
 
-## v0.1 — コア骨格 / SHP ↔ GeoParquet PoC
+## v0.1 — コア骨格 / SHP ↔ GeoParquet PoC（リリース済み: 2026-04-25）
 
 **スコープ**:
 - `shpx-core` クレート: `Driver` / `LayerReader` / `LayerWriter` / `BulkLoadWriter` トレイト、`Schema` / `Capabilities` / `Crs` 型
@@ -12,12 +12,12 @@
 - `shpx-cli`: `convert` / `info` サブコマンド
 
 **完了基準**:
-- [ ] `shpx convert input.shp output.parquet` で属性順保存 + WKB ジオメトリで往復可能
-- [ ] `shpx convert input.parquet output.shp` も動く
-- [ ] `shpx info <file>` でレコード数・スキーマ・CRS を表示
-- [ ] decimal / Date32 / Utf8 / Binary（GPKG/Parquet 側）の保全テスト pass
-- [ ] CRS は EPSG コードのみで保持・伝搬（reprojection は v0.2）
-- [ ] `cargo test --workspace` 緑、clippy warning ゼロ
+- [x] `shpx convert input.shp output.parquet` で属性順保存 + WKB ジオメトリで往復可能
+- [x] `shpx convert input.parquet output.shp` も動く
+- [x] `shpx info <file>` でレコード数・スキーマ・CRS を表示
+- [x] decimal / Date32 / Utf8 / Binary（GPKG/Parquet 側）の保全テスト pass
+- [x] CRS は EPSG コードのみで保持・伝搬（reprojection は v0.2）
+- [x] `cargo test --workspace` 緑、clippy warning ゼロ
 
 **スコープ外（次マイルストーン以降）**:
 - CRS 変換（reprojection）

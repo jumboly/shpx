@@ -44,7 +44,7 @@ shpx drivers
 
 ## ステータス
 
-設計フェーズ。実装は v0.1（SHP ↔ GeoParquet PoC）から着手予定。
+v0.1.0 リリース済み（2026-04-25）。SHP ↔ GeoParquet を `cargo run -- convert` で利用可能。次マイルストーンは v0.2（GPKG / GeoJSON / CSV / FlatGeobuf + reprojection）。変更履歴は [CHANGELOG.md](CHANGELOG.md)。
 
 ## ライセンス
 
