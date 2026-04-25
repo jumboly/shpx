@@ -18,3 +18,8 @@ arrow-schema = { workspace = true }
 shapefile    = { workspace = true }
 encoding_rs  = { workspace = true }
 chrono       = { workspace = true }
+tracing      = { workspace = true }
+
+[dev-dependencies]
+tempfile           = { workspace = true }
+tracing-subscriber = { workspace = true }
