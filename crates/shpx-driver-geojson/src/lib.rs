@@ -19,6 +19,7 @@ pub mod geom_convert;
 pub mod options;
 pub mod reader;
 pub mod util;
+pub mod writer;
 
 /// GeoJSON ドライバ。ステートレスな factory。
 #[derive(Debug, Default, Clone, Copy)]
@@ -70,15 +71,13 @@ impl Driver for GeoJsonDriver {
 
     fn open_write(
         &self,
-        _uri: &Uri,
-        _schema: SchemaRef,
-        _crs: Option<Crs>,
-        _opts: &WriteOpts,
+        uri: &Uri,
+        schema: SchemaRef,
+        crs: Option<Crs>,
+        opts: &WriteOpts,
     ) -> Result<Box<dyn LayerWriter>> {
-        // Writer は次コミットで実装する。骨格コミットでは not implemented を返す。
-        Err(util::driver_msg(
-            "open_write is not yet implemented (skeleton commit)",
-        ))
+        let w = writer::GeoJsonWriter::open(uri, schema, crs.as_ref(), opts)?;
+        Ok(Box::new(w))
     }
 }
 

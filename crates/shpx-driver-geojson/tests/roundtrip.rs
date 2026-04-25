@@ -6,18 +6,17 @@
 use std::sync::Arc;
 
 use arrow_array::{
-    builder::{BinaryBuilder, StringBuilder},
+    builder::{BinaryBuilder, Int64Builder, StringBuilder},
     Array, ArrayRef, BinaryArray, RecordBatch,
 };
 use arrow_schema::{DataType, Field, Schema};
 use shpx_core::{
     schema::{GeometryMeta, GeometryType, GEOMETRY_META_KEY},
-    Crs, Driver, ReadOpts, Uri,
+    Crs, Driver, ReadOpts, Uri, WriteOpts,
 };
 use shpx_driver_geojson::GeoJsonDriver;
 use shpx_geom::wkb::{self, Geom};
 
-#[allow(dead_code)]
 fn schema_with_geom(extra: Vec<Field>, gt: GeometryType, crs: Option<Crs>) -> Arc<Schema> {
     let mut fields = extra;
     let meta = GeometryMeta::wkb(gt, crs);
@@ -374,15 +373,268 @@ fn ndjson_extension_uses_geojson_driver() {
     assert_eq!(batches[0].num_rows(), 1);
 }
 
-// ---- Writer 連携テスト用のスタブ（次コミットで body 追加） ----
+// ---- Writer + Roundtrip テスト ----
 
-#[allow(dead_code)]
-fn _writer_helpers_placeholder(
-    _schema: Arc<Schema>,
-    _geoms: &[Option<Geom>],
-    _attrs: Vec<ArrayRef>,
-    _bb: BinaryBuilder,
-    _sb: StringBuilder,
+fn default_write_opts() -> WriteOpts {
+    WriteOpts {
+        overwrite: true,
+        ..Default::default()
+    }
+}
+
+fn write_geoms(
+    path: &std::path::Path,
+    schema: Arc<Schema>,
+    geoms: &[Option<Geom>],
+    attrs: Vec<ArrayRef>,
+    crs: Option<Crs>,
+    opts: &WriteOpts,
 ) {
-    // Writer roundtrip テストは Commit 5 / 6 で追加する。
+    let mut bb = BinaryBuilder::new();
+    for g in geoms {
+        match g {
+            Some(g) => bb.append_value(wkb::encode(g).unwrap()),
+            None => bb.append_null(),
+        }
+    }
+    let mut cols = attrs;
+    cols.push(Arc::new(bb.finish()) as ArrayRef);
+    let batch = RecordBatch::try_new(schema.clone(), cols).unwrap();
+
+    let driver = GeoJsonDriver::new();
+    let uri = Uri::from_path(path.to_string_lossy().to_string());
+    let mut w = driver.open_write(&uri, schema, crs, opts).unwrap();
+    w.write_batch(&batch).unwrap();
+    w.finish().unwrap();
+}
+
+#[test]
+fn point_roundtrip_feature_collection() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("point_rt.geojson");
+    let schema = schema_with_geom(
+        vec![Field::new("name", DataType::Utf8, true)],
+        GeometryType::Point,
+        Some(Crs::from_epsg(4326)),
+    );
+    let mut name = StringBuilder::new();
+    name.append_value("alpha");
+    name.append_value("beta");
+    let attrs: Vec<ArrayRef> = vec![Arc::new(name.finish())];
+    write_geoms(
+        &p,
+        schema.clone(),
+        &[Some(Geom::Point(1.0, 2.0)), Some(Geom::Point(-3.5, 4.25))],
+        attrs,
+        Some(Crs::from_epsg(4326)),
+        &default_write_opts(),
+    );
+
+    let (_s, _c, batches) = read_back(&p, None);
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].num_rows(), 2);
+    let g = geom_col(&batches[0]);
+    assert_eq!(wkb::decode(g.value(0)).unwrap(), Geom::Point(1.0, 2.0));
+    let name = batches[0]
+        .column_by_name("name")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow_array::StringArray>()
+        .unwrap();
+    assert_eq!(name.value(0), "alpha");
+    assert_eq!(name.value(1), "beta");
+}
+
+#[test]
+fn polygon_with_hole_roundtrip_feature_collection() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("poly_rt.geojson");
+    let schema = schema_with_geom(vec![], GeometryType::Polygon, None);
+    let g = Geom::Polygon(vec![
+        vec![(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)],
+        vec![(1.0, 1.0), (1.0, 2.0), (2.0, 2.0), (2.0, 1.0), (1.0, 1.0)],
+    ]);
+    write_geoms(
+        &p,
+        schema.clone(),
+        &[Some(g.clone())],
+        vec![],
+        None,
+        &default_write_opts(),
+    );
+    let (_s, _c, batches) = read_back(&p, None);
+    assert_eq!(wkb::decode(geom_col(&batches[0]).value(0)).unwrap(), g);
+}
+
+#[test]
+fn multilinestring_roundtrip_feature_collection() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("mls_rt.geojson");
+    let schema = schema_with_geom(vec![], GeometryType::MultiLineString, None);
+    let g = Geom::MultiLineString(vec![
+        vec![(0.0, 0.0), (1.0, 1.0)],
+        vec![(10.0, 10.0), (11.0, 11.0), (12.0, 10.5)],
+    ]);
+    write_geoms(
+        &p,
+        schema.clone(),
+        &[Some(g.clone())],
+        vec![],
+        None,
+        &default_write_opts(),
+    );
+    let (_s, _c, batches) = read_back(&p, None);
+    assert_eq!(wkb::decode(geom_col(&batches[0]).value(0)).unwrap(), g);
+}
+
+#[test]
+fn null_geometry_roundtrip_feature_collection() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("null_rt.geojson");
+    let schema = schema_with_geom(vec![], GeometryType::Geometry, None);
+    write_geoms(
+        &p,
+        schema.clone(),
+        &[None, Some(Geom::Point(1.0, 2.0))],
+        vec![],
+        None,
+        &default_write_opts(),
+    );
+    let (_s, _c, batches) = read_back(&p, None);
+    let g = geom_col(&batches[0]);
+    assert!(g.is_null(0));
+    assert!(!g.is_null(1));
+}
+
+#[test]
+fn typed_int_property_roundtrip_feature_collection() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("int_rt.geojson");
+    let schema = schema_with_geom(
+        vec![Field::new("count", DataType::Int64, true)],
+        GeometryType::Point,
+        None,
+    );
+    let mut count = Int64Builder::new();
+    count.append_value(42);
+    count.append_value(-7);
+    let attrs: Vec<ArrayRef> = vec![Arc::new(count.finish())];
+    write_geoms(
+        &p,
+        schema.clone(),
+        &[Some(Geom::Point(0.0, 0.0)), Some(Geom::Point(1.0, 1.0))],
+        attrs,
+        None,
+        &default_write_opts(),
+    );
+
+    let (read_schema, _c, batches) = read_back(&p, None);
+    assert_eq!(read_schema.field(0).data_type(), &DataType::Int64);
+    let count = batches[0]
+        .column_by_name("count")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow_array::Int64Array>()
+        .unwrap();
+    assert_eq!(count.value(0), 42);
+    assert_eq!(count.value(1), -7);
+}
+
+#[test]
+fn writer_rejects_non_wgs84_crs() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("3857.geojson");
+    let schema = schema_with_geom(vec![], GeometryType::Point, Some(Crs::from_epsg(3857)));
+    let driver = GeoJsonDriver::new();
+    let uri = Uri::from_path(p.to_string_lossy().to_string());
+    let r = driver.open_write(
+        &uri,
+        schema,
+        Some(Crs::from_epsg(3857)),
+        &default_write_opts(),
+    );
+    match r {
+        Err(shpx_core::Error::Crs(msg)) => assert!(msg.contains("EPSG:4326")),
+        Err(other) => panic!("expected Error::Crs, got {other:?}"),
+        Ok(_) => panic!("expected Error::Crs, got Ok(_)"),
+    }
+}
+
+#[test]
+fn writer_accepts_none_and_wgs84() {
+    let dir = tempfile::tempdir().unwrap();
+    let schema = schema_with_geom(vec![], GeometryType::Point, None);
+    let driver = GeoJsonDriver::new();
+
+    // None
+    let p1 = dir.path().join("none.geojson");
+    let w = driver
+        .open_write(
+            &Uri::from_path(p1.to_string_lossy().to_string()),
+            schema.clone(),
+            None,
+            &default_write_opts(),
+        )
+        .unwrap();
+    w.finish().unwrap();
+    assert!(p1.exists());
+
+    // EPSG:4326
+    let p2 = dir.path().join("4326.geojson");
+    let w = driver
+        .open_write(
+            &Uri::from_path(p2.to_string_lossy().to_string()),
+            schema,
+            Some(Crs::from_epsg(4326)),
+            &default_write_opts(),
+        )
+        .unwrap();
+    w.finish().unwrap();
+    assert!(p2.exists());
+}
+
+#[test]
+fn writer_overwrite_false_fails_when_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("exists.geojson");
+    let schema = schema_with_geom(vec![], GeometryType::Point, None);
+    write_geoms(
+        &p,
+        schema.clone(),
+        &[Some(Geom::Point(0.0, 0.0))],
+        vec![],
+        None,
+        &default_write_opts(),
+    );
+
+    let driver = GeoJsonDriver::new();
+    let uri = Uri::from_path(p.to_string_lossy().to_string());
+    let r = driver.open_write(&uri, schema, None, &WriteOpts::default());
+    assert!(matches!(r, Err(shpx_core::Error::Format(_))));
+}
+
+#[test]
+fn feature_collection_writer_emits_correct_envelope() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("envelope.geojson");
+    let schema = schema_with_geom(vec![], GeometryType::Point, None);
+    write_geoms(
+        &p,
+        schema,
+        &[Some(Geom::Point(1.0, 2.0)), Some(Geom::Point(3.0, 4.0))],
+        vec![],
+        None,
+        &default_write_opts(),
+    );
+
+    let raw = std::fs::read_to_string(&p).unwrap();
+    assert!(raw.starts_with(r#"{"type":"FeatureCollection","features":["#));
+    assert!(raw.ends_with("]}"));
+    // 2 件目の feature は `,` で区切られていること（feature 間の `},{`）。
+    assert!(
+        raw.contains("},{"),
+        "expected comma-separated features in `{raw}`"
+    );
+    // Feature 文字列が 2 件あること。
+    assert_eq!(raw.matches(r#""type":"Feature""#).count(), 2);
 }
