@@ -10,6 +10,7 @@ members = [
     "crates/shpx-geom",
     "crates/shpx-driver-shp",
     "crates/shpx-driver-parquet",
+    "crates/shpx-driver-csv",
     "crates/shpx-cli",
 ]
 

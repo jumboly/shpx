@@ -11,6 +11,7 @@ use shpx_core::{inventory, Driver, DriverRegistration, Error, Uri};
 // `inventory::submit!` の副作用（Driver 自動登録）のためだけに driver crate を
 // リンクする。これらを `use _` しないとリンカが未参照と判断して
 // crate ごと strip し、`inventory::iter` が空になる。
+use shpx_driver_csv as _;
 use shpx_driver_parquet as _;
 use shpx_driver_shp as _;
 
@@ -87,6 +88,20 @@ mod tests {
         let d = select_driver(&Uri::from_path("/tmp/sample.parquet"));
         assert!(d.is_some());
         assert_eq!(d.unwrap().name(), "parquet");
+    }
+
+    #[test]
+    fn select_driver_for_csv() {
+        let d = select_driver(&Uri::from_path("/tmp/sample.csv"));
+        assert!(d.is_some());
+        assert_eq!(d.unwrap().name(), "csv");
+    }
+
+    #[test]
+    fn select_driver_for_tsv_uses_csv_driver() {
+        let d = select_driver(&Uri::from_path("/tmp/sample.tsv"));
+        assert!(d.is_some());
+        assert_eq!(d.unwrap().name(), "csv");
     }
 
     #[test]

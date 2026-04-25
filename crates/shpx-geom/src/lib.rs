@@ -5,6 +5,7 @@
 pub mod epsg_wkt1;
 pub mod projjson;
 pub mod wkb;
+pub mod wkt;
 pub mod wkt1_prj;
 
 pub use epsg_wkt1::epsg_to_wkt1;

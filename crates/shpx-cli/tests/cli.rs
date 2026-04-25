@@ -175,8 +175,47 @@ fn drivers_lists_shp_and_parquet() {
         .success()
         .stdout(contains("- shp"))
         .stdout(contains("- parquet"))
+        .stdout(contains("- csv"))
         .stdout(contains("schemes:"))
         .stdout(contains("read+write"));
+}
+
+#[test]
+fn convert_shp_to_csv_then_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let shp = dir.path().join("p.shp");
+    let csv = dir.path().join("p.csv");
+    let back = dir.path().join("back.shp");
+    make_point_shp(&shp);
+
+    // SHP → CSV
+    Command::cargo_bin("shpx")
+        .unwrap()
+        .args([
+            "convert",
+            shp.to_str().unwrap(),
+            csv.to_str().unwrap(),
+            "--overwrite",
+        ])
+        .assert()
+        .success();
+    assert!(csv.exists());
+
+    // CSV → SHP（src-crs で 4326 を補完。CSV はネイティブ CRS を持たないため）
+    Command::cargo_bin("shpx")
+        .unwrap()
+        .args([
+            "convert",
+            csv.to_str().unwrap(),
+            back.to_str().unwrap(),
+            "--overwrite",
+            "--src-crs",
+            "EPSG:4326",
+        ])
+        .assert()
+        .success();
+    assert!(back.exists());
+    assert!(back.with_extension("prj").exists());
 }
 
 #[test]

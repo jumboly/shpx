@@ -19,6 +19,7 @@ path = "src/main.rs"
 shpx-core           = { path = "../shpx-core" }
 shpx-driver-shp     = { path = "../shpx-driver-shp" }
 shpx-driver-parquet = { path = "../shpx-driver-parquet" }
+shpx-driver-csv     = { path = "../shpx-driver-csv" }
 arrow-schema        = { workspace = true }
 clap                = { workspace = true }
 serde_json          = { workspace = true }

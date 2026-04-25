@@ -1334,6 +1334,7 @@ dependencies = [
  "predicates",
  "serde_json",
  "shpx-core",
+ "shpx-driver-csv",
  "shpx-driver-parquet",
  "shpx-driver-shp",
  "shpx-geom",
@@ -1352,6 +1353,22 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "shpx-driver-csv"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "chrono",
+ "csv",
+ "encoding_rs",
+ "shpx-core",
+ "shpx-geom",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

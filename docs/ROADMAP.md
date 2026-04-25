@@ -30,18 +30,22 @@
 **スコープ**:
 - `shpx-driver-gpkg`: GeoPackage reader/writer（`gpkg_contents`/`gpkg_geometry_columns`/`gpkg_spatial_ref_sys` 初期化）
 - `shpx-driver-geojson`: FeatureCollection と GeoJSONL (NDJSON, 1 feature/行) の双方
-- `shpx-driver-csv`: WKT 列 + 属性カラムの CSV/TSV
+- `shpx-driver-csv`: WKT 列 + 属性カラムの CSV/TSV（cycle 1 完了）
 - `shpx-driver-fgb`: FlatGeobuf
 - `shpx-geom` への PROJ 統合（`proj` crate）
 - `--reproject EPSG:xxxx` オプション
 - 静的 driver レジストリを `inventory` 経由に移行（完了）
 - `shpx drivers` / `shpx schema` サブコマンド追加（完了）
+- `shpx-geom::wkt` の encode/decode 追加（cycle 1 完了、CSV/GeoJSON で再利用）
 
 **完了基準**:
 - [ ] 全フォーマット間（5フォーマット × 5）の往復ラウンドトリップテスト
 - [ ] `--reproject EPSG:4326 → EPSG:3857` で既知点が誤差 1cm 以下
 - [ ] GeoJSON は RFC 7946 準拠（WGS84 強制 reproject）、`--geojson-crs-extension` で CRS 保持可能
 - [ ] GeoJSONL は `\n` 区切り、各行が単一 Feature
+
+**進捗メモ**:
+- cycle 1 (CSV): SHP ↔ CSV / Parquet ↔ CSV の往復テストが緑。型推定なし（全列 Utf8）方針で確定。詳細は `docs/CSV.md`。
 
 ---
 

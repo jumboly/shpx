@@ -7,12 +7,12 @@ GDAL 非依存・Rust 製の空間データ相互変換 CLI。Arrow RecordBatch 
 | フォーマット | Read | Write | Bulk |
 |---|:-:|:-:|:-:|
 | Shapefile (`.shp`) | ✓ | ✓ | – |
-| GeoPackage (`.gpkg`) | ✓ | ✓ | TX batch |
+| GeoPackage (`.gpkg`) | – | – | TX batch |
 | GeoParquet (`.parquet`) | ✓ | ✓ | – |
-| FlatGeobuf (`.fgb`) | ✓ | ✓ | – |
-| GeoJSON (`.geojson`) | ✓ | ✓ | – |
-| GeoJSON Lines (`.geojsonl` / `.ndjson`) | ✓ | ✓ | – |
-| CSV w/ WKT (`.csv`) | ✓ | ✓ | – |
+| FlatGeobuf (`.fgb`) | – | – | – |
+| GeoJSON (`.geojson`) | – | – | – |
+| GeoJSON Lines (`.geojsonl` / `.ndjson`) | – | – | – |
+| CSV w/ WKT (`.csv` / `.tsv`) | ✓ | ✓ | – |
 | PostGIS (`pg://`) | ✓ | ✓ | COPY BINARY |
 | SQL Server (`mssql://`) | ✓ | ✓ | staging table → bulk_insert |
 | SpatiaLite (`sqlite://`) | ✓ | ✓ | TX batch |
@@ -44,7 +44,7 @@ shpx drivers
 
 ## ステータス
 
-v0.1.0 リリース済み（2026-04-25）。SHP ↔ GeoParquet を `cargo run -- convert` で利用可能。次マイルストーンは v0.2（GPKG / GeoJSON / CSV / FlatGeobuf + reprojection）。変更履歴は [CHANGELOG.md](CHANGELOG.md)。
+v0.1.0 リリース済み（2026-04-25）。v0.2 進行中で、現在は SHP / GeoParquet / CSV (WKT) ドライバが利用可能（`cargo run -- convert` / `info` / `drivers`）。残作業は GPKG / GeoJSON / FlatGeobuf ドライバと PROJ 統合 (`--reproject`)。変更履歴は [CHANGELOG.md](CHANGELOG.md)。
 
 ## ライセンス
 
