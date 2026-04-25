@@ -134,14 +134,49 @@ fn convert_without_overwrite_fails_when_target_exists() {
     // 2 度目は --overwrite 無しで失敗
     Command::cargo_bin("shpx")
         .unwrap()
-        .args([
-            "convert",
-            shp.to_str().unwrap(),
-            parquet.to_str().unwrap(),
-        ])
+        .args(["convert", shp.to_str().unwrap(), parquet.to_str().unwrap()])
         .assert()
         .failure()
         .stderr(contains("already exists"));
+}
+
+#[test]
+fn schema_emits_valid_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let shp = dir.path().join("p.shp");
+    make_point_shp(&shp);
+
+    let output = Command::cargo_bin("shpx")
+        .unwrap()
+        .args(["schema", shp.to_str().unwrap()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("schema output must be valid JSON");
+    assert_eq!(parsed["driver"], "shp");
+    let fields = parsed["fields"].as_array().expect("fields must be array");
+    assert!(fields.iter().any(|f| f["name"] == "geometry"));
+    // `shpx:geometry` は文字列ではなくパースされた object として埋め込む。
+    let geom_field = fields.iter().find(|f| f["name"] == "geometry").unwrap();
+    let meta = &geom_field["metadata"]["shpx:geometry"];
+    assert!(meta.is_object(), "shpx:geometry must be parsed JSON object");
+}
+
+#[test]
+fn drivers_lists_shp_and_parquet() {
+    Command::cargo_bin("shpx")
+        .unwrap()
+        .args(["drivers"])
+        .assert()
+        .success()
+        .stdout(contains("- shp"))
+        .stdout(contains("- parquet"))
+        .stdout(contains("schemes:"))
+        .stdout(contains("read+write"));
 }
 
 #[test]

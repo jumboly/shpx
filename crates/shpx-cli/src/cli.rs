@@ -26,6 +26,10 @@ pub enum Cmd {
     Convert(ConvertArgs),
     /// 入力ファイルのスキーマ・CRS・行数を表示する。
     Info(InfoArgs),
+    /// 入力ファイルの Arrow スキーマを JSON で出力する。
+    Schema(SchemaArgs),
+    /// 登録されている driver と各 capabilities を一覧表示する。
+    Drivers,
 }
 
 #[derive(clap::Args, Debug)]
@@ -68,6 +72,24 @@ pub struct InfoArgs {
     /// 入力エンコーディング（`.cpg` 不在の Shapefile 等で有用）。
     #[arg(long)]
     pub encoding: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct SchemaArgs {
+    /// 入力ファイル。
+    pub src: PathBuf,
+
+    /// 入力 CRS が無いとき補完する EPSG。
+    #[arg(long)]
+    pub src_crs: Option<String>,
+
+    /// 入力エンコーディング（`.cpg` 不在の Shapefile 等で有用）。
+    #[arg(long)]
+    pub encoding: Option<String>,
+
+    /// 出力 JSON を pretty-print する。既定は 1 行 compact 出力。
+    #[arg(long)]
+    pub pretty: bool,
 }
 
 /// CLI 表面の `--on-loss`。`shpx_core::OnLoss` への 1:1 マッピング。

@@ -34,6 +34,8 @@
 - `shpx-driver-fgb`: FlatGeobuf
 - `shpx-geom` への PROJ 統合（`proj` crate）
 - `--reproject EPSG:xxxx` オプション
+- 静的 driver レジストリを `inventory` 経由に移行（完了）
+- `shpx drivers` / `shpx schema` サブコマンド追加（完了）
 
 **完了基準**:
 - [ ] 全フォーマット間（5フォーマット × 5）の往復ラウンドトリップテスト

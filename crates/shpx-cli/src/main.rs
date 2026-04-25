@@ -16,6 +16,11 @@ fn main() -> ExitCode {
     let result = match parsed.command {
         cli::Cmd::Convert(args) => commands::convert::run(args),
         cli::Cmd::Info(args) => commands::info::run(args),
+        cli::Cmd::Schema(args) => commands::schema::run(args),
+        cli::Cmd::Drivers => {
+            commands::drivers::run();
+            Ok(())
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -34,8 +39,8 @@ fn init_tracing(verbose: u8) {
         2 => "debug",
         _ => "trace",
     };
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(default_level));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(true)

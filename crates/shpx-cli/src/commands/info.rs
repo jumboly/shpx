@@ -1,20 +1,12 @@
 //! `shpx info <src>` の実装。
 
-use shpx_core::{schema::find_geometry_column, Crs, ReadOpts, Result, Uri};
+use shpx_core::{schema::find_geometry_column, Crs, Result};
 
 use crate::cli::InfoArgs;
-use crate::commands::parse_src_crs;
-use crate::registry;
+use crate::commands::open_reader_for;
 
 pub fn run(args: InfoArgs) -> Result<()> {
-    let uri = Uri::from_path(args.src.to_string_lossy().to_string());
-    let driver = registry::select_driver(&uri).ok_or_else(|| registry::driver_not_found(&uri))?;
-
-    let opts = ReadOpts {
-        src_crs: parse_src_crs(args.src_crs.as_deref())?,
-        encoding: args.encoding,
-    };
-    let reader = driver.open_read(&uri, &opts)?;
+    let (driver, reader) = open_reader_for(&args.src, args.src_crs.as_deref(), args.encoding)?;
     let schema = reader.schema();
     let crs = reader.crs();
 
@@ -42,7 +34,11 @@ pub fn run(args: InfoArgs) -> Result<()> {
         .max()
         .unwrap_or(0);
     for (i, f) in schema.fields().iter().enumerate() {
-        let nullable = if f.is_nullable() { "nullable" } else { "not null" };
+        let nullable = if f.is_nullable() {
+            "nullable"
+        } else {
+            "not null"
+        };
         println!(
             "  {idx:>n_width$}: {name:<name_width$}  {ty:?}  {nullable}",
             idx = i + 1,
