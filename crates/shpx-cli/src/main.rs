@@ -14,7 +14,7 @@ fn main() -> ExitCode {
     init_tracing(parsed.verbose);
 
     let result = match parsed.command {
-        cli::Cmd::Convert(args) => commands::convert::run(args),
+        cli::Cmd::Convert(args) => commands::convert::run(&args),
         cli::Cmd::Info(args) => commands::info::run(args),
         cli::Cmd::Schema(args) => commands::schema::run(args),
         cli::Cmd::Drivers => {

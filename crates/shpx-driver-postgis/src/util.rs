@@ -22,6 +22,14 @@ pub fn driver_msg(msg: impl Into<String>) -> Error {
     Error::driver_msg(DRIVER_NAME, msg)
 }
 
+/// PostgreSQL の typname が PostGIS の geometry / geography かどうか。
+/// `pg_attribute` 経由 (table モード) と `Statement::columns()` 経由 (query モード) の
+/// 両方で同じ判定を使うため共有する。
+#[must_use]
+pub fn is_geometry_typname(typname: &str) -> bool {
+    typname == "geometry" || typname == "geography"
+}
+
 /// 損失検出時の挙動を 1 箇所で適用する。
 ///
 /// 戻り値:

@@ -542,6 +542,45 @@ fn reproject_without_src_crs_errors() {
         .success();
 }
 
+/// `--where` と `--query` は clap レベルで排他関係。
+/// CLI のオプション設計が壊れたら気づけるようにバイナリ経由で確認する。
+#[test]
+fn convert_where_and_query_are_mutually_exclusive() {
+    Command::cargo_bin("shpx")
+        .unwrap()
+        .args([
+            "convert",
+            "pg://localhost/db?table=t",
+            "/tmp/out.parquet",
+            "--where",
+            "id < 10",
+            "--query",
+            "SELECT * FROM t",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("cannot be used with"));
+}
+
+/// `--select` と `--query` も同様に排他。
+#[test]
+fn convert_select_and_query_are_mutually_exclusive() {
+    Command::cargo_bin("shpx")
+        .unwrap()
+        .args([
+            "convert",
+            "pg://localhost/db?table=t",
+            "/tmp/out.parquet",
+            "--select",
+            "id,geom",
+            "--query",
+            "SELECT * FROM t",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("cannot be used with"));
+}
+
 /// src と target が同一 CRS なら no-op パスが選ばれる（出力データの整合性を確認）。
 #[test]
 fn reproject_identity_succeeds() {

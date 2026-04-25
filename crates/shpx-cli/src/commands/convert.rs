@@ -11,6 +11,56 @@ use crate::cli::{ConvertArgs, InsertModeArg};
 use crate::commands::parse_src_crs;
 use crate::registry;
 
+fn build_read_opts(args: &ConvertArgs) -> Result<ReadOpts> {
+    let select = if args.select.is_empty() {
+        None
+    } else {
+        Some(args.select.clone())
+    };
+    Ok(ReadOpts {
+        src_crs: parse_src_crs(args.src_crs.as_deref())?,
+        encoding: args.encoding.clone(),
+        where_clause: args.where_clause.clone(),
+        select,
+        query: args.query.clone(),
+    })
+}
+
+fn build_write_opts(args: &ConvertArgs) -> WriteOpts {
+    WriteOpts {
+        encoding: args.encoding.clone(),
+        on_loss: args.on_loss.into(),
+        overwrite: args.overwrite,
+        batch_size_hint: args.batch_size,
+    }
+}
+
+/// PostGIS など RDB driver 専用の reader オプションが指定されたが、入力 driver が
+/// それらを実際には消費しない可能性が高い場合（=非 URL 入力）に警告を出す。
+/// 厳密判定は driver 側の責務だが、CLI 段階で「ファイル入力なのに `--where` 指定」を
+/// 黙って捨てるとユーザー体験が悪いため、軽い警告だけ出しておく。
+fn warn_filter_opts_on_file_uri(uri: &Uri, args: &ConvertArgs) {
+    if uri.is_url() {
+        return;
+    }
+    let warn = |opt: &str| {
+        tracing::warn!(
+            target: "shpx::cli",
+            "{opt} is specified but `{}` does not look like an RDB URL; option will be ignored if the driver does not support it",
+            uri.raw
+        );
+    };
+    if args.where_clause.is_some() {
+        warn("--where");
+    }
+    if !args.select.is_empty() {
+        warn("--select");
+    }
+    if args.query.is_some() {
+        warn("--query");
+    }
+}
+
 struct BatchCounters {
     rows: u64,
     batches: u64,
@@ -89,7 +139,7 @@ fn run_batch(ctx: PipelineCtx<'_>, counters: &mut BatchCounters) -> Result<()> {
     LayerWriter::finish(writer)
 }
 
-pub fn run(args: ConvertArgs) -> Result<()> {
+pub fn run(args: &ConvertArgs) -> Result<()> {
     let src_uri = Uri::from_path(args.src.clone());
     let dst_uri = Uri::from_path(args.dst.clone());
 
@@ -98,16 +148,9 @@ pub fn run(args: ConvertArgs) -> Result<()> {
     let dst_driver =
         registry::select_driver(&dst_uri).ok_or_else(|| registry::driver_not_found(&dst_uri))?;
 
-    let read_opts = ReadOpts {
-        src_crs: parse_src_crs(args.src_crs.as_deref())?,
-        encoding: args.encoding.clone(),
-    };
-    let write_opts = WriteOpts {
-        encoding: args.encoding,
-        on_loss: args.on_loss.into(),
-        overwrite: args.overwrite,
-        batch_size_hint: args.batch_size,
-    };
+    warn_filter_opts_on_file_uri(&src_uri, args);
+    let read_opts = build_read_opts(args)?;
+    let write_opts = build_write_opts(args);
 
     let target_crs: Option<Crs> = args
         .reproject

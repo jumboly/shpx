@@ -71,6 +71,21 @@ pub struct ConvertArgs {
     /// 対応のため、既定で COPY BINARY が使われる。
     #[arg(long, value_enum, default_value_t = InsertModeArg::Auto)]
     pub insert_mode: InsertModeArg,
+
+    /// 入力テーブルへの `WHERE` 条件式（PostGIS など RDB driver でのみ有効）。
+    /// 例: `--where "id < 100 AND status = 'active'"`。`--query` とは排他。
+    #[arg(long = "where", value_name = "SQL")]
+    pub where_clause: Option<String>,
+
+    /// 投影する列名のカンマ区切りリスト。geometry 列は必ず含めること
+    /// （PostGIS など RDB driver でのみ有効）。例: `--select id,name,geom`。`--query` とは排他。
+    #[arg(long, value_name = "COL[,COL...]", value_delimiter = ',')]
+    pub select: Vec<String>,
+
+    /// 任意の `SELECT` 文をサブクエリ化して読み出す（PostGIS など RDB driver でのみ有効）。
+    /// `--where` / `--select` とは排他。末尾セミコロンを含む SQL は `Error::Driver` で停止する。
+    #[arg(long, value_name = "SQL", conflicts_with_all = ["where_clause", "select"])]
+    pub query: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]

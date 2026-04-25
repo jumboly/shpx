@@ -6,6 +6,12 @@
 //! geometry 列は `ST_AsEWKB(<col>)` で取得し、`shpx_geom::ewkb::strip_srid` で
 //! 標準 WKB と SRID に分離する。SRID は `geometry_columns` view → 先頭 non-NULL 行の
 //! `ST_SRID()` の順に解決して `Crs` に反映する。
+//!
+//! cycle 3a 以降は 2 つのモードを持つ:
+//! - **table モード** (`--query` 未指定): `pg_attribute` を引いて列メタを取り、
+//!   `--where` / `--select` を SQL に埋め込む。geometry 列は必須。
+//! - **query モード** (`--query 'SELECT ...'`): ユーザ SQL を `LIMIT 0` でサブクエリ化
+//!   して列メタを取り、本番 SQL では geometry 列を `ST_AsEWKB` で包んで再発行する。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -25,13 +31,13 @@ use shpx_core::{
     Crs, Error, LayerReader, ReadOpts, Result, Uri,
 };
 use shpx_geom::ewkb;
-use tokio_postgres::{types::Type as PgType, Client, Row};
+use tokio_postgres::{types::Type as PgType, Client, Row, Statement};
 
 use crate::conn;
 use crate::copy_binary::PgNumeric;
-use crate::options::ResolvedReadOpts;
+use crate::options::{validate_user_query, ResolvedReadOpts};
 use crate::type_map::{geom_type_from_st_name, pg_to_arrow};
-use crate::util::{driver_msg, quote_ident, quote_qualified};
+use crate::util::{driver_msg, is_geometry_typname, quote_ident, quote_qualified, DRIVER_NAME};
 
 /// 1 batch あたりの既定行数。`batch_size_hint` 未指定時に使う。
 const DEFAULT_BATCH_SIZE: usize = 65_536;
@@ -46,43 +52,118 @@ pub struct PostgisReader {
 
 impl PostgisReader {
     pub fn open(uri: &Uri, opts: &ReadOpts) -> Result<Self> {
-        let resolved = ResolvedReadOpts::resolve(uri, opts)?;
-        let qualified = quote_qualified(&resolved.schema, &resolved.table);
-        let client = conn::connect(&resolved.url)?;
+        if opts.query.is_some() && (opts.where_clause.is_some() || opts.select.is_some()) {
+            return Err(driver_msg(format!(
+                "{DRIVER_NAME}: --query is exclusive with --where / --select"
+            )));
+        }
+        // 接続前に SQL 形状だけ早期バリデーション（`;` 混入は実行不可なので即エラー）。
+        if let Some(q) = opts.query.as_deref() {
+            validate_user_query(q)?;
+        }
+        let client = conn::connect(uri.path())?;
+        if let Some(query) = opts.query.as_deref() {
+            Self::open_query_mode(&client, query, opts)
+        } else {
+            let resolved = ResolvedReadOpts::resolve(uri, opts)?;
+            Self::open_table_mode(&client, &resolved, opts)
+        }
+    }
 
-        let columns = describe_columns(&client, &resolved.schema, &resolved.table)?;
-        let geom_col_index = columns.iter().position(|c| c.is_geometry);
+    fn open_table_mode(
+        client: &Client,
+        resolved: &ResolvedReadOpts,
+        opts: &ReadOpts,
+    ) -> Result<Self> {
+        let qualified = quote_qualified(&resolved.schema, &resolved.table);
+        let all_columns = describe_columns(client, &resolved.schema, &resolved.table)?;
+        let columns = match opts.select.as_deref() {
+            None => all_columns,
+            Some(names) => filter_columns_by_select(&all_columns, names)?,
+        };
+        let geom_idx = columns
+            .iter()
+            .position(|c| c.is_geometry)
+            .ok_or_else(|| {
+                driver_msg(if opts.select.is_some() {
+                    "--select must include the geometry column; geometry-less extraction is not supported in v0.3"
+                } else {
+                    "selected table does not contain a PostGIS geometry/geography column"
+                })
+            })?;
 
         // SRID は geometry 列がある場合のみ問い合わせる。geometry_columns view が未登録
         // なら NULL になりうるので、テーブル先頭行の `ST_SRID() / ST_GeometryType()` も
         // フォールバックに使う。後者は 1 query に集約してラウンドトリップを 1 つ削る。
-        let (crs_from_table, geom_type_from_table) = if let Some(geom_idx) = geom_col_index {
-            let col_name = &columns[geom_idx].name;
-            probe_geometry_metadata(
-                &client,
-                &resolved.schema,
-                &resolved.table,
-                col_name,
-                &qualified,
-            )?
-        } else {
-            (None, GeometryType::Geometry)
-        };
+        let col_name = &columns[geom_idx].name;
+        let (crs_from_table, geom_type_from_table) = probe_geometry_metadata(
+            client,
+            &resolved.schema,
+            &resolved.table,
+            col_name,
+            &qualified,
+        )?;
 
         // ReadOpts.src_crs があれば最優先（CLI --src-crs）。
         let crs: Option<Crs> = opts.src_crs.clone().or(crs_from_table);
 
-        // Arrow Schema を組み立てる。geometry 列は metadata 付きで宣言する。
-        let schema =
-            build_arrow_schema(&columns, geom_col_index, geom_type_from_table, crs.as_ref())?;
+        let schema = build_arrow_schema(&columns, geom_idx, geom_type_from_table, crs.as_ref())?;
 
-        // SELECT を発行して全行取得。geometry 列は ST_AsEWKB() でラップする。
-        let select_sql = build_select_sql(&columns, geom_col_index, &qualified);
-        let rows = conn::query(&client, &select_sql, &[])?;
-        let batch = rows_to_record_batch(&schema, &columns, geom_col_index, &rows)?;
+        let select_sql =
+            build_select_sql_table(&columns, geom_idx, &qualified, opts.where_clause.as_deref());
+        let rows = conn::query(client, &select_sql, &[])?;
+        Self::finish(schema, crs, &columns, geom_idx, &rows)
+    }
+
+    fn open_query_mode(client: &Client, query: &str, opts: &ReadOpts) -> Result<Self> {
+        // ユーザ SQL を LIMIT 0 でサブクエリ化し、列メタだけ先取り。geometry 列は
+        // PostGIS の動的 OID で発行されるが、tokio-postgres は pg_catalog から
+        // typname を解決済みなので `Type::name()` で判定できる。
+        let probe_sql = format!("SELECT * FROM ({query}) AS shpx_q LIMIT 0");
+        let stmt = conn::prepare(client, &probe_sql)?;
+        let columns = build_columns_from_statement(&stmt)?;
+        let geom_idx = columns.iter().position(|c| c.is_geometry).ok_or_else(|| {
+            driver_msg("--query result does not contain a PostGIS geometry/geography column")
+        })?;
+        let geom_col_name = columns[geom_idx].name.clone();
+
+        // SRID と代表 geometry 型はサブクエリ全体を再走査して 1 行だけ取り出す。
+        // テーブル名が無いので geometry_columns view は使えない。
+        let probe_geom_sql = format!(
+            "SELECT ST_SRID({col}), ST_GeometryType({col}) \
+             FROM ({query}) AS shpx_q WHERE {col} IS NOT NULL LIMIT 1",
+            col = quote_ident(&geom_col_name),
+        );
+        let (probe_srid, geom_type) = match conn::query_opt(client, &probe_geom_sql, &[])? {
+            Some(row) => {
+                let srid: i32 = row.try_get(0).map_err(|e| driver_msg(e.to_string()))?;
+                let name: String = row.try_get(1).map_err(|e| driver_msg(e.to_string()))?;
+                (Some(srid), geom_type_from_st_name(&name))
+            }
+            None => (None, GeometryType::Geometry),
+        };
+
+        let crs: Option<Crs> = opts
+            .src_crs
+            .clone()
+            .or_else(|| probe_srid.and_then(epsg_to_crs));
+        let schema = build_arrow_schema(&columns, geom_idx, geom_type, crs.as_ref())?;
+
+        let real_sql = build_select_sql_query(&columns, geom_idx, query);
+        let rows = conn::query(client, &real_sql, &[])?;
+        Self::finish(schema, crs, &columns, geom_idx, &rows)
+    }
+
+    fn finish(
+        schema: SchemaRef,
+        crs: Option<Crs>,
+        columns: &[ColumnInfo],
+        geom_idx: usize,
+        rows: &[Row],
+    ) -> Result<Self> {
+        let batch = rows_to_record_batch(&schema, columns, geom_idx, rows)?;
         let row_count = batch.num_rows();
         let chunks = chunk_batch(&batch, DEFAULT_BATCH_SIZE);
-
         Ok(Self {
             schema,
             crs,
@@ -165,7 +246,7 @@ fn describe_columns(client: &Client, schema: &str, table: &str) -> Result<Vec<Co
             .try_get("typname")
             .map_err(|e| driver_msg(e.to_string()))?;
 
-        let is_geom = typname == "geometry" || typname == "geography";
+        let is_geom = is_geometry_typname(&typname);
         // builtin 以外の OID（PostGIS geometry など）は Type::from_oid が None を返す。
         // その場合は便宜的に PgType::BYTEA を入れる（geometry 列は本フィールドを使わないため）。
         let pg_type = if is_geom {
@@ -268,13 +349,13 @@ fn epsg_to_crs(srid: i32) -> Option<Crs> {
 
 fn build_arrow_schema(
     columns: &[ColumnInfo],
-    geom_col_index: Option<usize>,
+    geom_idx: usize,
     geom_type: GeometryType,
     crs: Option<&Crs>,
 ) -> Result<SchemaRef> {
     let mut fields: Vec<Field> = Vec::with_capacity(columns.len());
     for (i, c) in columns.iter().enumerate() {
-        if Some(i) == geom_col_index {
+        if i == geom_idx {
             let mut f = Field::new(&c.name, DataType::Binary, c.nullable);
             let mut m = HashMap::new();
             m.insert(
@@ -304,34 +385,102 @@ fn build_arrow_schema(
     Ok(Arc::new(Schema::new(fields)))
 }
 
-fn build_select_sql(
-    columns: &[ColumnInfo],
-    geom_col_index: Option<usize>,
-    qualified: &str,
-) -> String {
-    let parts: Vec<String> = columns
+fn projection_parts(columns: &[ColumnInfo], geom_idx: usize) -> Vec<String> {
+    columns
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            if Some(i) == geom_col_index {
+            let q = quote_ident(&c.name);
+            if i == geom_idx {
                 // geometry を EWKB として取得し、列名は元の名前を保つ。
-                format!(
-                    "ST_AsEWKB({}) AS {}",
-                    quote_ident(&c.name),
-                    quote_ident(&c.name)
-                )
+                format!("ST_AsEWKB({q}) AS {q}")
             } else {
-                quote_ident(&c.name)
+                q
             }
         })
-        .collect();
-    format!("SELECT {} FROM {qualified}", parts.join(", "))
+        .collect()
+}
+
+fn build_select_sql_table(
+    columns: &[ColumnInfo],
+    geom_idx: usize,
+    qualified: &str,
+    where_clause: Option<&str>,
+) -> String {
+    let parts = projection_parts(columns, geom_idx);
+    let projection = parts.join(", ");
+    match where_clause.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(w) => format!("SELECT {projection} FROM {qualified} WHERE {w}"),
+        None => format!("SELECT {projection} FROM {qualified}"),
+    }
+}
+
+fn build_select_sql_query(columns: &[ColumnInfo], geom_idx: usize, query: &str) -> String {
+    let parts = projection_parts(columns, geom_idx);
+    format!("SELECT {} FROM ({query}) AS shpx_q", parts.join(", "))
+}
+
+/// `--select` で指定された列名のリストを既存の `ColumnInfo` 集合から並べ替えて取り出す。
+/// 順序は **`--select` の順** を尊重する（CLI 利用者が結果の列順を制御できるようにする）。
+fn filter_columns_by_select(all: &[ColumnInfo], names: &[String]) -> Result<Vec<ColumnInfo>> {
+    let mut out = Vec::with_capacity(names.len());
+    for name in names {
+        if let Some(c) = all.iter().find(|c| &c.name == name) {
+            out.push(c.clone());
+        } else {
+            let available: Vec<&str> = all.iter().map(|c| c.name.as_str()).collect();
+            return Err(driver_msg(format!(
+                "--select references unknown column `{name}` (available: {})",
+                available.join(", ")
+            )));
+        }
+    }
+    Ok(out)
+}
+
+/// `LIMIT 0` の prepared statement から列メタを `ColumnInfo` に変換する。
+///
+/// `Statement::columns()` は typmod を露出しないため、`numeric` 列の precision/scale は
+/// 取得できず `(38, 0)` フォールバックになる（query モード固有の制約）。
+fn build_columns_from_statement(stmt: &Statement) -> Result<Vec<ColumnInfo>> {
+    let mut out = Vec::with_capacity(stmt.columns().len());
+    for col in stmt.columns() {
+        let pg_ty = col.type_();
+        let typname = pg_ty.name().to_string();
+        let is_geom = is_geometry_typname(&typname);
+        // builtin 以外の OID（PostGIS geometry など）は from_oid が None を返す。
+        // geometry 列は本フィールドを参照しないため BYTEA で代用する（describe_columns と同じ慣習）。
+        let pg_type = if is_geom {
+            PgType::BYTEA
+        } else {
+            PgType::from_oid(pg_ty.oid()).ok_or_else(|| {
+                Error::Schema(format!(
+                    "unknown PostgreSQL type `{}` (OID {}) for column `{}` in --query result",
+                    typname,
+                    pg_ty.oid(),
+                    col.name()
+                ))
+            })?
+        };
+        out.push(ColumnInfo {
+            name: col.name().to_string(),
+            type_name: typname,
+            pg_type,
+            // typmod は prepared statement のメタからは取得できない。
+            // numeric は precision を保てないため (38, 0) になる。
+            typmod: -1,
+            is_geometry: is_geom,
+            // 列の nullability も prepared statement では分からないので nullable とする。
+            nullable: true,
+        });
+    }
+    Ok(out)
 }
 
 fn rows_to_record_batch(
     schema: &SchemaRef,
     columns: &[ColumnInfo],
-    geom_col_index: Option<usize>,
+    geom_idx: usize,
     rows: &[Row],
 ) -> Result<RecordBatch> {
     // 各列の builder を schema に基づいて作る。geometry 列は BinaryBuilder。
@@ -343,7 +492,7 @@ fn rows_to_record_batch(
 
     for row in rows {
         for (i, c) in columns.iter().enumerate() {
-            if Some(i) == geom_col_index {
+            if i == geom_idx {
                 let bb = builders[i]
                     .as_any_mut()
                     .downcast_mut::<BinaryBuilder>()
@@ -598,9 +747,8 @@ mod tests {
         assert_eq!(epsg_to_crs(4326), Some(Crs::from_epsg(4326)));
     }
 
-    #[test]
-    fn build_select_sql_wraps_geometry_with_st_asewkb() {
-        let cols = vec![
+    fn sample_columns() -> Vec<ColumnInfo> {
+        vec![
             ColumnInfo {
                 name: "name".into(),
                 type_name: "text".into(),
@@ -617,12 +765,70 @@ mod tests {
                 is_geometry: true,
                 nullable: true,
             },
-        ];
-        let sql = build_select_sql(&cols, Some(1), "\"public\".\"t\"");
+        ]
+    }
+
+    #[test]
+    fn build_select_sql_table_wraps_geometry_with_st_asewkb() {
+        let sql = build_select_sql_table(&sample_columns(), 1, "\"public\".\"t\"", None);
         assert_eq!(
             sql,
             "SELECT \"name\", ST_AsEWKB(\"geom\") AS \"geom\" FROM \"public\".\"t\""
         );
+    }
+
+    #[test]
+    fn build_select_sql_table_appends_where_clause() {
+        let sql = build_select_sql_table(&sample_columns(), 1, "\"public\".\"t\"", Some("id < 10"));
+        assert_eq!(
+            sql,
+            "SELECT \"name\", ST_AsEWKB(\"geom\") AS \"geom\" FROM \"public\".\"t\" WHERE id < 10"
+        );
+    }
+
+    #[test]
+    fn build_select_sql_table_ignores_blank_where_clause() {
+        let sql = build_select_sql_table(&sample_columns(), 1, "\"public\".\"t\"", Some("   "));
+        assert_eq!(
+            sql,
+            "SELECT \"name\", ST_AsEWKB(\"geom\") AS \"geom\" FROM \"public\".\"t\""
+        );
+    }
+
+    #[test]
+    fn build_select_sql_query_wraps_subquery() {
+        let sql = build_select_sql_query(&sample_columns(), 1, "SELECT name, geom FROM t");
+        assert_eq!(
+            sql,
+            "SELECT \"name\", ST_AsEWKB(\"geom\") AS \"geom\" FROM (SELECT name, geom FROM t) AS shpx_q"
+        );
+    }
+
+    #[test]
+    fn filter_columns_by_select_preserves_specified_order() {
+        let all = sample_columns();
+        let got =
+            filter_columns_by_select(&all, &["geom".to_string(), "name".to_string()]).unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].name, "geom");
+        assert_eq!(got[1].name, "name");
+    }
+
+    #[test]
+    fn filter_columns_by_select_rejects_unknown_name() {
+        let all = sample_columns();
+        let err = filter_columns_by_select(&all, &["geom".into(), "missing".into()]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn validate_user_query_rejects_semicolon() {
+        use crate::options::validate_user_query;
+        assert!(validate_user_query("SELECT 1; SELECT 2").is_err());
+        assert!(validate_user_query("SELECT 1;").is_err());
+        assert!(validate_user_query("").is_err());
+        assert!(validate_user_query("   ").is_err());
+        assert!(validate_user_query("SELECT geom FROM t").is_ok());
     }
 
     #[test]

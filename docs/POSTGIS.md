@@ -4,10 +4,13 @@ PostgreSQL + PostGIS 拡張のテーブルを `shpx-driver-postgis` が担当す
 
 `Driver` trait は同期 API なので、driver crate 内で `tokio` ランタイムを 1 個保持し、各メソッドの先頭で `block_on` する形で同期化する。利用者から見えるインターフェースは他ドライバと完全に同じ。
 
-## 対応範囲（v0.3 cycle 2 時点）
+## 対応範囲（v0.3 cycle 3a 時点）
 
 - 読み:
   - `pg://user:pass@host:port/db?table=<name>` で接続 → 1 テーブル全件 SELECT
+  - **行絞り込み (cycle 3a)**: CLI `--where '<sql>'` で `WHERE <sql>` を付与
+  - **列絞り込み (cycle 3a)**: CLI `--select col1,col2,...` で投影対象を制限（geometry 列は必須）
+  - **任意 SQL (cycle 3a)**: CLI `--query 'SELECT ...'` でユーザ定義 SQL をサブクエリ化して読む（`--where` / `--select` と排他）
   - geometry 列は `ST_AsEWKB()` で取得し、`shpx_geom::ewkb::strip_srid` で標準 WKB と SRID に分離
   - `ST_GeometryType()` で OGC 型名 (`ST_Point` 等) を取得し、`GeometryType` メタに反映
   - SRID は最初の non-NULL geometry 行の `ST_SRID()` を使う（テーブル空のときは Crs 不明）
@@ -19,6 +22,40 @@ PostgreSQL + PostGIS 拡張のテーブルを `shpx-driver-postgis` が担当す
   - `--overwrite` 未指定で同名テーブルが既にあればエラー
 - ジオメトリ型: Point / LineString / Polygon / MultiPoint / MultiLineString / MultiPolygon（XY のみ）
 - CI 上の docker postgis (`postgis/postgis:16-3.4`) で SHP / Parquet ↔ PostGIS の batch/bulk 双方の往復テスト + Decimal128(38, 10) / bytea / timestamptz の bit-identical テストが緑
+
+## reader filtering（cycle 3a）
+
+3 オプションの優先関係と排他関係:
+
+| 状態 | `?table=` の必要性 | 発行 SQL の概形 |
+|---|---|---|
+| 全件 | 必要 | `SELECT col1, ..., ST_AsEWKB(geom) FROM "<schema>"."<table>"` |
+| `--where '<sql>'` | 必要 | `... FROM "<schema>"."<table>" WHERE <sql>` |
+| `--select c1,c2,geom` | 必要 | `SELECT "c1", "c2", ST_AsEWKB("geom") FROM ...`（属性集合のみ絞り込み）|
+| `--where` + `--select` | 必要 | 上 2 つを併用 |
+| `--query 'SELECT ...'` | 不要 | `SELECT * FROM (<query>) AS shpx_q LIMIT 0` で列メタを取得 → 本番は `SELECT col1, ..., ST_AsEWKB(geom) FROM (<query>) AS shpx_q` |
+
+- `--query` は `--where` / `--select` と clap レベルで排他（`conflicts_with_all`）。
+- `--query` 指定時は `?table=` / `SHPX_PG_TABLE` も無くて良い（テーブル単一を前提にしない）。
+- `--query` の SQL に `;`（末尾またはステートメント区切り）が含まれる場合はサブクエリ化できないため `Error::Driver` で停止する。
+- `--select` は **geometry 列を必ず含めること** が必須。geometry 列を抜いた抽出は `Error::Driver`（v0.3 のスコープ上、属性専用テーブル抽出は対象外）。
+- `--query` 経由のクエリも、結果列に geometry 列が見当たらないと同様に `Error::Driver`。
+
+geometry 列の検出:
+
+- table モード: `pg_attribute` 由来の `typname IN ('geometry', 'geography')` で検出（cycle 1 から踏襲）。
+- query モード: `Statement::columns()` の各 `Type::oid()` が PostgreSQL builtin 範囲外（PostGIS の geometry/geography 動的 OID）かどうかで検出。`pg_type` テーブルから動的 OID を 1 度引き、結果列の OID と突き合わせる。
+
+SRID 解決:
+
+- table モード: `geometry_columns` view → 先頭 non-NULL 行 `ST_SRID()` の 2 段（cycle 1 から踏襲）。
+- query モード: テーブル名が無いので `geometry_columns` view は使わない。サブクエリ全体を `SELECT ST_SRID(geom) FROM (<query>) AS shpx_q WHERE geom IS NOT NULL LIMIT 1` で 1 行だけ取り出して使う。
+
+ReadOpts / 環境変数 / URL クエリの優先関係:
+
+- CLI `--where` / `--select` / `--query` は `shpx-core::ReadOpts` 経由で driver に届く。
+- 環境変数や URL クエリでこれらをオーバーライドする経路は **設けない**（SQL を文字列で 2 経路から受けると挙動が読みにくくなるため）。
+- 既存の `?table=` / `SHPX_PG_TABLE` はそのまま（table モード時のみ参照）。
 
 ## サポート対象 URI スキーム
 
@@ -125,14 +162,13 @@ Z/M / GeometryCollection は `shpx-geom::wkb` 自体が未対応のため、Post
 - CRS 無し → `apply_on_loss("missing-crs-on-postgis", ...)`
 - 未登録 EPSG → cycle 3 で `spatial_ref_sys` 自動 INSERT、cycle 1 では cycle 3 と同じ kind を使い srid=0 fallback
 
-## スコープ外（cycle 3 以降）
+## スコープ外（cycle 3b 以降）
 
-v0.3 cycle 2 完了時点で以下は未対応:
+v0.3 cycle 3a 完了時点で以下は未対応:
 
-- **`--where`/`--select`/`--query`** reader 側の絞り込み（cycle 3）
-- **`--create-table=if-not-exists|always|never`** writer 側の制御（現状は `--overwrite` で DROP するだけ）
-- **GIST index 自動生成オプション**（cycle 3）
-- **`spatial_ref_sys` への未登録 EPSG 自動 INSERT**（cycle 3）
+- **`--create-table=if-not-exists|always|never`** writer 側の制御（cycle 3b。現状は `--overwrite` で DROP するだけ）
+- **GIST index 自動生成オプション**（cycle 3b）
+- **`spatial_ref_sys` への未登録 EPSG 自動 INSERT**（cycle 3b）
 - **streaming reader**（現状は全件 in-memory）
 - Z/M 座標、GeometryCollection
 - 複数テーブルの一括書き出し / マテリアライズドビュー

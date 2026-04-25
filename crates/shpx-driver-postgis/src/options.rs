@@ -10,7 +10,10 @@ use crate::util::{driver_msg, DRIVER_NAME};
 /// 環境変数: 入出力対象のテーブル名（`<schema>.<name>` 可）。URI クエリより優先度低。
 pub const ENV_TABLE: &str = "SHPX_PG_TABLE";
 
-/// 解決済みの読み出しオプション。
+/// 解決済みの読み出しオプション（table モード向け）。
+///
+/// `--query` 指定時は `?table=` を解決しないため、reader 側で `ReadOpts` から
+/// 直接読む（このオプション構造体は table モード経路でのみ生成する）。
 #[derive(Debug, Clone)]
 pub struct ResolvedReadOpts {
     /// 接続文字列（`pg://...`）。driver はこの URL を `tokio_postgres::Config` に渡す。
@@ -34,6 +37,25 @@ impl ResolvedReadOpts {
             src_crs: opts.src_crs.clone(),
         })
     }
+}
+
+/// `--query` の SQL を最低限バリデーションする。
+///
+/// サブクエリ化（`SELECT ... FROM (<query>) AS shpx_q`）するため、`;` を含むと
+/// 構文エラーになる。コメントや文字列リテラル中の `;` を厳密に判別するのは過剰なので、
+/// 単純に「`;` を含めば reject」という保守的な方針を取る（ユーザーが SQL クライアントから
+/// 末尾セミコロン付きでコピペしたケースを早めに弾くのが主目的）。
+pub(crate) fn validate_user_query(q: &str) -> Result<()> {
+    let trimmed = q.trim();
+    if trimmed.is_empty() {
+        return Err(driver_msg(format!("{DRIVER_NAME}: --query is empty")));
+    }
+    if trimmed.contains(';') {
+        return Err(driver_msg(format!(
+            "{DRIVER_NAME}: --query must not contain `;` (semicolons cannot be wrapped in a subquery)"
+        )));
+    }
+    Ok(())
 }
 
 /// 解決済みの書き出しオプション。

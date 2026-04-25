@@ -31,6 +31,7 @@ pub fn open_reader_for(
     let opts = ReadOpts {
         src_crs: parse_src_crs(src_crs)?,
         encoding,
+        ..ReadOpts::default()
     };
     let reader = driver.open_read(&uri, &opts)?;
     Ok((driver, reader))

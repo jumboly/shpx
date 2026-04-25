@@ -4,10 +4,13 @@
 
 ## [Unreleased]
 
-v0.3 マイルストーン「PostGIS」の cycle 1 + cycle 2 進捗。
+v0.3 マイルストーン「PostGIS」の cycle 1 + cycle 2 + cycle 3a 進捗。cycle 3 は 3a/3b/3c に分割済み（`docs/ROADMAP.md` 参照）。
 
 ### Added
 
+- **shpx-core (`ReadOpts` 拡張, v0.3 cycle 3a)**: `where_clause` / `select` / `query` の 3 フィールドを追加。RDB driver（PostGIS など）が SQL に埋め込むための CLI 引数受け口。ファイル driver は無視するため後方互換は保たれる。
+- **shpx-cli (`convert --where / --select / --query`, v0.3 cycle 3a)**: `convert` サブコマンドに `--where '<sql>'` / `--select c1,c2,...` / `--query 'SELECT ...'` を追加。`--query` は他 2 つと clap の `conflicts_with_all` で排他。`--select` は `value_delimiter = ','` で複数列を 1 引数で受ける。ファイル URI に対してこれらが指定された場合は tracing 警告で告知し、driver は静かに無視する。
+- **shpx-driver-postgis (v0.3 cycle 3a)**: reader を 「table モード」と「query モード」の 2 経路に分割。table モードでは `?table=` で解決した完全修飾名に `--where` / `--select` を埋め込み、`SELECT col1, ..., ST_AsEWKB(geom) FROM "schema"."table" [WHERE <sql>]` を生成する。query モードではユーザ SQL を `SELECT * FROM (<query>) AS shpx_q LIMIT 0` でサブクエリ化して `tokio_postgres::Statement::columns()` から列メタを取り、`Type::name() == "geometry"|"geography"` で geometry 列を検出して本番 SQL を再構築する。SRID 解決は table モードでは `geometry_columns` view → 先頭 `ST_SRID()` の 2 段、query モードはサブクエリ経由の先頭 `ST_SRID()` のみ。geometry 列を含まない `--select` / `--query` は `Error::Driver` で停止し、`--query` 中の `;` も同様に停止する。
 - **shpx-driver-postgis (v0.3 cycle 2)**: PostgreSQL の binary COPY format を自前エンコードする `BulkLoadWriter` 経路。`crates/shpx-driver-postgis/src/copy_binary.rs` に `BulkRowEncoder` と各型の big-endian エンコーダ（bool / int2-8 / float4-8 / text / bytea / date / timestamp / timestamptz / numeric / geometry-EWKB）を実装。`tokio_postgres::CopyInSink<Bytes>` で `COPY <table> (<cols>) FROM STDIN BINARY` に流し込み、複数 `RecordBatch` をまたいで 1 接続 = 1 COPY セッションで送る。`Capabilities::bulk_load = true` / `supports_decimal = true` に切替。
 - **shpx-driver-postgis (Decimal128)**: Arrow `Decimal128(p, s)` ↔ PG `numeric(p, s)` を双方向対応。binary 表現は NBASE=10000 の `PgNumeric { ndigits, weight, sign, dscale, digits[] }` で、`PgNumeric` は `tokio_postgres::types::ToSql` を独自実装し batch / bulk 両経路で同じ encode 結果を共有する。reader は PG `NUMERIC` OID + `pg_attribute.atttypmod` から `(p, s)` を復元（typmod=-1 のときは `(38, 0)` フォールバック）。decimal(38, 10) bit-identical 往復テスト追加。
 - **shpx-cli (`--insert-mode=auto|bulk|batch`)**: `convert` サブコマンドに insert mode を追加。既定 `auto` は driver の `Capabilities::bulk_load` が true なら bulk、そうでなければ batch（silently fallback）。`bulk` 明示時は非対応 driver でエラー。`batch` 明示時は常に `LayerWriter::write_batch` 経路。PostGIS 以外の driver は現状 batch 一択のため挙動は変わらない。
