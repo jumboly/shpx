@@ -1,7 +1,7 @@
 //! CLI のサブコマンド定義（clap derive）。
 
 use clap::{ArgAction, Parser, Subcommand};
-use shpx_core::OnLoss;
+use shpx_core::{CreateIndex, CreateTable, OnLoss};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -43,6 +43,20 @@ pub struct ConvertArgs {
     /// 既存出力ファイルを上書きする。
     #[arg(long)]
     pub overwrite: bool,
+
+    /// テーブル作成戦略（PostGIS など RDB driver でのみ有効）。
+    /// `if-not-exists` (既定) は無ければ作成・あれば append。`always` は常に CREATE 発行
+    /// （`--overwrite` と組み合わせると DROP→CREATE）。`never` は CREATE を発行せず既存
+    /// テーブルへ append し、無ければエラー。`--overwrite` && `never` は整合性エラー。
+    #[arg(long, value_enum, default_value_t = CreateTableArg::IfNotExists)]
+    pub create_table: CreateTableArg,
+
+    /// 空間インデックス（PostGIS では GIST）の自動生成戦略。`auto` (既定) は新規作成
+    /// テーブルにのみ生成、既存テーブル append には触らない。bulk load 経路では COPY
+    /// 完了後に発行する（COPY 前に index があると遅くなる定石）。`always` は常に発行
+    /// （`IF NOT EXISTS` で重複は安全）、`never` は一切作らない。
+    #[arg(long, value_enum, default_value_t = CreateIndexArg::Auto)]
+    pub create_index: CreateIndexArg,
 
     /// 損失変換ポリシー。既定 `error` は安全側で中断する。
     #[arg(long, value_enum, default_value_t = OnLossArg::Error)]
@@ -147,4 +161,40 @@ pub enum InsertModeArg {
     Bulk,
     /// 必ず batch (`LayerWriter::write_batch`) 経路を使う。
     Batch,
+}
+
+/// CLI 表面の `--create-table`。`shpx_core::CreateTable` への 1:1 マッピング。
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+pub enum CreateTableArg {
+    IfNotExists,
+    Always,
+    Never,
+}
+
+impl From<CreateTableArg> for CreateTable {
+    fn from(v: CreateTableArg) -> Self {
+        match v {
+            CreateTableArg::IfNotExists => CreateTable::IfNotExists,
+            CreateTableArg::Always => CreateTable::Always,
+            CreateTableArg::Never => CreateTable::Never,
+        }
+    }
+}
+
+/// CLI 表面の `--create-index`。`shpx_core::CreateIndex` への 1:1 マッピング。
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+pub enum CreateIndexArg {
+    Auto,
+    Always,
+    Never,
+}
+
+impl From<CreateIndexArg> for CreateIndex {
+    fn from(v: CreateIndexArg) -> Self {
+        match v {
+            CreateIndexArg::Auto => CreateIndex::Auto,
+            CreateIndexArg::Always => CreateIndex::Always,
+            CreateIndexArg::Never => CreateIndex::Never,
+        }
+    }
 }

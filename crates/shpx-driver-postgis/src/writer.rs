@@ -22,7 +22,8 @@ use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use futures_util::SinkExt;
 use shpx_core::{
     schema::{find_geometry_column, GeometryMeta, GeometryType},
-    BulkLoadWriter, Crs, Error, LayerWriter, OnLoss, Result, Uri, WriteOpts,
+    BulkLoadWriter, CreateIndex, CreateTable, Crs, Error, LayerWriter, OnLoss, Result, Uri,
+    WriteOpts,
 };
 use shpx_geom::ewkb;
 use tokio_postgres::{types::ToSql, Client, Statement};
@@ -51,6 +52,16 @@ pub struct PostgisWriter {
     insert_stmt: Statement,
     qualified: String,
     srid: i32,
+    /// GIST index 作成戦略（`finish()` で参照）。
+    create_index: CreateIndex,
+    /// この writer が `CREATE TABLE` を発行したかどうか。`CreateIndex::Auto` の判定で使う
+    /// （新規作成の場合のみ index を張り、既存 append には触らない）。`IfNotExists` 経路では
+    /// `pg_class` を CREATE 前に probe して既存有無を確定させる。
+    table_was_created: bool,
+    /// geometry 列の名前。GIST index 名と CREATE INDEX の対象列に使う。
+    geom_col_name: String,
+    /// テーブル名（quote 前）。GIST index 名 `idx_<table>_<geom>` に使う。
+    table_name: String,
 }
 
 impl PostgisWriter {
@@ -58,10 +69,8 @@ impl PostgisWriter {
         let resolved = ResolvedWriteOpts::resolve(uri, opts)?;
         let qualified = quote_qualified(&resolved.schema, &resolved.table);
 
-        let (geom_index, _, geom_meta) = find_geometry_column(&schema)?
+        let (geom_index, geom_field_name, geom_meta) = find_geometry_column(&schema)?
             .ok_or_else(|| Error::Schema("no geometry column for PostGIS writer".to_string()))?;
-
-        let srid = resolve_srid(crs, &geom_meta, opts.on_loss)?;
 
         let attr_indices: Vec<usize> = (0..schema.fields().len())
             .filter(|i| *i != geom_index)
@@ -69,20 +78,45 @@ impl PostgisWriter {
 
         let client = conn::connect(&resolved.url)?;
 
+        // SRID 解決と未登録 EPSG の `spatial_ref_sys` 自動 INSERT は接続後に行う
+        // （`spatial_ref_sys` への INSERT はサーバ接続が必要なため）。
+        let srid = resolve_srid(&client, crs, &geom_meta, opts.on_loss)?;
+
         if resolved.overwrite {
             // CASCADE は付けない（依存ビュー等を勝手に巻き込まないため）。
             conn::batch_execute(&client, &format!("DROP TABLE IF EXISTS {qualified}"))?;
         }
 
-        let create_sql = build_create_table_sql(
-            &schema,
-            &attr_indices,
-            geom_index,
-            &qualified,
-            geom_meta.geometry_type,
-            srid,
-        )?;
-        conn::batch_execute(&client, &create_sql)?;
+        // CREATE 前に `pg_class` を probe しておくことで、`IfNotExists` で既存テーブルへ
+        // append したケースを `CreateIndex::Auto` の判定から除外できる（既存テーブルに
+        // 勝手に index を張らない契約）。`overwrite=true` で DROP した直後はここでは false。
+        let existed_before = table_exists(&client, &resolved.schema, &resolved.table)?;
+
+        let table_was_created = match resolved.create_table {
+            CreateTable::Never => {
+                if !existed_before {
+                    return Err(driver_msg(format!(
+                        "--create-table=never: テーブル {}.{} が存在しない",
+                        resolved.schema, resolved.table
+                    )));
+                }
+                false
+            }
+            kind => {
+                let if_not_exists = matches!(kind, CreateTable::IfNotExists);
+                let create_sql = build_create_table_sql(
+                    &schema,
+                    &attr_indices,
+                    geom_index,
+                    &qualified,
+                    geom_meta.geometry_type,
+                    srid,
+                    if_not_exists,
+                )?;
+                conn::batch_execute(&client, &create_sql)?;
+                !existed_before
+            }
+        };
 
         let insert_sql = build_insert_sql(&schema, &attr_indices, geom_index, &qualified);
         let insert_stmt = conn::prepare(&client, &insert_sql)?;
@@ -95,7 +129,36 @@ impl PostgisWriter {
             insert_stmt,
             qualified,
             srid,
+            create_index: resolved.create_index,
+            table_was_created,
+            geom_col_name: geom_field_name,
+            table_name: resolved.table,
         })
+    }
+
+    /// `--create-index` 戦略に従って GIST index を発行する。`finish()` から 1 度だけ呼ぶ
+    /// 想定（`Box<Self>` 消費なので二重呼び出しは型レベルで起きない）。
+    fn maybe_create_gist_index(&mut self) -> Result<()> {
+        let should_create = match self.create_index {
+            CreateIndex::Never => false,
+            CreateIndex::Always => true,
+            CreateIndex::Auto => self.table_was_created,
+        };
+        if !should_create {
+            return Ok(());
+        }
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| driver_msg("maybe_create_gist_index called after finish"))?;
+        // index は schema 修飾を付けない: PostgreSQL は対象テーブルの schema に作る。
+        let idx_name = quote_ident(&format!("idx_{}_{}", self.table_name, self.geom_col_name));
+        let geom_col = quote_ident(&self.geom_col_name);
+        let sql = format!(
+            "CREATE INDEX IF NOT EXISTS {idx_name} ON {} USING GIST ({geom_col})",
+            self.qualified
+        );
+        conn::batch_execute(client, &sql)
     }
 }
 
@@ -132,6 +195,10 @@ impl LayerWriter for PostgisWriter {
     }
 
     fn finish(mut self: Box<Self>) -> Result<()> {
+        // bulk 経路では COPY 完了直後ではなく `finish()` で GIST index を作る。
+        // COPY 前に index があると 1 桁遅くなるため、本実装は「全データ投入完了 → index」の
+        // 順序に統一している（batch 経路でも同様の順序）。
+        self.maybe_create_gist_index()?;
         // tokio_postgres::Client は Drop で内部 channel を閉じ、別 task の Connection が
         // 終了する。明示的な close API は無いので drop に任せる。
         let _ = self.client.take();
@@ -201,22 +268,100 @@ impl Drop for PostgisWriter {
     }
 }
 
-/// `Crs` から PostGIS の SRID を解決する。
+/// `Crs` から PostGIS の SRID を解決し、必要なら `spatial_ref_sys` に行を自動登録する。
 ///
 /// 優先順位:
 /// 1. open_write 引数の明示 CRS
 /// 2. schema field metadata の CRS
 /// 3. なし → `apply_on_loss(missing-crs-on-postgis)` で `error` なら停止、`warn`/`skip` なら srid=0
-fn resolve_srid(crs_arg: Option<&Crs>, geom_meta: &GeometryMeta, on_loss: OnLoss) -> Result<i32> {
+///
+/// SRID が決定したあと、`spatial_ref_sys` に該当行が無ければ best-effort で INSERT する
+/// （`register_srs_if_missing` 参照）。WKT が `Crs.wkt` にも `epsg_to_wkt1` の同梱マップにも
+/// 無い場合は INSERT をスキップする。
+fn resolve_srid(
+    client: &Client,
+    crs_arg: Option<&Crs>,
+    geom_meta: &GeometryMeta,
+    on_loss: OnLoss,
+) -> Result<i32> {
     let crs: Option<Crs> = crs_arg.cloned().or_else(|| geom_meta.crs.clone());
-    if let Some(code) = crs.as_ref().and_then(Crs::epsg_code) {
+    let srid = epsg_from_crs(crs.as_ref(), on_loss)?;
+    if srid != 0 {
+        if let Some(c) = crs.as_ref() {
+            register_srs_if_missing(client, srid, c)?;
+        }
+    }
+    Ok(srid)
+}
+
+/// CRS から SRID 整数を取り出す純粋関数。`spatial_ref_sys` への副作用は分離して
+/// [`register_srs_if_missing`] で扱う（テスト容易性のため）。
+fn epsg_from_crs(crs: Option<&Crs>, on_loss: OnLoss) -> Result<i32> {
+    if let Some(code) = crs.and_then(Crs::epsg_code) {
         i32::try_from(code).map_err(|_| Error::Crs(format!("EPSG code {code} exceeds i32 range")))
     } else {
         // CRS 不明 or EPSG 化できない場合は srid=0 にフォールバック。
-        // 未登録 EPSG の `spatial_ref_sys` 自動 INSERT は未対応。
         let _ = apply_on_loss(loss_kind::MISSING_CRS_ON_POSTGIS, "<srs>", on_loss)?;
         Ok(0)
     }
+}
+
+/// `spatial_ref_sys` に SRID 行が無ければ INSERT する。`ON CONFLICT (srid) DO NOTHING` で
+/// race も既登録も同時に安全側に倒す（事前 SELECT は冗長なので発行しない）。
+///
+/// srtext は `Crs.wkt` (元データ由来、WKT1/WKT2 どちらでも) を最優先で使い、
+/// 無ければ `shpx_geom::epsg_to_wkt1(code)` の同梱マップにフォールバックする。
+/// どちらも取れなければ INSERT をスキップする — PostGIS の `geometry(_, srid)` 列定義は
+/// `spatial_ref_sys` 行が無くても作成・INSERT できるため、ベストエフォートで十分。
+/// `ST_Transform` などの関数は該当行を必要とするので、ユーザーが明示的に登録するか
+/// `--src-crs` で WKT 付きの CRS を補完すれば解消する。
+fn register_srs_if_missing(client: &Client, srid: i32, crs: &Crs) -> Result<()> {
+    let Some(code) = crs.epsg_code() else {
+        // EPSG 以外の authority は spatial_ref_sys (auth_name='EPSG') への登録対象外。
+        return Ok(());
+    };
+    let auth_srid = i32::try_from(code)
+        .map_err(|_| Error::Crs(format!("EPSG code {code} exceeds i32 range")))?;
+    let Some(srtext) = crs
+        .wkt
+        .clone()
+        .or_else(|| shpx_geom::epsg_to_wkt1(code).map(str::to_string))
+    else {
+        tracing::debug!(
+            target: "shpx::postgis",
+            srid,
+            epsg = code,
+            "spatial_ref_sys insert skipped: no WKT available"
+        );
+        return Ok(());
+    };
+    let inserted = conn::execute(
+        client,
+        "INSERT INTO spatial_ref_sys (srid, auth_name, auth_srid, srtext, proj4text) \
+         VALUES ($1, 'EPSG', $2, $3, NULL) ON CONFLICT (srid) DO NOTHING",
+        &[&srid, &auth_srid, &srtext],
+    )?;
+    if inserted > 0 {
+        tracing::info!(
+            target: "shpx::postgis",
+            srid,
+            epsg = code,
+            "registered missing CRS into spatial_ref_sys"
+        );
+    }
+    Ok(())
+}
+
+/// 対象テーブルが存在するかどうか。`relkind IN ('r', 'p')` で通常テーブルとパーティション親を許容。
+fn table_exists(client: &Client, schema: &str, table: &str) -> Result<bool> {
+    let row = conn::query_opt(
+        client,
+        "SELECT 1 FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p')",
+        &[&schema, &table],
+    )?;
+    Ok(row.is_some())
 }
 
 fn build_create_table_sql(
@@ -226,6 +371,7 @@ fn build_create_table_sql(
     qualified: &str,
     geom_type: GeometryType,
     srid: i32,
+    if_not_exists: bool,
 ) -> Result<String> {
     let mut cols: Vec<String> = Vec::with_capacity(attr_indices.len() + 1);
     for &i in attr_indices {
@@ -239,10 +385,12 @@ fn build_create_table_sql(
         quote_ident(geom_field.name()),
         geom_type_to_decl_name(geom_type)
     ));
-    Ok(format!(
-        "CREATE TABLE {qualified} (\n  {}\n)",
-        cols.join(",\n  ")
-    ))
+    let head = if if_not_exists {
+        "CREATE TABLE IF NOT EXISTS"
+    } else {
+        "CREATE TABLE"
+    };
+    Ok(format!("{head} {qualified} (\n  {}\n)", cols.join(",\n  ")))
 }
 
 /// `COPY <qualified> ("col1", ..., "geom") FROM STDIN BINARY` を組み立てる。
@@ -462,12 +610,33 @@ mod tests {
             "\"public\".\"places\"",
             GeometryType::Point,
             4326,
+            /* if_not_exists */ false,
         )
         .unwrap();
         assert!(sql.contains("\"name\" text"));
         assert!(sql.contains("\"count\" bigint"));
         assert!(sql.contains("\"geom\" geometry(Point, 4326)"));
         assert!(sql.starts_with("CREATE TABLE \"public\".\"places\""));
+    }
+
+    #[test]
+    fn build_create_table_sql_with_if_not_exists_prefix() {
+        let s = schema_with_geom(
+            vec![AField::new("v", DataType::Int32, true)],
+            GeometryType::Point,
+            Some(Crs::from_epsg(4326)),
+        );
+        let sql = build_create_table_sql(
+            &s,
+            &[0],
+            1,
+            "\"public\".\"t\"",
+            GeometryType::Point,
+            4326,
+            /* if_not_exists */ true,
+        )
+        .unwrap();
+        assert!(sql.starts_with("CREATE TABLE IF NOT EXISTS \"public\".\"t\""));
     }
 
     #[test]
@@ -485,29 +654,22 @@ mod tests {
         );
     }
 
+    // `resolve_srid` は `&Client` を要求するため統合テスト経路でしか叩けない。
+    // CRS から SRID を取り出す純粋部分は [`epsg_from_crs`] に切り出してあるので、こちらで
+    // ロジックの境界条件をユニットテストする。
     #[test]
-    fn resolve_srid_from_arg_overrides_meta() {
-        let meta = GeometryMeta::wkb(GeometryType::Point, Some(Crs::from_epsg(4326)));
-        let srid = resolve_srid(Some(&Crs::from_epsg(3857)), &meta, OnLoss::Error).unwrap();
-        assert_eq!(srid, 3857);
+    fn epsg_from_crs_with_known_authority() {
+        let crs = Crs::from_epsg(4326);
+        assert_eq!(epsg_from_crs(Some(&crs), OnLoss::Error).unwrap(), 4326);
     }
 
     #[test]
-    fn resolve_srid_falls_back_to_meta() {
-        let meta = GeometryMeta::wkb(GeometryType::Point, Some(Crs::from_epsg(4326)));
-        let srid = resolve_srid(None, &meta, OnLoss::Error).unwrap();
-        assert_eq!(srid, 4326);
+    fn epsg_from_crs_missing_with_error_aborts() {
+        assert!(epsg_from_crs(None, OnLoss::Error).is_err());
     }
 
     #[test]
-    fn resolve_srid_missing_with_error_aborts() {
-        let meta = GeometryMeta::wkb(GeometryType::Point, None);
-        assert!(resolve_srid(None, &meta, OnLoss::Error).is_err());
-    }
-
-    #[test]
-    fn resolve_srid_missing_with_warn_returns_zero() {
-        let meta = GeometryMeta::wkb(GeometryType::Point, None);
-        assert_eq!(resolve_srid(None, &meta, OnLoss::Warn).unwrap(), 0);
+    fn epsg_from_crs_missing_with_warn_returns_zero() {
+        assert_eq!(epsg_from_crs(None, OnLoss::Warn).unwrap(), 0);
     }
 }

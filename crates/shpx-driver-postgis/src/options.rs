@@ -3,7 +3,7 @@
 //! テーブル名は URI クエリ `?table=schema.name` または `?table=name`、
 //! あるいは環境変数 `SHPX_PG_TABLE` で指定する。schema 省略時は `public`。
 
-use shpx_core::{ReadOpts, Result, Uri, WriteOpts};
+use shpx_core::{CreateIndex, CreateTable, ReadOpts, Result, Uri, WriteOpts};
 
 use crate::util::{driver_msg, DRIVER_NAME};
 
@@ -66,10 +66,19 @@ pub struct ResolvedWriteOpts {
     pub table: String,
     pub on_loss: shpx_core::OnLoss,
     pub overwrite: bool,
+    pub create_table: CreateTable,
+    pub create_index: CreateIndex,
 }
 
 impl ResolvedWriteOpts {
     pub fn resolve(uri: &Uri, opts: &WriteOpts) -> Result<Self> {
+        // `--overwrite` は DROP→CREATE を要求するため `Never` (CREATE 発行禁止) と矛盾する。
+        // CLI 段階で気付かせるため早期に reject する。
+        if opts.overwrite && matches!(opts.create_table, CreateTable::Never) {
+            return Err(driver_msg(format!(
+                "{DRIVER_NAME}: --overwrite と --create-table=never は同時に指定できない"
+            )));
+        }
         let qualified = resolve_table(uri)?;
         let (schema, table) = split_qualified(&qualified);
         Ok(Self {
@@ -78,6 +87,8 @@ impl ResolvedWriteOpts {
             table,
             on_loss: opts.on_loss,
             overwrite: opts.overwrite,
+            create_table: opts.create_table,
+            create_index: opts.create_index,
         })
     }
 }
@@ -211,6 +222,28 @@ mod tests {
         let resolved = ResolvedReadOpts::resolve(&uri, &ReadOpts::default()).unwrap();
         assert_eq!(resolved.schema, "public");
         assert_eq!(resolved.table, "t");
+    }
+
+    #[test]
+    fn resolve_write_rejects_overwrite_with_never() {
+        let uri = Uri::from_path("pg://h/db?table=t");
+        let opts = WriteOpts {
+            overwrite: true,
+            create_table: CreateTable::Never,
+            ..Default::default()
+        };
+        let err = ResolvedWriteOpts::resolve(&uri, &opts).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("--overwrite"), "msg was: {msg}");
+        assert!(msg.contains("--create-table=never"), "msg was: {msg}");
+    }
+
+    #[test]
+    fn resolve_write_default_keeps_if_not_exists() {
+        let uri = Uri::from_path("pg://h/db?table=t");
+        let resolved = ResolvedWriteOpts::resolve(&uri, &WriteOpts::default()).unwrap();
+        assert_eq!(resolved.create_table, CreateTable::IfNotExists);
+        assert_eq!(resolved.create_index, CreateIndex::Auto);
     }
 
     #[test]

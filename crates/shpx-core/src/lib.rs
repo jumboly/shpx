@@ -18,7 +18,7 @@ pub use capabilities::{Capabilities, StringEncoding};
 pub use crs::{Crs, WktFlavor};
 pub use driver::{BulkLoadWriter, Driver, DriverRegistration, LayerReader, LayerWriter};
 pub use error::{Error, Result};
-pub use opts::{OnLoss, ReadOpts, WriteOpts};
+pub use opts::{CreateIndex, CreateTable, OnLoss, ReadOpts, WriteOpts};
 pub use schema::{Edges, GeometryEncoding, GeometryMeta, GeometryType, GEOMETRY_META_KEY};
 pub use uri::Uri;
 

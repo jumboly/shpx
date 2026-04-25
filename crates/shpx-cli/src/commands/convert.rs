@@ -32,6 +32,8 @@ fn build_write_opts(args: &ConvertArgs) -> WriteOpts {
         on_loss: args.on_loss.into(),
         overwrite: args.overwrite,
         batch_size_hint: args.batch_size,
+        create_table: args.create_table.into(),
+        create_index: args.create_index.into(),
     }
 }
 

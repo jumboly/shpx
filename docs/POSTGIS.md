@@ -4,7 +4,7 @@ PostgreSQL + PostGIS 拡張のテーブルを `shpx-driver-postgis` が担当す
 
 `Driver` trait は同期 API なので、driver crate 内で `tokio` ランタイムを 1 個保持し、各メソッドの先頭で `block_on` する形で同期化する。利用者から見えるインターフェースは他ドライバと完全に同じ。
 
-## 対応範囲（v0.3 cycle 3a 時点）
+## 対応範囲（v0.3 cycle 3b 時点）
 
 - 読み:
   - `pg://user:pass@host:port/db?table=<name>` で接続 → 1 テーブル全件 SELECT
@@ -16,10 +16,13 @@ PostgreSQL + PostGIS 拡張のテーブルを `shpx-driver-postgis` が担当す
   - SRID は最初の non-NULL geometry 行の `ST_SRID()` を使う（テーブル空のときは Crs 不明）
   - PG `numeric(p, s)` は `pg_attribute.atttypmod` から `(p, s)` を復元して Arrow `Decimal128(p, s)` に復号する。typmod が無い場合は `(38, 0)` フォールバック。
 - 書き:
-  - **batch 経路** (`--insert-mode=batch` または非 PG driver 既定): `--overwrite` で `DROP TABLE IF EXISTS <table>` → `CREATE TABLE` → 1 トランザクション + prepared `INSERT INTO ... VALUES ($1, ..., ST_GeomFromEWKB($N))` で行単位投入
+  - **batch 経路** (`--insert-mode=batch`): 1 トランザクション + prepared `INSERT INTO ... VALUES ($1, ..., ST_GeomFromEWKB($N))` で行単位投入
   - **bulk 経路** (`--insert-mode=bulk` または `auto` の既定、cycle 2): `COPY <table> (<cols>) FROM STDIN BINARY` を `tokio_postgres::CopyInSink` で送る。型ごとの BE 直書きエンコーダは `crates/shpx-driver-postgis/src/copy_binary.rs` に集約。
+  - **テーブル作成戦略 (cycle 3b)**: CLI `--create-table=if-not-exists|always|never`（既定 `if-not-exists`）。`--overwrite` と直交し、`--overwrite=true && --create-table=never` の組み合わせは整合性エラー。
+  - **GIST index 自動生成 (cycle 3b)**: CLI `--create-index=auto|always|never`（既定 `auto`）。`auto` は新規作成テーブルにのみ生成し、bulk 経路では COPY 完了後に発行する。
+  - **未登録 EPSG 自動登録 (cycle 3b)**: SRID 解決時に `spatial_ref_sys` を probe し、欠けていれば best-effort で `INSERT ... ON CONFLICT DO NOTHING`。
   - geometry 列は `geometry(<type>, <srid>)` で宣言（CRS の `epsg_code()` を SRID として使用）
-  - `--overwrite` 未指定で同名テーブルが既にあればエラー
+  - `--overwrite` 未指定 + `--create-table=always` で同名テーブルが既にあればエラー（PG の `relation already exists`）
 - ジオメトリ型: Point / LineString / Polygon / MultiPoint / MultiLineString / MultiPolygon（XY のみ）
 - CI 上の docker postgis (`postgis/postgis:16-3.4`) で SHP / Parquet ↔ PostGIS の batch/bulk 双方の往復テスト + Decimal128(38, 10) / bytea / timestamptz の bit-identical テストが緑
 
@@ -101,7 +104,43 @@ pg://user:password@host:5432/dbname?table=schema.name&...
   - `warn`: `srid=0` で書き込み + tracing 警告
   - `skip`: `srid=0` で書き込み（無音）
 
-未登録 EPSG の `spatial_ref_sys` 自動 INSERT は v0.3 cycle 3 で対応予定。
+#### 未登録 EPSG の `spatial_ref_sys` 自動登録 (cycle 3b)
+
+SRID が決まったあと、`spatial_ref_sys` に該当行が無ければ best-effort で 1 行 INSERT する。`Crs.wkt`（元データ由来、WKT1/WKT2 どちらでも）→ `shpx_geom::epsg_to_wkt1(code)`（同梱の主要 EPSG マップ: 4326 / 3857 / 4269 / 6668）の順で `srtext` を解決し、どちらも取れなければ INSERT をスキップする（PostGIS の `geometry(_, srid)` 列は `spatial_ref_sys` 行が無くても CREATE / INSERT できるため、ベストエフォートで充分）。
+
+| 列 | 値 |
+|---|---|
+| `srid` | `Crs.epsg_code()` を i32 化 |
+| `auth_name` | `'EPSG'` |
+| `auth_srid` | 同上 |
+| `srtext` | `Crs.wkt` または `epsg_to_wkt1(code)` |
+| `proj4text` | `NULL` |
+
+並列実行と既存登録との競合を避けるため、SQL は `INSERT ... ON CONFLICT (srid) DO NOTHING` を発行する。`--on-loss=error` でも本機能は **常に動作する**（loss を recover する目的のため、error mode は「より厳格に CRS を保存する」意味になる）。`Crs.epsg_code()` が無い CRS（authority が `EPSG` 以外）は `auth_name='EPSG'` と整合しないため登録対象外。
+
+## writer 拡張オプション (cycle 3b)
+
+### `--create-table=if-not-exists|always|never`
+
+| 値 | 挙動 | `--overwrite=true` との組み合わせ |
+|---|---|---|
+| `if-not-exists`（既定）| `CREATE TABLE IF NOT EXISTS` を発行。既存テーブルがあればそのまま append | DROP→CREATE IF NOT EXISTS（実質 always と同じ） |
+| `always` | `CREATE TABLE` を発行。既存テーブルがあれば PG エラー (relation already exists) | DROP→CREATE（旧来の `--overwrite` 単独と同じ挙動）|
+| `never` | CREATE を一切発行せず、`pg_class` で存在を検証してから既存テーブルへ append。テーブルが無ければ `Error::Driver` | **整合性エラー**（CLI / `ResolvedWriteOpts::resolve` で reject） |
+
+`never` で既存テーブルへ書き込む際、列スキーマの事前検証は行わない。型・列順・列名のミスマッチは `INSERT` または `COPY` 実行時の PG エラーに任せる（cycle 3c 以降の Future work で要件定義する）。
+
+### `--create-index=auto|always|never`
+
+PostGIS では geometry 列に GIST 空間インデックスを張るのが定石。bulk load では COPY 完了後に index を作る方が桁違いに速いため、本実装はインデックス発行のタイミングを `LayerWriter::finish()` の最後に統一している（batch / bulk 共通）。
+
+| 値 | 挙動 |
+|---|---|
+| `auto`（既定）| `CreateTable::Never` 経路では作らない（既存テーブルに勝手に index を張らない）。それ以外（`IfNotExists` / `Always`）では発行する。|
+| `always` | `--create-table` の値に関わらず常に発行。index 名衝突は `IF NOT EXISTS` で no-op。|
+| `never` | 一切発行しない。 |
+
+index 名は `idx_<table>_<geom_col>` を識別子クオートしたもの（例: `"idx_places_geom"`）。index 自体は対象テーブルと同じ schema に作られる（PostgreSQL は schema 修飾子を付けず指定する）。SQL は `CREATE INDEX IF NOT EXISTS {idx} ON {qualified} USING GIST ({geom_col})` を 1 文だけ発行。
 
 ## ジオメトリ (EWKB)
 
@@ -160,15 +199,14 @@ Z/M / GeometryCollection は `shpx-geom::wkb` 自体が未対応のため、Post
 ## 損失変換
 
 - CRS 無し → `apply_on_loss("missing-crs-on-postgis", ...)`
-- 未登録 EPSG → cycle 3 で `spatial_ref_sys` 自動 INSERT、cycle 1 では cycle 3 と同じ kind を使い srid=0 fallback
+- 未登録 EPSG → cycle 3b で `spatial_ref_sys` への自動 INSERT を実装（WKT 解決可能な場合のみ、ベストエフォート）
 
-## スコープ外（cycle 3b 以降）
+## スコープ外（cycle 3c 以降）
 
-v0.3 cycle 3a 完了時点で以下は未対応:
+v0.3 cycle 3b 完了時点で以下は未対応:
 
-- **`--create-table=if-not-exists|always|never`** writer 側の制御（cycle 3b。現状は `--overwrite` で DROP するだけ）
-- **GIST index 自動生成オプション**（cycle 3b）
-- **`spatial_ref_sys` への未登録 EPSG 自動 INSERT**（cycle 3b）
+- **1000 万行 × 10 属性のベンチで `ogr2ogr` の 50% 以上の速度**（cycle 3c で計測 / 完了基準確定）
+- **`--create-table=never` での列スキーマ事前検証**（現状は INSERT/COPY 時の PG エラー任せ）
 - **streaming reader**（現状は全件 in-memory）
 - Z/M 座標、GeometryCollection
 - 複数テーブルの一括書き出し / マテリアライズドビュー

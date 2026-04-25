@@ -46,4 +46,45 @@ pub struct WriteOpts {
     pub overwrite: bool,
     /// 1 RecordBatch あたりの行数の希望値。Driver がこの値を尊重する保証は無い。
     pub batch_size_hint: Option<usize>,
+    /// テーブル作成戦略（RDB driver でのみ意味を持つ）。ファイル driver は無視する。
+    pub create_table: CreateTable,
+    /// 空間インデックス自動生成戦略（RDB driver でのみ意味を持つ）。ファイル driver は無視する。
+    pub create_index: CreateIndex,
+}
+
+/// テーブル作成戦略。RDB driver (PostGIS など) でのみ意味を持つ。
+///
+/// `--overwrite` と組み合わせる際の規約:
+/// - `--overwrite=true` && `Never` は driver 側で整合性エラーにする（DROP した直後に
+///   テーブルが無い状態で INSERT は不可能なため）。
+/// - `--overwrite=true` は事実上 `Always` 相当の挙動を要求するが、CLI の互換性のため
+///   独立フラグとして共存させる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CreateTable {
+    /// 既定。テーブルが存在しなければ作成、あれば触らずに既存スキーマへ書き込む（append）。
+    #[default]
+    IfNotExists,
+    /// 既存有無に関わらず CREATE を発行する。`--overwrite=true` と併用すれば DROP→CREATE。
+    /// 既存テーブルがあれば PG エラー (relation already exists) で停止する。
+    Always,
+    /// CREATE を一切発行しない。事前に手動で作成済みの既存テーブルへ append する用途。
+    /// テーブルが存在しなければ driver 側で `Error::Driver` を返す。
+    Never,
+}
+
+/// 空間インデックス自動生成戦略。RDB driver でのみ意味を持つ。
+///
+/// PostGIS では bulk load 後に GIST index を作るのが定石（COPY 前に index があると
+/// 1 桁遅くなる）。本オプションは `LayerWriter::finish` / `BulkLoadWriter::bulk_write`
+/// の最後に `CREATE INDEX IF NOT EXISTS ... USING GIST (geom_col)` を発行する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CreateIndex {
+    /// 既定。writer がテーブルを **新規作成した場合のみ** index を発行する。`Never` 経路、
+    /// および `IfNotExists` 経路で既存テーブルへ append したケースでは触らない。
+    #[default]
+    Auto,
+    /// `create_table` の値に関わらず必ず index を発行する (`IF NOT EXISTS` で重複は安全)。
+    Always,
+    /// index を一切発行しない。
+    Never,
 }

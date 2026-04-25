@@ -93,6 +93,18 @@ pub fn batch_execute(client: &Client, sql: &str) -> shpx_core::Result<()> {
         .map_err(|e| driver_err(&e))
 }
 
+/// 同期ラッパ: パラメータ化された 1 文の `execute`（影響行数を返す）。
+/// `INSERT` / `UPDATE` / `DELETE` でユーザー由来の値を bind して安全に発行するために使う。
+pub fn execute(
+    client: &Client,
+    sql: &str,
+    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+) -> shpx_core::Result<u64> {
+    let rt = runtime()?;
+    rt.block_on(client.execute(sql, params))
+        .map_err(|e| driver_err(&e))
+}
+
 /// 同期ラッパ: prepared statement を作って返す。connection-scoped なので
 /// transaction 跨ぎで再利用できる（`Statement` は内部 Arc で Clone も安価）。
 pub fn prepare(client: &Client, sql: &str) -> shpx_core::Result<tokio_postgres::Statement> {

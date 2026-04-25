@@ -4,10 +4,13 @@
 
 ## [Unreleased]
 
-v0.3 マイルストーン「PostGIS」の cycle 1 + cycle 2 + cycle 3a 進捗。cycle 3 は 3a/3b/3c に分割済み（`docs/ROADMAP.md` 参照）。
+v0.3 マイルストーン「PostGIS」の cycle 1 + cycle 2 + cycle 3a + cycle 3b 進捗。残るは cycle 3c（ベンチと完了基準確定）（`docs/ROADMAP.md` 参照）。
 
 ### Added
 
+- **shpx-core (`WriteOpts` 拡張, v0.3 cycle 3b)**: `CreateTable { IfNotExists, Always, Never }` と `CreateIndex { Auto, Always, Never }` の 2 enum を `opts` モジュールに追加し、`WriteOpts` に同名フィールドを追加。RDB driver（PostGIS など）が CREATE TABLE / CREATE INDEX を制御するための受け口。ファイル driver は無視するため後方互換は保たれる。Default は `IfNotExists` / `Auto`。
+- **shpx-cli (`convert --create-table / --create-index`, v0.3 cycle 3b)**: `convert` サブコマンドに `--create-table=if-not-exists|always|never`（既定 `if-not-exists`）と `--create-index=auto|always|never`（既定 `auto`）を追加。`--overwrite` とは直交し、`--overwrite && --create-table=never` は driver 側 `ResolvedWriteOpts::resolve` で整合性エラーになる。
+- **shpx-driver-postgis (v0.3 cycle 3b)**: writer 拡張。`PostgisWriter::open` で `--create-table` の値に応じて `CREATE TABLE IF NOT EXISTS` / `CREATE TABLE` を切り替え、`Never` は `pg_class` で存在検証してから既存テーブルへ append する（無ければ `Error::Driver`）。GIST index は `LayerWriter::finish()` で `CREATE INDEX IF NOT EXISTS idx_<table>_<geom> ON <qualified> USING GIST (<geom_col>)` を発行し、bulk 経路では COPY 完了後に発行する（COPY 前に index があると遅くなる定石）。SRID 解決時に `spatial_ref_sys` を probe し、欠けていれば `Crs.wkt`（元データ由来、WKT1/WKT2 どちらでも）→ `shpx_geom::epsg_to_wkt1(code)` 同梱マップの順で `srtext` を解決し、`INSERT ... ON CONFLICT (srid) DO NOTHING` で best-effort 登録する。WKT が解決できない場合は INSERT スキップ（PostGIS の geometry 列定義は `spatial_ref_sys` 行が無くても CREATE/INSERT できるため）。env-gated 統合テスト 9 件を `tests/writer_options.rs` に追加。
 - **shpx-core (`ReadOpts` 拡張, v0.3 cycle 3a)**: `where_clause` / `select` / `query` の 3 フィールドを追加。RDB driver（PostGIS など）が SQL に埋め込むための CLI 引数受け口。ファイル driver は無視するため後方互換は保たれる。
 - **shpx-cli (`convert --where / --select / --query`, v0.3 cycle 3a)**: `convert` サブコマンドに `--where '<sql>'` / `--select c1,c2,...` / `--query 'SELECT ...'` を追加。`--query` は他 2 つと clap の `conflicts_with_all` で排他。`--select` は `value_delimiter = ','` で複数列を 1 引数で受ける。ファイル URI に対してこれらが指定された場合は tracing 警告で告知し、driver は静かに無視する。
 - **shpx-driver-postgis (v0.3 cycle 3a)**: reader を 「table モード」と「query モード」の 2 経路に分割。table モードでは `?table=` で解決した完全修飾名に `--where` / `--select` を埋め込み、`SELECT col1, ..., ST_AsEWKB(geom) FROM "schema"."table" [WHERE <sql>]` を生成する。query モードではユーザ SQL を `SELECT * FROM (<query>) AS shpx_q LIMIT 0` でサブクエリ化して `tokio_postgres::Statement::columns()` から列メタを取り、`Type::name() == "geometry"|"geography"` で geometry 列を検出して本番 SQL を再構築する。SRID 解決は table モードでは `geometry_columns` view → 先頭 `ST_SRID()` の 2 段、query モードはサブクエリ経由の先頭 `ST_SRID()` のみ。geometry 列を含まない `--select` / `--query` は `Error::Driver` で停止し、`--query` 中の `;` も同様に停止する。
