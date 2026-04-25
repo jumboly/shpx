@@ -85,6 +85,33 @@ impl GeometryMeta {
     }
 }
 
+/// Arrow schema を走査して [`GEOMETRY_META_KEY`] を持つ最初の列の
+/// `(列インデックス, 列名, GeometryMeta)` を返す。geometry 列が無ければ `Ok(None)`。
+pub fn find_geometry_column(
+    schema: &arrow_schema::SchemaRef,
+) -> crate::Result<Option<(usize, String, GeometryMeta)>> {
+    for (i, f) in schema.fields().iter().enumerate() {
+        if let Some(json) = f.metadata().get(GEOMETRY_META_KEY) {
+            let meta = GeometryMeta::from_json(json)?;
+            return Ok(Some((i, f.name().clone(), meta)));
+        }
+    }
+    Ok(None)
+}
+
+/// [`find_geometry_column`] と同じだが、列が無ければ [`Error::Schema`] を返す。
+///
+/// [`Error::Schema`]: crate::Error::Schema
+pub fn require_geometry_column(
+    schema: &arrow_schema::SchemaRef,
+) -> crate::Result<(usize, String, GeometryMeta)> {
+    find_geometry_column(schema)?.ok_or_else(|| {
+        crate::Error::Schema(format!(
+            "no geometry column found (no field has metadata key `{GEOMETRY_META_KEY}`)"
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

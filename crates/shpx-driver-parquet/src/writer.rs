@@ -9,7 +9,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use shpx_core::{
-    schema::{GeometryMeta, GEOMETRY_META_KEY},
+    schema::{require_geometry_column, GeometryMeta},
     Crs, Error, LayerWriter, Result, Uri, WriteOpts,
 };
 
@@ -17,9 +17,11 @@ use crate::geo_meta::{self, GEO_KV_KEY};
 use crate::util::driver_err;
 
 /// GeoParquet の `LayerWriter` 実装。
+///
+/// 状態は `inner: Option<...>` 1 つで表現する。`Some` なら未 finalize、
+/// `None` なら `finish()` 済みもしくは drop 中。
 pub struct ParquetWriter {
     inner: Option<ArrowWriter<File>>,
-    finished: bool,
 }
 
 impl ParquetWriter {
@@ -74,10 +76,7 @@ impl ParquetWriter {
 
         let inner =
             ArrowWriter::try_new(file, schema, Some(props)).map_err(|e| driver_err(&e))?;
-        Ok(Self {
-            inner: Some(inner),
-            finished: false,
-        })
+        Ok(Self { inner: Some(inner) })
     }
 }
 
@@ -86,21 +85,11 @@ impl ParquetWriter {
 /// 引数の `crs`（reader 由来 or `--src-crs` 等で確定したもの）があれば、
 /// schema の field metadata に書かれた `crs` よりそちらを優先する。
 fn build_primary_meta(schema: &SchemaRef, crs: Option<Crs>) -> Result<(String, GeometryMeta)> {
-    let (idx, json) = schema
-        .fields()
-        .iter()
-        .enumerate()
-        .find_map(|(i, f)| f.metadata().get(GEOMETRY_META_KEY).map(|j| (i, j)))
-        .ok_or_else(|| {
-            Error::Schema(format!(
-                "no geometry column found (no field has metadata key `{GEOMETRY_META_KEY}`)"
-            ))
-        })?;
-    let mut meta = GeometryMeta::from_json(json)?;
+    let (_idx, name, mut meta) = require_geometry_column(schema)?;
     if crs.is_some() {
         meta.crs = crs;
     }
-    Ok((schema.field(idx).name().clone(), meta))
+    Ok((name, meta))
 }
 
 impl LayerWriter for ParquetWriter {
@@ -117,14 +106,13 @@ impl LayerWriter for ParquetWriter {
         if let Some(inner) = self.inner.take() {
             inner.close().map_err(|e| driver_err(&e))?;
         }
-        self.finished = true;
         Ok(())
     }
 }
 
 impl Drop for ParquetWriter {
     fn drop(&mut self) {
-        if !self.finished && self.inner.is_some() {
+        if self.inner.is_some() {
             tracing::warn!(target: "shpx::parquet", "ParquetWriter dropped without finish()");
         }
     }

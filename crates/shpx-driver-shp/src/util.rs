@@ -26,18 +26,12 @@ pub mod loss_kind {
 /// 任意の `Display` を `Error::Driver` に詰める。`shapefile::Error` / `dbase::Error` を
 /// 個別に wrap する関数を作るより、1 関数で両方賄う。
 pub fn driver_err<E: std::fmt::Display>(e: &E) -> Error {
-    Error::Driver {
-        name: DRIVER_NAME,
-        msg: e.to_string(),
-    }
+    Error::driver(DRIVER_NAME, e)
 }
 
 /// 文字列メッセージから `Error::Driver` を作る。
 pub fn driver_msg(msg: impl Into<String>) -> Error {
-    Error::Driver {
-        name: DRIVER_NAME,
-        msg: msg.into(),
-    }
+    Error::driver_msg(DRIVER_NAME, msg)
 }
 
 /// 損失検出時の挙動を 1 箇所で適用する。

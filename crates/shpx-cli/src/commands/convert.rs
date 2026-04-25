@@ -1,6 +1,6 @@
 //! `shpx convert <src> <dst>` の実装。
 
-use shpx_core::{Error, ReadOpts, Result, Uri, WriteOpts};
+use shpx_core::{ReadOpts, Result, Uri, WriteOpts};
 
 use crate::cli::ConvertArgs;
 use crate::commands::parse_src_crs;
@@ -10,10 +10,10 @@ pub fn run(args: ConvertArgs) -> Result<()> {
     let src_uri = Uri::from_path(args.src.to_string_lossy().to_string());
     let dst_uri = Uri::from_path(args.dst.to_string_lossy().to_string());
 
-    let src_driver = registry::select_driver(&src_uri)
-        .ok_or_else(|| no_driver_error(&src_uri.scheme, "input"))?;
-    let dst_driver = registry::select_driver(&dst_uri)
-        .ok_or_else(|| no_driver_error(&dst_uri.scheme, "output"))?;
+    let src_driver =
+        registry::select_driver(&src_uri).ok_or_else(|| registry::driver_not_found(&src_uri))?;
+    let dst_driver =
+        registry::select_driver(&dst_uri).ok_or_else(|| registry::driver_not_found(&dst_uri))?;
 
     let read_opts = ReadOpts {
         src_crs: parse_src_crs(args.src_crs.as_deref())?,
@@ -52,16 +52,4 @@ pub fn run(args: ConvertArgs) -> Result<()> {
         "convert ok"
     );
     Ok(())
-}
-
-fn no_driver_error(scheme: &str, side: &str) -> Error {
-    if scheme.is_empty() {
-        Error::Format(format!(
-            "{side} has no extension; cannot infer driver"
-        ))
-    } else {
-        Error::Format(format!(
-            "no driver for {side} scheme `{scheme}`"
-        ))
-    }
 }

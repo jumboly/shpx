@@ -12,7 +12,7 @@ use arrow_array::RecordBatch;
 use arrow_schema::{Field, Schema, SchemaRef};
 use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder};
 use shpx_core::{
-    schema::{GeometryMeta, GEOMETRY_META_KEY},
+    schema::{find_geometry_column, GeometryMeta, GEOMETRY_META_KEY},
     Crs, Error, LayerReader, ReadOpts, Result, Uri,
 };
 
@@ -39,12 +39,9 @@ impl ParquetReader {
         let builder =
             ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| driver_err(&e))?;
 
-        let row_count = usize::try_from(builder.metadata().file_metadata().num_rows())
-            .ok()
-            .map(|n| if n == 0 { 0 } else { n });
-
-        let kv = builder.metadata().file_metadata().key_value_metadata();
-        let geo_value = kv.and_then(|list| {
+        let file_metadata = builder.metadata().file_metadata();
+        let row_count = usize::try_from(file_metadata.num_rows()).ok();
+        let geo_value = file_metadata.key_value_metadata().and_then(|list| {
             list.iter()
                 .find(|kv| kv.key == GEO_KV_KEY)
                 .and_then(|kv| kv.value.clone())
@@ -88,14 +85,8 @@ fn enrich_schema(
     raw: &SchemaRef,
     geo: Option<&(String, GeometryMeta)>,
 ) -> Result<(SchemaRef, Option<Crs>)> {
-    // 既に shpx:geometry を持つ列があれば、それを信用する。
-    let preexisting_idx = raw
-        .fields()
-        .iter()
-        .position(|f| f.metadata().contains_key(GEOMETRY_META_KEY));
-    if let Some(i) = preexisting_idx {
-        let json = raw.field(i).metadata().get(GEOMETRY_META_KEY).expect("just checked");
-        let meta = GeometryMeta::from_json(json)?;
+    // 既に shpx:geometry を持つ列があれば、そちらを優先する。
+    if let Some((_, _, meta)) = find_geometry_column(raw)? {
         return Ok((raw.clone(), meta.crs));
     }
 
@@ -108,15 +99,21 @@ fn enrich_schema(
             "primary geometry column `{primary}` not found in Parquet schema"
         )));
     };
-    let mut fields: Vec<Arc<Field>> = raw.fields().iter().cloned().collect();
-    let mut new_field = Field::clone(&fields[idx]);
+
+    // 変更対象 1 列だけを Field::clone し、他は Arc 共有のままにする。
+    let mut new_field = Field::clone(raw.field(idx));
     let mut metadata: HashMap<String, String> = new_field.metadata().clone();
     metadata.insert(GEOMETRY_META_KEY.to_string(), meta.to_json()?);
     new_field.set_metadata(metadata);
-    fields[idx] = Arc::new(new_field);
+
+    let fields: Vec<Arc<Field>> = raw
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(i, f)| if i == idx { Arc::new(new_field.clone()) } else { f.clone() })
+        .collect();
 
     let mut schema = Schema::new(fields);
-    // Arrow Schema 自身のファイルレベル metadata は内容を維持する。
     schema.metadata.clone_from(raw.metadata());
     Ok((Arc::new(schema), meta.crs.clone()))
 }

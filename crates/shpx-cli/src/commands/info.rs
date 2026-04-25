@@ -1,9 +1,6 @@
 //! `shpx info <src>` の実装。
 
-use shpx_core::{
-    schema::{GeometryMeta, GEOMETRY_META_KEY},
-    Crs, ReadOpts, Result, Uri,
-};
+use shpx_core::{schema::find_geometry_column, Crs, ReadOpts, Result, Uri};
 
 use crate::cli::InfoArgs;
 use crate::commands::parse_src_crs;
@@ -11,13 +8,7 @@ use crate::registry;
 
 pub fn run(args: InfoArgs) -> Result<()> {
     let uri = Uri::from_path(args.src.to_string_lossy().to_string());
-    let driver = registry::select_driver(&uri).ok_or_else(|| {
-        shpx_core::Error::Format(if uri.scheme.is_empty() {
-            "input has no extension; cannot infer driver".to_string()
-        } else {
-            format!("no driver for input scheme `{}`", uri.scheme)
-        })
-    })?;
+    let driver = registry::select_driver(&uri).ok_or_else(|| registry::driver_not_found(&uri))?;
 
     let opts = ReadOpts {
         src_crs: parse_src_crs(args.src_crs.as_deref())?,
@@ -26,23 +17,20 @@ pub fn run(args: InfoArgs) -> Result<()> {
     let reader = driver.open_read(&uri, &opts)?;
     let schema = reader.schema();
     let crs = reader.crs();
-    let row_count = reader.row_count_hint();
 
     println!("driver:  {}", driver.name());
-    match row_count {
+    match reader.row_count_hint() {
         Some(n) => println!("rows:    {n}"),
         None => println!("rows:    (unknown)"),
     }
     println!("crs:     {}", format_crs(crs));
 
-    let geom = find_geometry(&schema)?;
-    if let Some((name, meta)) = geom {
-        println!(
+    match find_geometry_column(&schema)? {
+        Some((_, name, meta)) => println!(
             "geometry: {name} ({:?}, encoding={:?})",
             meta.geometry_type, meta.encoding
-        );
-    } else {
-        println!("geometry: (none)");
+        ),
+        None => println!("geometry: (none)"),
     }
 
     println!("schema:");
@@ -66,28 +54,17 @@ pub fn run(args: InfoArgs) -> Result<()> {
 }
 
 fn format_crs(crs: Option<&Crs>) -> String {
-    match crs {
-        None => "(none)".to_string(),
-        Some(c) => match c.epsg_code() {
-            Some(code) => format!("EPSG:{code}"),
-            None => match c.wkt.as_deref() {
-                Some(w) => {
-                    let head: String = w.chars().take(60).collect();
-                    format!("WKT: {head}…")
-                }
-                None => "(unknown)".to_string(),
-            },
-        },
+    let Some(c) = crs else {
+        return "(none)".to_string();
+    };
+    if let Some(code) = c.epsg_code() {
+        return format!("EPSG:{code}");
     }
-}
-
-fn find_geometry(
-    schema: &arrow_schema::SchemaRef,
-) -> Result<Option<(String, GeometryMeta)>> {
-    for f in schema.fields() {
-        if let Some(json) = f.metadata().get(GEOMETRY_META_KEY) {
-            return Ok(Some((f.name().clone(), GeometryMeta::from_json(json)?)));
+    match c.wkt.as_deref() {
+        Some(w) => {
+            let head: String = w.chars().take(60).collect();
+            format!("WKT: {head}…")
         }
+        None => "(unknown)".to_string(),
     }
-    Ok(None)
 }

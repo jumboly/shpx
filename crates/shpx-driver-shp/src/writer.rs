@@ -17,8 +17,7 @@ use encoding_rs::Encoding;
 use shapefile::dbase::{Date as DbfDate, FieldValue, Record, TableWriterBuilder};
 use shapefile::{ShapeType, Writer as ShpWriterInner};
 use shpx_core::{
-    schema::{GeometryMeta, GEOMETRY_META_KEY},
-    Crs, Error, LayerWriter, OnLoss, Result, Uri, WriteOpts,
+    schema::require_geometry_column, Crs, Error, LayerWriter, OnLoss, Result, Uri, WriteOpts,
 };
 use shpx_geom::wkb;
 
@@ -69,7 +68,7 @@ impl ShpWriter {
             }
         }
 
-        let (geom_index, geom_meta) = find_geometry_field(schema)?;
+        let (geom_index, _geom_name, geom_meta) = require_geometry_column(schema)?;
         let shape_type = decide_output_shape_type(geom_meta.geometry_type)?;
 
         let plan = plan_dbf_writer_schema(schema, Some(geom_index), opts.on_loss)?;
@@ -103,20 +102,6 @@ impl ShpWriter {
             finished: false,
         })
     }
-}
-
-fn find_geometry_field(schema: &SchemaRef) -> Result<(usize, GeometryMeta)> {
-    schema
-        .fields()
-        .iter()
-        .enumerate()
-        .find_map(|(i, f)| f.metadata().get(GEOMETRY_META_KEY).map(|json| (i, json)))
-        .ok_or_else(|| {
-            Error::Schema(format!(
-                "no geometry column found (no field has metadata key `{GEOMETRY_META_KEY}`)"
-            ))
-        })
-        .and_then(|(i, json)| Ok((i, GeometryMeta::from_json(json)?)))
 }
 
 impl LayerWriter for ShpWriter {

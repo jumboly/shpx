@@ -60,5 +60,24 @@ pub enum Error {
     Format(String),
 }
 
+impl Error {
+    /// `Error::Driver` を `Display` 値からビルドする。
+    /// 各 driver crate が外部ライブラリのエラーを 1 行で wrap するための糖衣。
+    pub fn driver(name: &'static str, e: impl std::fmt::Display) -> Self {
+        Self::Driver {
+            name,
+            msg: e.to_string(),
+        }
+    }
+
+    /// `Error::Driver` を文字列メッセージからビルドする。
+    pub fn driver_msg(name: &'static str, msg: impl Into<String>) -> Self {
+        Self::Driver {
+            name,
+            msg: msg.into(),
+        }
+    }
+}
+
 /// shpx 標準の Result 型エイリアス。
 pub type Result<T> = std::result::Result<T, Error>;
