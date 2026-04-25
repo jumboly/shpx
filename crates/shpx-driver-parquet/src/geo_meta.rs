@@ -42,7 +42,10 @@ pub fn build_geo_metadata(primary_column: &str, meta: &GeometryMeta) -> Result<S
     };
 
     let mut col = Map::new();
-    col.insert("encoding".to_string(), json!(encoding_to_str(meta.encoding)));
+    col.insert(
+        "encoding".to_string(),
+        json!(encoding_to_str(meta.encoding)),
+    );
     // GeoParquet 仕様で必須。v0.1 は実列値を走査せず空配列で「混在許可」を表す。
     col.insert("geometry_types".to_string(), json!([]));
     col.insert("crs".to_string(), crs_value);
@@ -148,7 +151,10 @@ fn parse_geometry_types(v: Option<&Value>) -> GeometryType {
         return GeometryType::Geometry;
     };
     // GeoParquet 仕様の `Z`/`M`/`ZM` サフィックスは v0.1 では無視して基底型のみ使う。
-    let base = s.trim_end_matches(" ZM").trim_end_matches(" Z").trim_end_matches(" M");
+    let base = s
+        .trim_end_matches(" ZM")
+        .trim_end_matches(" Z")
+        .trim_end_matches(" M");
     match base {
         "Point" => GeometryType::Point,
         "LineString" => GeometryType::LineString,
@@ -193,10 +199,7 @@ mod tests {
         assert_eq!(v["primary_column"], "geometry");
         assert_eq!(v["columns"]["geometry"]["encoding"], "WKB");
         assert_eq!(v["columns"]["geometry"]["edges"], "planar");
-        assert_eq!(
-            v["columns"]["geometry"]["crs"]["id"]["authority"],
-            "EPSG"
-        );
+        assert_eq!(v["columns"]["geometry"]["crs"]["id"]["authority"], "EPSG");
         assert_eq!(v["columns"]["geometry"]["crs"]["id"]["code"], 4326);
         assert!(v["columns"]["geometry"]["geometry_types"].is_array());
     }

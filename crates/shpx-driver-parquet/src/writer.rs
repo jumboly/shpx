@@ -25,12 +25,7 @@ pub struct ParquetWriter {
 }
 
 impl ParquetWriter {
-    pub fn open(
-        uri: &Uri,
-        schema: SchemaRef,
-        crs: Option<Crs>,
-        opts: &WriteOpts,
-    ) -> Result<Self> {
+    pub fn open(uri: &Uri, schema: SchemaRef, crs: Option<Crs>, opts: &WriteOpts) -> Result<Self> {
         let path = PathBuf::from(uri.path());
 
         // overwrite=false で既存ファイルがあれば create_new が EEXIST を返す。
@@ -61,12 +56,11 @@ impl ParquetWriter {
         let (primary_column, geom_meta) = build_primary_meta(&schema, crs)?;
         let geo_json = geo_meta::build_geo_metadata(&primary_column, &geom_meta)?;
 
-        let mut props_builder = WriterProperties::builder().set_key_value_metadata(Some(vec![
-            KeyValue {
+        let mut props_builder =
+            WriterProperties::builder().set_key_value_metadata(Some(vec![KeyValue {
                 key: GEO_KV_KEY.to_string(),
                 value: Some(geo_json),
-            },
-        ]));
+            }]));
         if let Some(n) = opts.batch_size_hint {
             if n > 0 {
                 props_builder = props_builder.set_max_row_group_size(n);
@@ -74,8 +68,7 @@ impl ParquetWriter {
         }
         let props = props_builder.build();
 
-        let inner =
-            ArrowWriter::try_new(file, schema, Some(props)).map_err(|e| driver_err(&e))?;
+        let inner = ArrowWriter::try_new(file, schema, Some(props)).map_err(|e| driver_err(&e))?;
         Ok(Self { inner: Some(inner) })
     }
 }

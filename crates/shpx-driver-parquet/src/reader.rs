@@ -36,8 +36,7 @@ impl ParquetReader {
     pub fn open(uri: &Uri, opts: &ReadOpts) -> Result<Self> {
         let path = PathBuf::from(uri.path());
         let file = File::open(&path)?;
-        let builder =
-            ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| driver_err(&e))?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| driver_err(&e))?;
 
         let file_metadata = builder.metadata().file_metadata();
         let row_count = usize::try_from(file_metadata.num_rows()).ok();
@@ -110,7 +109,13 @@ fn enrich_schema(
         .fields()
         .iter()
         .enumerate()
-        .map(|(i, f)| if i == idx { Arc::new(new_field.clone()) } else { f.clone() })
+        .map(|(i, f)| {
+            if i == idx {
+                Arc::new(new_field.clone())
+            } else {
+                f.clone()
+            }
+        })
         .collect();
 
     let mut schema = Schema::new(fields);
