@@ -12,6 +12,7 @@ use shpx_core::{inventory, Driver, DriverRegistration, Error, Uri};
 // リンクする。これらを `use _` しないとリンカが未参照と判断して
 // crate ごと strip し、`inventory::iter` が空になる。
 use shpx_driver_csv as _;
+use shpx_driver_fgb as _;
 use shpx_driver_geojson as _;
 use shpx_driver_gpkg as _;
 use shpx_driver_parquet as _;
@@ -139,6 +140,13 @@ mod tests {
         let d = select_driver(&Uri::from_path("/tmp/sample.gpkg"));
         assert!(d.is_some());
         assert_eq!(d.unwrap().name(), "gpkg");
+    }
+
+    #[test]
+    fn select_driver_for_fgb() {
+        let d = select_driver(&Uri::from_path("/tmp/sample.fgb"));
+        assert!(d.is_some());
+        assert_eq!(d.unwrap().name(), "fgb");
     }
 
     #[test]

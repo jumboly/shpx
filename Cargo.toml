@@ -13,6 +13,7 @@ members = [
     "crates/shpx-driver-csv",
     "crates/shpx-driver-geojson",
     "crates/shpx-driver-gpkg",
+    "crates/shpx-driver-fgb",
     "crates/shpx-cli",
 ]
 
@@ -20,7 +21,9 @@ members = [
 version = "0.1.0"
 edition = "2021"
 # MSRV。CI でこのバージョンと最新 stable の双方を検証する。
-rust-version = "1.79"
+# flatgeobuf 6.0 (FGB ドライバが依存) が `rust-version = 1.85` を要求するため、
+# v0.2 cycle 4 で 1.79 → 1.85 に引き上げ。
+rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/jumboly/shpx"
 authors = ["shpx contributors"]
@@ -44,6 +47,12 @@ geojson       = { version = "0.24", default-features = false }
 # `bundled` 機能は各 driver crate 側で有効化する（cargo-dist の単一バイナリ配布で
 # システム libsqlite3 への依存を避けるため。CI に追加 apt パッケージ不要）。
 rusqlite      = { version = "0.31", default-features = false }
+
+# FlatGeobuf ドライバ。`default-features = false` で HTTP feature (reqwest) を排除する
+# ため、ローカル file I/O 用途のみとなる。geozero は flatgeobuf の必須依存で、
+# WKB ↔ FGB geometry の橋渡しに利用するため shpx 側でも明示的に有効化しておく。
+flatgeobuf    = { version = "6.0", default-features = false }
+geozero       = { version = "0.15", default-features = false, features = ["with-wkb"] }
 
 # CLI / エラー / シリアライズ
 clap          = { version = "4.5", features = ["derive", "wrap_help"] }

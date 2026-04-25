@@ -255,14 +255,7 @@ fn register_srs(
                 let srs_name = format!("EPSG:{code}");
                 conn.execute(
                     meta::SQL_INSERT_SRS,
-                    rusqlite::params![
-                        srs_name,
-                        code_i32,
-                        meta::ORG_EPSG,
-                        code_i32,
-                        definition,
-                        ""
-                    ],
+                    rusqlite::params![srs_name, code_i32, meta::ORG_EPSG, code_i32, definition, ""],
                 )
                 .map_err(|e| driver_err(&e))?;
                 Ok(code_i32)

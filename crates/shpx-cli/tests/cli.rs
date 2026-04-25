@@ -178,6 +178,7 @@ fn drivers_lists_shp_and_parquet() {
         .stdout(contains("- csv"))
         .stdout(contains("- geojson"))
         .stdout(contains("- gpkg"))
+        .stdout(contains("- fgb"))
         .stdout(contains("schemes:"))
         .stdout(contains("read+write"));
 }
@@ -367,6 +368,51 @@ fn convert_shp_to_geojsonl_uses_lines_format() {
     assert_eq!(lines.len(), 2);
     assert!(lines[0].starts_with('{'));
     assert!(lines[0].contains(r#""type":"Feature""#));
+}
+
+#[test]
+fn convert_shp_to_fgb_then_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let shp = dir.path().join("p.shp");
+    let fgb = dir.path().join("p.fgb");
+    let back = dir.path().join("back.shp");
+    make_point_shp(&shp);
+
+    // SHP → FGB
+    Command::cargo_bin("shpx")
+        .unwrap()
+        .args([
+            "convert",
+            shp.to_str().unwrap(),
+            fgb.to_str().unwrap(),
+            "--overwrite",
+        ])
+        .assert()
+        .success();
+    assert!(fgb.exists());
+
+    Command::cargo_bin("shpx")
+        .unwrap()
+        .args(["info", fgb.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(contains("driver:  fgb"))
+        .stdout(contains("rows:    2"))
+        .stdout(contains("crs:     EPSG:4326"));
+
+    // FGB → SHP
+    Command::cargo_bin("shpx")
+        .unwrap()
+        .args([
+            "convert",
+            fgb.to_str().unwrap(),
+            back.to_str().unwrap(),
+            "--overwrite",
+        ])
+        .assert()
+        .success();
+    assert!(back.exists());
+    assert!(back.with_extension("prj").exists());
 }
 
 #[test]

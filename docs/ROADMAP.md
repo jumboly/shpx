@@ -31,7 +31,7 @@
 - `shpx-driver-gpkg`: GeoPackage reader/writer（`gpkg_contents`/`gpkg_geometry_columns`/`gpkg_spatial_ref_sys` 初期化）（cycle 3 完了）
 - `shpx-driver-geojson`: FeatureCollection と GeoJSONL (NDJSON, 1 feature/行) の双方（cycle 2 完了）
 - `shpx-driver-csv`: WKT 列 + 属性カラムの CSV/TSV（cycle 1 完了）
-- `shpx-driver-fgb`: FlatGeobuf
+- `shpx-driver-fgb`: FlatGeobuf（cycle 4 完了）
 - `shpx-geom` への PROJ 統合（`proj` crate）
 - `--reproject EPSG:xxxx` オプション
 - 静的 driver レジストリを `inventory` 経由に移行（完了）
@@ -49,6 +49,7 @@
 - cycle 1 (CSV): SHP ↔ CSV / Parquet ↔ CSV の往復テストが緑。型推定なし（全列 Utf8）方針で確定。詳細は `docs/CSV.md`。
 - cycle 2 (GeoJSON): `.geojson` (FeatureCollection) / `.geojsonl` / `.ndjson` / `.jsonl` (NDJSON) を 1 ドライバで両対応。属性は JSON 型を Arrow に推論（Int↔Float 昇格、混在は Utf8）。書き出しは EPSG:4326 限定（reprojection 未実装のため非 WGS84 は明示エラー）。`--geojson-crs-extension` は v0.3 で対応予定。詳細は `docs/GEOJSON.md`。
 - cycle 3 (GPKG): rusqlite (`bundled` SQLite) + 自前 GeoPackage Binary コーデック (`shpx-geom::gpkg_blob`) で実装。`gpkg_spatial_ref_sys` / `gpkg_contents` / `gpkg_geometry_columns` 初期化、SHP ↔ GPKG / Parquet ↔ GPKG / CSV ↔ GPKG / GeoJSON ↔ GPKG の往復テストが緑。テーブル名は URI クエリ `?table=...` または `SHPX_GPKG_TABLE` 環境変数で指定可能。geometry blob は envelope_type=0 固定で書き出し（spatial index 未対応のため）、reader は全 envelope_type を読み飛ばす。Z/M / 複数レイヤ / spatial index は v0.3 以降。詳細は `docs/GPKG.md`。
+- cycle 4 (FGB): 公式 `flatgeobuf` 6.0 (BSD-2-Clause) + geozero で実装。geometry は WKB ↔ FGB FlatBuffers を相互変換、属性は `PropertyProcessor` 経由で 1 列ずつ受ける。SHP ↔ FGB の e2e roundtrip、Point/LineString/Polygon/MultiPolygon の各 geometry roundtrip、Boolean/Date32/Float64 等の属性 roundtrip テストが緑。**packed Hilbert R-Tree インデックスは未生成**（`index_node_size=0` 固定）、Z/M / null geometry / `select_bbox` / `Json` 列構造化は未対応。`flatgeobuf` 6.0 の MSRV (1.85) に合わせて workspace MSRV を 1.79 → 1.85 に引き上げ。詳細は `docs/FGB.md`。
 
 ---
 
