@@ -139,10 +139,11 @@ impl LayerWriter for GeoJsonWriter {
                         .map_err(Error::from)?;
                 }
                 OutputFormat::Lines => {
-                    // 次コミットで実装する。
-                    return Err(driver_msg(
-                        "GeoJSONL writer is not yet implemented (skeleton commit)",
-                    ));
+                    // 1 行 1 Feature。pretty フラグは Lines では無視（改行を入れると不正な NDJSON になる）。
+                    writer
+                        .write_all(serialized.as_bytes())
+                        .map_err(Error::from)?;
+                    writer.write_all(b"\n").map_err(Error::from)?;
                 }
             }
         }

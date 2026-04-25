@@ -614,6 +614,61 @@ fn writer_overwrite_false_fails_when_exists() {
 }
 
 #[test]
+fn geojsonl_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("data.geojsonl");
+    let schema = schema_with_geom(
+        vec![Field::new("name", DataType::Utf8, true)],
+        GeometryType::Point,
+        None,
+    );
+    let mut name = StringBuilder::new();
+    name.append_value("a");
+    name.append_value("b");
+    name.append_value("c");
+    let attrs: Vec<ArrayRef> = vec![Arc::new(name.finish())];
+    write_geoms(
+        &p,
+        schema.clone(),
+        &[
+            Some(Geom::Point(1.0, 2.0)),
+            Some(Geom::Point(3.0, 4.0)),
+            Some(Geom::Point(5.0, 6.0)),
+        ],
+        attrs,
+        None,
+        &default_write_opts(),
+    );
+
+    // 改行区切りで 3 行 + 末尾改行。
+    let raw = std::fs::read_to_string(&p).unwrap();
+    let lines: Vec<&str> = raw.lines().collect();
+    assert_eq!(lines.len(), 3);
+    for line in &lines {
+        assert!(line.starts_with('{'));
+        assert!(line.contains(r#""type":"Feature""#));
+        assert!(!line.contains('\n'));
+    }
+    assert!(raw.ends_with('\n'));
+
+    // 読み戻して内容一致を確認。
+    let (_s, _c, batches) = read_back(&p, None);
+    assert_eq!(batches[0].num_rows(), 3);
+    let g = geom_col(&batches[0]);
+    assert_eq!(wkb::decode(g.value(0)).unwrap(), Geom::Point(1.0, 2.0));
+    assert_eq!(wkb::decode(g.value(1)).unwrap(), Geom::Point(3.0, 4.0));
+    assert_eq!(wkb::decode(g.value(2)).unwrap(), Geom::Point(5.0, 6.0));
+    let name = batches[0]
+        .column_by_name("name")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow_array::StringArray>()
+        .unwrap();
+    assert_eq!(name.value(0), "a");
+    assert_eq!(name.value(2), "c");
+}
+
+#[test]
 fn feature_collection_writer_emits_correct_envelope() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("envelope.geojson");
