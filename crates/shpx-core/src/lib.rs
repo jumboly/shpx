@@ -11,6 +11,7 @@ pub mod crs;
 pub mod driver;
 pub mod error;
 pub mod opts;
+pub mod schema;
 pub mod uri;
 
 pub use capabilities::{Capabilities, StringEncoding};
@@ -18,4 +19,5 @@ pub use crs::{Crs, WktFlavor};
 pub use driver::{BulkLoadWriter, Driver, LayerReader, LayerWriter};
 pub use error::{Error, Result};
 pub use opts::{OnLoss, ReadOpts, WriteOpts};
+pub use schema::{Edges, GeometryEncoding, GeometryMeta, GeometryType, GEOMETRY_META_KEY};
 pub use uri::Uri;
