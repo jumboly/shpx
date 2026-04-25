@@ -28,11 +28,13 @@ arrow = { workspace = true }
 ### 2. Driver trait を実装
 
 ```rust
+use arrow_schema::SchemaRef;
 use shpx_core::{
-    Driver, LayerReader, LayerWriter, Capabilities, Crs, Result, Uri,
-    ReadOpts, WriteOpts, SchemaRef, StringEncoding,
+    Capabilities, Crs, Driver, DriverRegistration, LayerReader, LayerWriter,
+    ReadOpts, Result, StringEncoding, Uri, WriteOpts,
 };
 
+#[derive(Debug, Default, Clone, Copy)]
 pub struct MyDriver;
 
 impl Driver for MyDriver {
@@ -69,12 +71,15 @@ impl Driver for MyDriver {
     }
 }
 
+// Driver 本体は `static` に置き、`&'static dyn Driver` として登録する
+// （`Box::new` は使わない — アロケーション無し）。
+static MY_DRIVER_INSTANCE: MyDriver = MyDriver;
 shpx_core::inventory::submit! {
-    Box::new(MyDriver) as Box<dyn Driver>
+    DriverRegistration { driver: &MY_DRIVER_INSTANCE }
 }
 ```
 
-`inventory::submit!` により、CLI 起動時に `Driver` レジストリへ自動登録される。
+`inventory::submit!` により、CLI 起動時に `Driver` レジストリへ自動登録される。レジストリは `name()` 順で sort され、リンカ順に依存しない決定的な解決順を持つ。
 
 ### 3. Bulk load 対応（オプション）
 
@@ -95,24 +100,33 @@ impl BulkLoadWriter for MyWriter {
 
 ### 4. shpx-cli への組み込み
 
-`crates/shpx-cli/Cargo.toml`:
+`crates/shpx-cli/Cargo.toml` の `[dependencies]` に新 driver crate を追加する:
 
 ```toml
-[features]
-default = ["shp", "gpkg", "parquet", "geojson", "csv", "fgb", "postgis", "sqlserver", "spatialite"]
-myformat = ["dep:shpx-driver-myformat"]
-
 [dependencies]
-shpx-driver-myformat = { path = "../shpx-driver-myformat", optional = true }
+shpx-driver-myformat = { path = "../shpx-driver-myformat" }
 ```
+
+加えて `crates/shpx-cli/src/registry.rs` 末尾の `use _` ブロックに 1 行加える:
+
+```rust
+use shpx_driver_myformat as _;
+```
+
+これは `inventory::submit!` の副作用（自動登録）を起こすために driver crate を
+リンカに保持させるためのもので、実体は何もインポートしない。`Cargo.toml` への
+dep 追加だけではリンカが未参照と判断して crate ごと strip してしまう。
 
 ビルド:
 
 ```bash
-cargo build --release --features myformat
+cargo build --release
 ```
 
-`shpx drivers` で登録されているか確認できる。
+`shpx drivers` で登録されているか確認できる（capabilities 一覧も同時に表示される）。
+
+> Note: v0.2 時点では feature flag による driver 取捨選択は採用していない。
+> リリースバイナリのサイズが問題になった段階で `[features]` 化を検討する。
 
 ## ジオメトリの扱い
 

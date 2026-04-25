@@ -3,8 +3,9 @@
 //! 各フォーマット実装はこれらを実装し、CLI は `Driver` 配列に対して
 //! 拡張子・スキームから 1 つを選んで読み書きする。
 //!
-//! v0.1 ではトレイト境界を `Send + Sync + 'static` にしてあるが、
-//! `inventory` による静的レジストリ化は v0.2 で導入予定。
+//! Driver の登録は [`inventory`] crate を経由して行う。各 driver crate は
+//! [`DriverRegistration`] を `inventory::submit!` で送り、CLI 側は
+//! `inventory::iter::<DriverRegistration>` で起動時に集約する。
 
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
@@ -77,3 +78,24 @@ pub trait BulkLoadWriter: LayerWriter {
     /// イテレータ全体を 1 つのバルク投入として処理する。
     fn bulk_write(&mut self, batches: &mut dyn Iterator<Item = Result<RecordBatch>>) -> Result<()>;
 }
+
+/// `inventory` 経由で登録される Driver エントリ。
+///
+/// `&'static dyn Driver` を保持することで、Driver 本体を `static` に置いたまま
+/// アロケーション無しでレジストリへ登録できる。各 driver crate は次のように使う:
+///
+/// ```ignore
+/// static MY_DRIVER: MyDriver = MyDriver;
+/// shpx_core::inventory::submit! {
+///     shpx_core::DriverRegistration { driver: &MY_DRIVER }
+/// }
+/// ```
+// `Driver` トレイトが `Debug` を要求しないため、`DriverRegistration` も
+// `Debug` を derive しない（`#[derive(Debug)]` は trait object に伝播してしまう）。
+#[derive(Clone, Copy)]
+pub struct DriverRegistration {
+    /// 登録対象の Driver。`'static` 寿命なので `&` のままで安全に使える。
+    pub driver: &'static dyn Driver,
+}
+
+inventory::collect!(DriverRegistration);

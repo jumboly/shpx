@@ -16,8 +16,12 @@ pub mod uri;
 
 pub use capabilities::{Capabilities, StringEncoding};
 pub use crs::{Crs, WktFlavor};
-pub use driver::{BulkLoadWriter, Driver, LayerReader, LayerWriter};
+pub use driver::{BulkLoadWriter, Driver, DriverRegistration, LayerReader, LayerWriter};
 pub use error::{Error, Result};
 pub use opts::{OnLoss, ReadOpts, WriteOpts};
 pub use schema::{Edges, GeometryEncoding, GeometryMeta, GeometryType, GEOMETRY_META_KEY};
 pub use uri::Uri;
+
+// `inventory` を再エクスポートし、driver crate 側は `shpx_core::inventory::submit!`
+// だけで登録できるようにする。各 driver から `inventory` を直接依存させない。
+pub use inventory;

@@ -1,20 +1,36 @@
-//! CLI から見える Driver の静的レジストリ。
+//! CLI から見える Driver の動的レジストリ（`inventory` ベース）。
 //!
-//! 各 driver はステートレスな unit struct なので `static` インスタンスを共有する。
-//! `Box<dyn Driver>` を毎回 alloc していた v0.1 初期実装の改善。
-//! `inventory` 等のグローバル登録機構は v0.2 で導入予定。
+//! 各 driver crate が `shpx_core::inventory::submit!` で送ったエントリを
+//! 起動時に 1 度だけ集約してキャッシュする。リンカ順に依存しない決定的な
+//! 並びを得るため、`name()` で sort する。
 
-use shpx_core::{Driver, Error, Uri};
+use std::sync::OnceLock;
 
-static SHP_DRIVER: shpx_driver_shp::ShpDriver = shpx_driver_shp::ShpDriver;
-static PARQUET_DRIVER: shpx_driver_parquet::ParquetDriver = shpx_driver_parquet::ParquetDriver;
+use shpx_core::{inventory, Driver, DriverRegistration, Error, Uri};
 
-static ALL_DRIVERS: [&'static dyn Driver; 2] = [&SHP_DRIVER, &PARQUET_DRIVER];
+// `inventory::submit!` の副作用（Driver 自動登録）のためだけに driver crate を
+// リンクする。これらを `use _` しないとリンカが未参照と判断して
+// crate ごと strip し、`inventory::iter` が空になる。
+use shpx_driver_parquet as _;
+use shpx_driver_shp as _;
+
+/// 全 Driver のキャッシュ。`OnceLock` で初回アクセス時に 1 度だけ集約する。
+static DRIVERS: OnceLock<Vec<&'static dyn Driver>> = OnceLock::new();
+
+fn collect_drivers() -> Vec<&'static dyn Driver> {
+    let mut v: Vec<&'static dyn Driver> = inventory::iter::<DriverRegistration>
+        .into_iter()
+        .map(|r| r.driver)
+        .collect();
+    // 同一 scheme を複数 driver が宣言した場合の解決順を決定的にするため、name で sort。
+    v.sort_by_key(|d| d.name());
+    v
+}
 
 /// ビルド時に組み込まれている全 Driver を返す。
 #[must_use]
 pub fn all_drivers() -> &'static [&'static dyn Driver] {
-    &ALL_DRIVERS
+    DRIVERS.get_or_init(collect_drivers)
 }
 
 /// URI のスキーム (拡張子) から該当 Driver を解決する。
@@ -34,10 +50,7 @@ pub fn select_driver(uri: &Uri) -> Option<&'static dyn Driver> {
 /// scheme が空（拡張子なし）かどうかでメッセージを切り替える。
 pub fn driver_not_found(uri: &Uri) -> Error {
     if uri.scheme.is_empty() {
-        Error::Format(format!(
-            "{}: no extension; cannot infer driver",
-            uri.path()
-        ))
+        Error::Format(format!("{}: no extension; cannot infer driver", uri.path()))
     } else {
         Error::Format(format!("no driver for scheme `{}`", uri.scheme))
     }
@@ -74,5 +87,13 @@ mod tests {
         let d = select_driver(&Uri::from_path("/tmp/sample.parquet"));
         assert!(d.is_some());
         assert_eq!(d.unwrap().name(), "parquet");
+    }
+
+    #[test]
+    fn all_drivers_sorted_by_name() {
+        let names: Vec<&str> = all_drivers().iter().map(|d| d.name()).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(names, sorted, "all_drivers() must be sorted by name");
     }
 }

@@ -770,6 +770,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8bb03732005da905c88227371639bf1ad885cc712789c011c31c5fb3ab3ccf02"
 
 [[package]]
+name = "inventory"
+version = "0.3.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4f0c30c76f2f4ccee3fe55a2435f691ca00c0e4bd87abe4f4a851b1d4dac39b"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1323,6 +1332,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "predicates",
+ "serde_json",
  "shpx-core",
  "shpx-driver-parquet",
  "shpx-driver-shp",
@@ -1338,6 +1348,7 @@ version = "0.1.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
+ "inventory",
  "serde",
  "serde_json",
  "thiserror",

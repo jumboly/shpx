@@ -73,6 +73,13 @@ impl Driver for ShpDriver {
     }
 }
 
+// `inventory` レジストリへの自動登録。`shpx-cli` がこの crate に dep を貼っている
+// 限り、リンカは本ユニットを保持し、CLI 起動時に Driver が利用可能になる。
+static SHP_DRIVER_INSTANCE: ShpDriver = ShpDriver;
+shpx_core::inventory::submit! {
+    shpx_core::DriverRegistration { driver: &SHP_DRIVER_INSTANCE }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

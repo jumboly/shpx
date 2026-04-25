@@ -70,6 +70,11 @@ impl Driver for ParquetDriver {
     }
 }
 
+static PARQUET_DRIVER_INSTANCE: ParquetDriver = ParquetDriver;
+shpx_core::inventory::submit! {
+    shpx_core::DriverRegistration { driver: &PARQUET_DRIVER_INSTANCE }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
