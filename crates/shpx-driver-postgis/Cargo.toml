@@ -28,3 +28,13 @@ shpx-driver-shp     = { path = "../shpx-driver-shp" }
 shpx-driver-parquet = { path = "../shpx-driver-parquet" }
 tempfile            = { workspace = true }
 tracing-subscriber  = { workspace = true }
+# v0.3 cycle 3c: 1000万行 × 10属性ベンチ。`harness=false` で criterion main を使うため
+# default-features は不要 (`html_reports` の plotters 依存を切ってビルド時間を節約)。
+criterion           = { version = "0.5", default-features = false }
+# 合成データ生成器 (`benches/gen.rs`) の決定論的乱数源。`StdRng::seed_from_u64` 固定
+# シードで bench 入力の再現性を確保する。
+rand                = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
+
+[[bench]]
+name    = "copy_binary"
+harness = false
