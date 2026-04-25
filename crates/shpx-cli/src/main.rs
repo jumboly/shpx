@@ -1,8 +1,8 @@
 //! shpx CLI のエントリポイント。
-//!
-//! 後続コミットで `convert` / `info` サブコマンドを clap derive で実装する。
+
+mod registry;
 
 fn main() {
-    // skeleton 段階では何もしない。Task 10 以降で本実装に差し替える。
-    eprintln!("shpx: skeleton（v0.1 実装中）");
+    let names: Vec<&'static str> = registry::all_drivers().iter().map(|d| d.name()).collect();
+    eprintln!("shpx (v0.1 skeleton). drivers = {names:?}");
 }
