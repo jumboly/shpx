@@ -229,6 +229,48 @@ v0.3 cycle 3b 完了時点で以下は未対応:
 - COPY BINARY format の trailer は i16 BE `-1`。各 row の field count は i16 BE。各 field は `i32 length` + payload で、length=-1 が NULL。詳細は PostgreSQL ドキュメント "Binary Format" 節を参照。
 - numeric の binary 表現は `i16 ndigits / i16 weight / u16 sign / u16 dscale / [i16 digit; ndigits]`（NBASE=10000）。Decimal128 の i128 値を絶対値化 → 4 桁ごとに分割 → 末尾 0 桁トリム → weight 計算で組み立てる。`PgNumeric` 構造体に encode/decode を集約。
 
+## Benchmark (v0.3 cycle 3c)
+
+v0.3 完了基準の 1 つ「1000 万行 × 10 属性で `ogr2ogr` の 50% 以上の速度」を計測するための手順と数値を記録する。
+
+### 計測対象
+
+- ベンチスキーマ: 10 属性（Int64 / Boolean / Int32 / Float64 / Utf8 ×2 / Decimal128(38,10) / Date32 / Timestamp(Microsecond, UTC) / Binary）+ `Point(EPSG:4326)` の 11 列。
+- 入力: `target/bench-data/points_<rows>.parquet`（`crates/shpx-driver-postgis/benches/gen.rs` が決定論的に生成、再実行時は `MANIFEST.txt` で再利用）。
+- 計測対象パス:
+  - `shpx convert --insert-mode=bulk --create-table=always --create-index=auto <parquet> pg://...`
+  - `ogr2ogr -f PostgreSQL ... -lco SPATIAL_INDEX=NONE -lco PRECISION=NO --config PG_USE_COPY YES`
+- 完了基準: shpx の median wall-clock ≤ ogr2ogr の median wall-clock × 2.0（= shpx が 50% 以上の速度）。
+
+### 実行手順
+
+```sh
+docker compose up -d postgis
+SHPX_TEST_PG_URL=pg://shpx:shpx@localhost:5432/shpx_test \
+    scripts/bench-vs-ogr.sh --rows 10000000 --runs 3
+```
+
+`scripts/bench-vs-ogr.sh` は実行前に `synchronous_commit=off` / `full_page_writes=off` を `ALTER SYSTEM` で適用し、終了時に `RESET ALL` で元に戻す（`docker-compose.yml` の設定は触らない）。3 回計測の median 値で判定し、達成しなければ exit 1。
+
+### 計測結果
+
+実測値は v0.3 リリース時に確定する（commit E）。本節は手順を確定させた段階で、数値は TBD のまま release commit で更新する。
+
+| 入力 row 数 | shpx (median) | ogr2ogr (median) | shpx / ogr2ogr | 判定 |
+|---|---|---|---|---|
+| 100,000 (smoke) | TBD | TBD | TBD | TBD |
+| 10,000,000 (release gate) | TBD | TBD | TBD | TBD |
+
+### 計測環境
+
+リリース時の確定値とともに以下を記録する:
+
+- GDAL バージョン（`ogrinfo --version`）
+- PostGIS イメージ（既定 `postgis/postgis:16-3.4`）
+- ハードウェア（CPU モデル / 物理コア数 / メモリ / ディスク種別）
+
+CI 上で取得する数値ではないため、再現性確保のためにこの 3 項目を必ず控える。
+
 ## Future work
 
 - `--listen-channel` で `LISTEN/NOTIFY` を購読する CDC モード
