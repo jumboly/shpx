@@ -3,6 +3,7 @@
 //! v0.1 では PROJ 非依存。CRS は EPSG コードのみで保持・伝搬する。
 
 pub mod epsg_wkt1;
+pub mod gpkg_blob;
 pub mod projjson;
 pub mod wkb;
 pub mod wkt;

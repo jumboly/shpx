@@ -1,0 +1,29 @@
+[package]
+name = "shpx-driver-gpkg"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "shpx 用 GeoPackage (.gpkg) ドライバ"
+
+[lints]
+workspace = true
+
+[dependencies]
+shpx-core    = { path = "../shpx-core" }
+shpx-geom    = { path = "../shpx-geom" }
+arrow-array  = { workspace = true }
+arrow-schema = { workspace = true }
+chrono       = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+tracing      = { workspace = true }
+# `bundled` で SQLite をソースから同梱ビルドする（cargo-dist 配布の単一バイナリ要件）。
+# `blob` は INSERT 時に `&[u8]` を効率良くバインドするため、`chrono` は将来 Date/DateTime
+# bind を simplify するために有効化（v0.2 のコードは文字列で扱うが、後続で活用可能）。
+rusqlite     = { workspace = true, features = ["bundled", "blob", "chrono"] }
+
+[dev-dependencies]
+tempfile           = { workspace = true }
+tracing-subscriber = { workspace = true }

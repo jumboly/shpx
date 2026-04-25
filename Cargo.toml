@@ -12,6 +12,7 @@ members = [
     "crates/shpx-driver-parquet",
     "crates/shpx-driver-csv",
     "crates/shpx-driver-geojson",
+    "crates/shpx-driver-gpkg",
     "crates/shpx-cli",
 ]
 
@@ -38,6 +39,11 @@ shapefile     = "0.6"
 # RFC 7946 GeoJSON / GeoJSONL の Feature・Geometry 型を提供。
 # `geo-types` 統合は使わず（shpx-geom::Geom と独立に保つ）、default-features を切る。
 geojson       = { version = "0.24", default-features = false }
+
+# GeoPackage ドライバの SQLite アクセス。
+# `bundled` 機能は各 driver crate 側で有効化する（cargo-dist の単一バイナリ配布で
+# システム libsqlite3 への依存を避けるため。CI に追加 apt パッケージ不要）。
+rusqlite      = { version = "0.31", default-features = false }
 
 # CLI / エラー / シリアライズ
 clap          = { version = "4.5", features = ["derive", "wrap_help"] }

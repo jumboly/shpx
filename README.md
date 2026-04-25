@@ -7,7 +7,7 @@ GDAL 非依存・Rust 製の空間データ相互変換 CLI。Arrow RecordBatch 
 | フォーマット | Read | Write | Bulk |
 |---|:-:|:-:|:-:|
 | Shapefile (`.shp`) | ✓ | ✓ | – |
-| GeoPackage (`.gpkg`) | – | – | TX batch |
+| GeoPackage (`.gpkg`) | ✓ | ✓ | TX batch |
 | GeoParquet (`.parquet`) | ✓ | ✓ | – |
 | FlatGeobuf (`.fgb`) | – | – | – |
 | GeoJSON (`.geojson`) | ✓ | ✓ | – |
@@ -43,10 +43,11 @@ shpx drivers
 - [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — 新しいドライバの追加方法
 - [docs/CSV.md](docs/CSV.md) — CSV / TSV ドライバ仕様
 - [docs/GEOJSON.md](docs/GEOJSON.md) — GeoJSON / GeoJSON Lines ドライバ仕様
+- [docs/GPKG.md](docs/GPKG.md) — GeoPackage ドライバ仕様
 
 ## ステータス
 
-v0.1.0 リリース済み（2026-04-25）。v0.2 進行中で、現在は SHP / GeoParquet / CSV (WKT) / GeoJSON / GeoJSON Lines ドライバが利用可能（`cargo run -- convert` / `info` / `drivers`）。残作業は GPKG / FlatGeobuf ドライバと PROJ 統合 (`--reproject`)。変更履歴は [CHANGELOG.md](CHANGELOG.md)。
+v0.1.0 リリース済み（2026-04-25）。v0.2 進行中で、現在は SHP / GeoParquet / CSV (WKT) / GeoJSON / GeoJSON Lines / GeoPackage ドライバが利用可能（`cargo run -- convert` / `info` / `drivers`）。残作業は FlatGeobuf ドライバと PROJ 統合 (`--reproject`)。変更履歴は [CHANGELOG.md](CHANGELOG.md)。
 
 ## ライセンス
 

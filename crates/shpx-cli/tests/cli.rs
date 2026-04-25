@@ -177,6 +177,7 @@ fn drivers_lists_shp_and_parquet() {
         .stdout(contains("- parquet"))
         .stdout(contains("- csv"))
         .stdout(contains("- geojson"))
+        .stdout(contains("- gpkg"))
         .stdout(contains("schemes:"))
         .stdout(contains("read+write"));
 }
@@ -263,6 +264,84 @@ fn convert_shp_to_geojson_then_back() {
         .success();
     assert!(back.exists());
     assert!(back.with_extension("prj").exists());
+}
+
+#[test]
+fn convert_shp_to_gpkg_then_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let shp = dir.path().join("p.shp");
+    let gpkg = dir.path().join("p.gpkg");
+    let back = dir.path().join("back.shp");
+    make_point_shp(&shp);
+
+    // SHP → GPKG
+    Command::cargo_bin("shpx")
+        .unwrap()
+        .args([
+            "convert",
+            shp.to_str().unwrap(),
+            gpkg.to_str().unwrap(),
+            "--overwrite",
+        ])
+        .assert()
+        .success();
+    assert!(gpkg.exists());
+
+    Command::cargo_bin("shpx")
+        .unwrap()
+        .args(["info", gpkg.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(contains("driver:  gpkg"))
+        .stdout(contains("rows:    2"))
+        .stdout(contains("crs:     EPSG:4326"));
+
+    // GPKG → SHP
+    Command::cargo_bin("shpx")
+        .unwrap()
+        .args([
+            "convert",
+            gpkg.to_str().unwrap(),
+            back.to_str().unwrap(),
+            "--overwrite",
+        ])
+        .assert()
+        .success();
+    assert!(back.exists());
+    assert!(back.with_extension("prj").exists());
+}
+
+#[test]
+fn convert_shp_to_gpkg_then_geojson() {
+    let dir = tempfile::tempdir().unwrap();
+    let shp = dir.path().join("p.shp");
+    let gpkg = dir.path().join("p.gpkg");
+    let geojson = dir.path().join("p.geojson");
+    make_point_shp(&shp);
+
+    Command::cargo_bin("shpx")
+        .unwrap()
+        .args([
+            "convert",
+            shp.to_str().unwrap(),
+            gpkg.to_str().unwrap(),
+            "--overwrite",
+        ])
+        .assert()
+        .success();
+
+    // GPKG → GeoJSON（GPKG の CRS=4326 がそのまま GeoJSON 仕様の WGS84 制約を満たす）
+    Command::cargo_bin("shpx")
+        .unwrap()
+        .args([
+            "convert",
+            gpkg.to_str().unwrap(),
+            geojson.to_str().unwrap(),
+            "--overwrite",
+        ])
+        .assert()
+        .success();
+    assert!(geojson.exists());
 }
 
 #[test]
