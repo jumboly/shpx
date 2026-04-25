@@ -2,4 +2,6 @@
 //!
 //! v0.1 では PROJ 非依存。CRS は EPSG コードのみで保持・伝搬する。
 
-// 中身は後続コミットで実装する。
+pub mod wkb;
+
+pub use wkb::{decode, encode, Geom};
