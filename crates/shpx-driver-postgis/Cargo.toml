@@ -1,0 +1,30 @@
+[package]
+name = "shpx-driver-postgis"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "shpx 用 PostGIS (PostgreSQL + PostGIS extension) ドライバ"
+
+[lints]
+workspace = true
+
+[dependencies]
+shpx-core      = { path = "../shpx-core" }
+shpx-geom      = { path = "../shpx-geom" }
+arrow-array    = { workspace = true }
+arrow-schema   = { workspace = true }
+chrono         = { workspace = true }
+tokio          = { workspace = true }
+tokio-postgres = { workspace = true }
+postgres-types = { workspace = true }
+bytes          = { workspace = true }
+futures-util   = { workspace = true }
+tracing        = { workspace = true }
+
+[dev-dependencies]
+shpx-driver-shp     = { path = "../shpx-driver-shp" }
+shpx-driver-parquet = { path = "../shpx-driver-parquet" }
+tempfile            = { workspace = true }
+tracing-subscriber  = { workspace = true }

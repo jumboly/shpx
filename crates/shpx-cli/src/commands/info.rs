@@ -6,7 +6,8 @@ use crate::cli::InfoArgs;
 use crate::commands::open_reader_for;
 
 pub fn run(args: InfoArgs) -> Result<()> {
-    let (driver, reader) = open_reader_for(&args.src, args.src_crs.as_deref(), args.encoding)?;
+    let (driver, reader) =
+        open_reader_for(args.src.as_str(), args.src_crs.as_deref(), args.encoding)?;
     let schema = reader.schema();
     let crs = reader.crs();
 

@@ -16,6 +16,7 @@ use shpx_driver_fgb as _;
 use shpx_driver_geojson as _;
 use shpx_driver_gpkg as _;
 use shpx_driver_parquet as _;
+use shpx_driver_postgis as _;
 use shpx_driver_shp as _;
 
 /// 全 Driver のキャッシュ。`OnceLock` で初回アクセス時に 1 度だけ集約する。
@@ -147,6 +148,20 @@ mod tests {
         let d = select_driver(&Uri::from_path("/tmp/sample.fgb"));
         assert!(d.is_some());
         assert_eq!(d.unwrap().name(), "fgb");
+    }
+
+    #[test]
+    fn select_driver_for_pg_url() {
+        let d = select_driver(&Uri::from_path("pg://user:pass@localhost/db?table=t"));
+        assert!(d.is_some());
+        assert_eq!(d.unwrap().name(), "postgis");
+    }
+
+    #[test]
+    fn select_driver_for_postgresql_url_normalizes_to_pg() {
+        let d = select_driver(&Uri::from_path("postgresql://h/db?table=t"));
+        assert!(d.is_some());
+        assert_eq!(d.unwrap().name(), "postgis");
     }
 
     #[test]

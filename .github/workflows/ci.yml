@@ -1,6 +1,9 @@
 # CI: PR / push に対して fmt・clippy・test を実行する。
 # MSRV (rust-version) と最新 stable の双方で test を回し、
 # 想定外の互換性退行を検出する。
+#
+# v0.3 cycle 1 から test job は services.postgis を立て、
+# `SHPX_TEST_PG_URL` 環境変数経由で PostGIS integration テストを通す。
 name: CI
 
 on:
@@ -40,6 +43,26 @@ jobs:
   test:
     name: test (${{ matrix.toolchain }})
     runs-on: ubuntu-latest
+    # PostGIS driver の integration テストは GitHub Actions の services 機能で
+    # postgis/postgis container を立てて localhost:5432 に publish する。
+    # SHPX_TEST_PG_URL が無いテストは eprintln + return で skip する仕様なので、
+    # env が設定されていればそのまま実 DB 接続テストが走る。
+    services:
+      postgis:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: shpx
+          POSTGRES_PASSWORD: shpx
+          POSTGRES_DB: shpx_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U shpx -d shpx_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      SHPX_TEST_PG_URL: pg://shpx:shpx@localhost:5432/shpx_test
     strategy:
       fail-fast: false
       matrix:

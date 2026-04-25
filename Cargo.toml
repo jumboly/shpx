@@ -14,6 +14,7 @@ members = [
     "crates/shpx-driver-geojson",
     "crates/shpx-driver-gpkg",
     "crates/shpx-driver-fgb",
+    "crates/shpx-driver-postgis",
     "crates/shpx-cli",
 ]
 
@@ -83,6 +84,19 @@ regex         = "1"
 # libproj/SQLite を C ソースから static link して単一バイナリ化する想定。
 # default では opt-in しないことで dev ビルドの cmake / clang 要求を回避する。
 proj          = { version = "0.28", default-features = false }
+
+# PostGIS ドライバの非同期 PostgreSQL クライアント。`Driver` trait は同期 API なので
+# driver crate 内で `tokio` ランタイムを保持し block_on で同期化する。`with-chrono-0_4`
+# で chrono::DateTime / NaiveDate を timestamp/date のネイティブ ToSql/FromSql として
+# 扱えるようにする。`tokio` の `rt-multi-thread` は `Connection` future を別 task に
+# 逃がす必要があるため必須（`current_thread` だと block_on 中に Connection が進まない）。
+tokio          = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "net", "time"] }
+# `runtime` feature は default-features=false でも `Config::connect` を有効化するために必要。
+# 切ると低レベルの `connect_raw` しか使えず、tokio runtime 経由の `connect` が消える。
+tokio-postgres = { version = "0.7", default-features = false, features = ["runtime", "with-chrono-0_4"] }
+postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }
+bytes          = "1"
+futures-util   = { version = "0.3", default-features = false }
 
 # ログ
 tracing            = "0.1"

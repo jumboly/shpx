@@ -4,6 +4,24 @@
 
 ## [Unreleased]
 
+v0.3 マイルストーン「PostGIS」の cycle 1 進捗。
+
+### Added
+
+- **shpx-driver-postgis (v0.3 cycle 1)**: PostgreSQL + PostGIS の最小 reader / writer。`pg://` / `postgres://` / `postgresql://` URL で接続し、`?table=schema.name` または環境変数 `SHPX_PG_TABLE` でテーブルを指定する。`tokio-postgres` (`with-chrono-0_4` feature) を採用し、driver crate 内 `OnceLock<tokio::runtime::Runtime>` で multi-thread runtime を 1 個共有して `block_on` で同期化する。reader は `SELECT ST_AsEWKB(geom), ... FROM tbl` を発行し、writer は `--overwrite` で `DROP TABLE IF EXISTS` → `CREATE TABLE` → 1 トランザクション + prepared `INSERT INTO ... VALUES (..., ST_GeomFromEWKB($N))` を行う。サポート型: Boolean / Int16-64 / Float32-64 / Utf8 / Binary / Date32 / Timestamp(_, None|UTC) / geometry。SRID は `Crs::epsg_code()` または `geometry_columns` view → 先頭行 `ST_SRID()` の順で解決する。COPY BINARY (cycle 2)、`--where`/`--select`/`--query`、`--create-table`、GIST index、未登録 EPSG の `spatial_ref_sys` 自動 INSERT、Z/M / Decimal は cycle 2/3 で対応。詳細は `docs/POSTGIS.md` 参照。
+- **shpx-geom**: PostGIS EWKB (Extended WKB) の encode/decode を `ewkb` モジュールに追加。`encode_with_srid` で標準 WKB に SRID flag (`0x20000000`) を立て SRID i32 を挿入、`strip_srid` / `decode` で EWKB から SRID と標準 WKB を分離する。Z/M flag は cycle 1 では `Error::Geometry` で拒否する。
+- **shpx-core**: `Uri::from_path` に URL スキーム検出を追加。先頭が `<scheme>://` 形式なら scheme を抽出し、`pg`/`postgres`/`postgresql` は `pg` に正規化する。ローカルパスの拡張子推論は従来通り。`Uri::is_url()` ヘルパ追加。
+
+### Changed
+
+- **shpx-cli**: `ConvertArgs`/`InfoArgs`/`SchemaArgs` の `src` / `dst` を `PathBuf` から `String` に変更。`pg://...` 等の URL を OS パスとして解釈すると壊れるため（特に Windows のドライブレター扱い）。`commands/{convert,info,schema}.rs` で `Uri::from_path(args.src)` のまま渡す。
+
+### Build
+
+- workspace MSRV は 1.85 据え置き。`tokio` / `tokio-postgres` / `postgres-types` / `bytes` / `futures-util` を `[workspace.dependencies]` に追加。
+- `docker-compose.yml` をリポジトリルートに追加（ローカル開発用 PostGIS）。
+- CI (`.github/workflows/ci.yml`): test job に `services.postgis` を追加し、`SHPX_TEST_PG_URL=pg://shpx:shpx@localhost:5432/shpx_test` を環境変数で渡す。`shpx-driver-postgis/tests/roundtrip.rs` は env 未設定なら eprintln + return で skip するため、PostGIS が無いローカル環境でも `cargo test` は緑のまま。
+
 ## [0.2.0] - 2026-04-25
 
 v0.2 マイルストーン「GPKG / GeoJSON / CSV / FlatGeobuf + Reprojection」のリリース。

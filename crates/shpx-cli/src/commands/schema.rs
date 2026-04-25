@@ -15,7 +15,8 @@ use crate::cli::SchemaArgs;
 use crate::commands::open_reader_for;
 
 pub fn run(args: SchemaArgs) -> Result<()> {
-    let (driver, reader) = open_reader_for(&args.src, args.src_crs.as_deref(), args.encoding)?;
+    let (driver, reader) =
+        open_reader_for(args.src.as_str(), args.src_crs.as_deref(), args.encoding)?;
     let schema = reader.schema();
     let value = schema_to_json(driver.name(), &schema);
 

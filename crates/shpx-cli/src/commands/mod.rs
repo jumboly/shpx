@@ -5,8 +5,6 @@ pub mod drivers;
 pub mod info;
 pub mod schema;
 
-use std::path::Path;
-
 use shpx_core::{Crs, Driver, Error, LayerReader, ReadOpts, Result, Uri};
 
 use crate::registry;
@@ -19,15 +17,16 @@ pub fn parse_src_crs(s: Option<&str>) -> Result<Option<Crs>> {
         .ok_or_else(|| Error::Crs(format!("invalid --src-crs: `{raw}` (expected EPSG:xxxx)")))
 }
 
-/// 共通の「path から driver を選んで reader を開く」処理。
+/// 共通の「入力文字列から driver を選んで reader を開く」処理。
 ///
 /// `info` / `schema` 等の read 側サブコマンドが先頭で同じ手順を踏むため抽出した。
+/// `src` はファイルパス または `pg://...` 等の URL を表す文字列。
 pub fn open_reader_for(
-    src: &Path,
+    src: &str,
     src_crs: Option<&str>,
     encoding: Option<String>,
 ) -> Result<(&'static dyn Driver, Box<dyn LayerReader>)> {
-    let uri = Uri::from_path(src.to_string_lossy().to_string());
+    let uri = Uri::from_path(src.to_string());
     let driver = registry::select_driver(&uri).ok_or_else(|| registry::driver_not_found(&uri))?;
     let opts = ReadOpts {
         src_crs: parse_src_crs(src_crs)?,

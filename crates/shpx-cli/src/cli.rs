@@ -1,7 +1,5 @@
 //! CLI のサブコマンド定義（clap derive）。
 
-use std::path::PathBuf;
-
 use clap::{ArgAction, Parser, Subcommand};
 use shpx_core::OnLoss;
 
@@ -9,7 +7,7 @@ use shpx_core::OnLoss;
 #[command(
     name = "shpx",
     version,
-    about = "ジオ空間データ変換 CLI（v0.2: SHP / GeoParquet / CSV / GeoJSON / GPKG / FlatGeobuf + --reproject）"
+    about = "ジオ空間データ変換 CLI（v0.3: SHP / GeoParquet / CSV / GeoJSON / GPKG / FlatGeobuf / PostGIS + --reproject）"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -32,12 +30,15 @@ pub enum Cmd {
     Drivers,
 }
 
+// `src` / `dst` は PathBuf ではなく String で受ける。`pg://user:pass@host/db?table=t`
+// のような URL 入力は OS パスとして解釈されると壊れるため（特に Windows のドライブ
+// レター扱いになりうる）、文字列のまま `Uri::from_path` に渡す。
 #[derive(clap::Args, Debug)]
 pub struct ConvertArgs {
-    /// 入力ファイル（拡張子から driver を推論）。
-    pub src: PathBuf,
-    /// 出力ファイル（拡張子から driver を推論）。
-    pub dst: PathBuf,
+    /// 入力ファイルパス または URL（`pg://...` 等）。
+    pub src: String,
+    /// 出力ファイルパス または URL（`pg://...` 等）。
+    pub dst: String,
 
     /// 既存出力ファイルを上書きする。
     #[arg(long)]
@@ -67,8 +68,8 @@ pub struct ConvertArgs {
 
 #[derive(clap::Args, Debug)]
 pub struct InfoArgs {
-    /// 入力ファイル。
-    pub src: PathBuf,
+    /// 入力ファイルパス または URL（`pg://...` 等）。
+    pub src: String,
 
     /// 入力 CRS が無いとき補完する EPSG。
     #[arg(long)]
@@ -81,8 +82,8 @@ pub struct InfoArgs {
 
 #[derive(clap::Args, Debug)]
 pub struct SchemaArgs {
-    /// 入力ファイル。
-    pub src: PathBuf,
+    /// 入力ファイルパス または URL（`pg://...` 等）。
+    pub src: String,
 
     /// 入力 CRS が無いとき補完する EPSG。
     #[arg(long)]

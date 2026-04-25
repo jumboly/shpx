@@ -1,0 +1,21 @@
+# ローカル開発・integration テスト用 PostGIS。CI も同じ image を使う。
+#
+# 起動: `docker compose up -d postgis`
+# 接続: `pg://shpx:shpx@localhost:5432/shpx_test`
+# テスト: `SHPX_TEST_PG_URL='pg://shpx:shpx@localhost:5432/shpx_test' cargo test -p shpx-driver-postgis`
+
+services:
+  postgis:
+    image: postgis/postgis:16-3.4
+    container_name: shpx-postgis
+    environment:
+      POSTGRES_USER: shpx
+      POSTGRES_PASSWORD: shpx
+      POSTGRES_DB: shpx_test
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shpx -d shpx_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 30

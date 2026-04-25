@@ -13,7 +13,7 @@ GDAL 非依存・Rust 製の空間データ相互変換 CLI。Arrow RecordBatch 
 | GeoJSON (`.geojson`) | ✓ | ✓ | – |
 | GeoJSON Lines (`.geojsonl` / `.ndjson` / `.jsonl`) | ✓ | ✓ | – |
 | CSV w/ WKT (`.csv` / `.tsv`) | ✓ | ✓ | – |
-| PostGIS (`pg://`) | ✓ | ✓ | COPY BINARY |
+| PostGIS (`pg://` / `postgres://` / `postgresql://`) | ✓ | ✓ | (cycle 2 で COPY BINARY) |
 | SQL Server (`mssql://`) | ✓ | ✓ | staging table → bulk_insert |
 | SpatiaLite (`sqlite://`) | ✓ | ✓ | TX batch |
 
@@ -55,10 +55,12 @@ shpx drivers
 - [docs/GEOJSON.md](docs/GEOJSON.md) — GeoJSON / GeoJSON Lines ドライバ仕様
 - [docs/GPKG.md](docs/GPKG.md) — GeoPackage ドライバ仕様
 - [docs/FGB.md](docs/FGB.md) — FlatGeobuf ドライバ仕様
+- [docs/POSTGIS.md](docs/POSTGIS.md) — PostGIS ドライバ仕様
 
 ## ステータス
 
-v0.2.0 リリース済み（2026-04-25）。SHP / GeoParquet / CSV (WKT) / GeoJSON / GeoJSON Lines / GeoPackage / FlatGeobuf ドライバ + `--reproject EPSG:xxxx`（PROJ 統合）+ GeoJSON writer の RFC 7946 自動 WGS84 強制が利用可能。次マイルストーン v0.3 では PostGIS ドライバを予定。変更履歴は [CHANGELOG.md](CHANGELOG.md)。
+v0.2.0 リリース済み（2026-04-25）。次マイルストーン v0.3 は PostGIS ドライバ。
+**v0.3 cycle 1 (進行中)**: `pg://` / `postgres://` / `postgresql://` URL での read/write、SHP / Parquet ↔ PostGIS の最小往復、行 INSERT writer。COPY BINARY は cycle 2、`--where`/`--select`/`--query` 等は cycle 3 で対応予定。詳細は [docs/POSTGIS.md](docs/POSTGIS.md) と [docs/ROADMAP.md](docs/ROADMAP.md)、変更履歴は [CHANGELOG.md](CHANGELOG.md)。
 
 ## ライセンス
 

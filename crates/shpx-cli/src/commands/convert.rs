@@ -8,8 +8,8 @@ use crate::commands::parse_src_crs;
 use crate::registry;
 
 pub fn run(args: ConvertArgs) -> Result<()> {
-    let src_uri = Uri::from_path(args.src.to_string_lossy().to_string());
-    let dst_uri = Uri::from_path(args.dst.to_string_lossy().to_string());
+    let src_uri = Uri::from_path(args.src.clone());
+    let dst_uri = Uri::from_path(args.dst.clone());
 
     let src_driver =
         registry::select_driver(&src_uri).ok_or_else(|| registry::driver_not_found(&src_uri))?;
@@ -86,8 +86,8 @@ pub fn run(args: ConvertArgs) -> Result<()> {
 
     tracing::info!(
         target: "shpx::cli",
-        src = %args.src.display(),
-        dst = %args.dst.display(),
+        src = %args.src,
+        dst = %args.dst,
         from = src_driver.name(),
         to = dst_driver.name(),
         rows = total_rows,
