@@ -4,14 +4,18 @@
 //! cycle 1 の `roundtrip.rs` と同じパターンで env-gate しているため、PG が無いローカル環境でも
 //! `cargo test` は緑のまま。
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow_array::{
     builder::{
-        BinaryBuilder, Decimal128Builder, Int32Builder, StringBuilder, TimestampMicrosecondBuilder,
+        BinaryBuilder, BooleanBuilder, Date32Builder, Decimal128Builder, Float64Builder,
+        Int32Builder, Int64Builder, StringBuilder, TimestampMicrosecondBuilder,
     },
     cast::AsArray,
-    types::{Decimal128Type, Int32Type, TimestampMicrosecondType},
+    types::{
+        Date32Type, Decimal128Type, Float64Type, Int32Type, Int64Type, TimestampMicrosecondType,
+    },
     Array, ArrayRef, RecordBatch,
 };
 use arrow_schema::{DataType, Field, SchemaRef, TimeUnit};
@@ -338,6 +342,247 @@ fn bulk_thousand_rows_with_nulls_roundtrip() {
     assert_eq!(geom_nulls, expected_geom_nulls);
 
     cleanup(&url, &table);
+}
+
+/// 10 列同居 1k 行 bit-identical テスト。bench (`benches/copy_binary.rs`) のスキーマと
+/// 1:1 で揃えてあり、ベンチデータが COPY BINARY 経由で正しく往復することを保証する
+/// 回帰検出器を兼ねる。型ごとの個別テストでは検出できない、列バッファの境界・null
+/// bitmap の越境バグを 1 ファイル内で再現させる。
+struct AllTypesRow {
+    flag: Option<bool>,
+    class: Option<i32>,
+    score: Option<f64>,
+    name: String,
+    tag: String,
+    amount: i128,
+    created: i32,
+    event_at: i64,
+    payload: Vec<u8>,
+    geom: Vec<u8>,
+}
+
+// 10 列同居の往復は型ごとの個別ヘルパに分割すると意味が薄れるため 1 関数に束ねる。
+#[allow(clippy::too_many_lines)]
+#[test]
+fn bulk_all_types_together() {
+    let Some(url) = pg_url() else {
+        eprintln!("SHPX_TEST_PG_URL unset; skipping bulk integration test");
+        return;
+    };
+    let table = unique_table("shpx_bulk_all");
+    let uri = uri_with_table(&url, &table);
+    let n: i64 = 1000;
+    // 2026-04-25T00:00:00Z UTC の microseconds since epoch。bit-identical 検証用に固定。
+    let base_micros: i64 = 1_777_680_000_000_000;
+
+    let schema = schema_with_geom(
+        vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("flag", DataType::Boolean, true),
+            Field::new("class", DataType::Int32, true),
+            Field::new("score", DataType::Float64, true),
+            Field::new("name", DataType::Utf8, true),
+            Field::new("tag", DataType::Utf8, true),
+            Field::new("amount", DataType::Decimal128(38, 10), true),
+            Field::new("created", DataType::Date32, true),
+            Field::new(
+                "event_at",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                true,
+            ),
+            Field::new("payload", DataType::Binary, true),
+        ],
+        GeometryType::Point,
+        Some(Crs::from_epsg(4326)),
+    );
+
+    let mut id_b = Int64Builder::new();
+    let mut flag_b = BooleanBuilder::new();
+    let mut class_b = Int32Builder::new();
+    let mut score_b = Float64Builder::new();
+    let mut name_b = StringBuilder::new();
+    let mut tag_b = StringBuilder::new();
+    let mut amount_b = Decimal128Builder::new()
+        .with_precision_and_scale(38, 10)
+        .unwrap();
+    let mut created_b = Date32Builder::new();
+    let mut event_b = TimestampMicrosecondBuilder::new().with_timezone("UTC");
+    let mut payload_b = BinaryBuilder::new();
+    let mut geom_b = BinaryBuilder::new();
+
+    for i in 0..n {
+        let row = expected_row(i, base_micros);
+        id_b.append_value(i);
+        match row.flag {
+            Some(v) => flag_b.append_value(v),
+            None => flag_b.append_null(),
+        }
+        match row.class {
+            Some(v) => class_b.append_value(v),
+            None => class_b.append_null(),
+        }
+        match row.score {
+            Some(v) => score_b.append_value(v),
+            None => score_b.append_null(),
+        }
+        name_b.append_value(&row.name);
+        tag_b.append_value(&row.tag);
+        amount_b.append_value(row.amount);
+        created_b.append_value(row.created);
+        event_b.append_value(row.event_at);
+        payload_b.append_value(&row.payload);
+        geom_b.append_value(&row.geom);
+    }
+
+    let cols: Vec<ArrayRef> = vec![
+        Arc::new(id_b.finish()),
+        Arc::new(flag_b.finish()),
+        Arc::new(class_b.finish()),
+        Arc::new(score_b.finish()),
+        Arc::new(name_b.finish()),
+        Arc::new(tag_b.finish()),
+        Arc::new(amount_b.finish()),
+        Arc::new(created_b.finish()),
+        Arc::new(event_b.finish()),
+        Arc::new(payload_b.finish()),
+        Arc::new(geom_b.finish()),
+    ];
+    let batch = RecordBatch::try_new(schema.clone(), cols).unwrap();
+
+    let driver = PostgisDriver::new();
+    let batches = write_bulk_then_read(
+        driver,
+        &uri,
+        schema.clone(),
+        Some(Crs::from_epsg(4326)),
+        vec![batch],
+    )
+    .expect("bulk roundtrip");
+
+    let total: usize = batches.iter().map(RecordBatch::num_rows).sum();
+    assert_eq!(total, usize::try_from(n).unwrap());
+
+    // SELECT は順序保証が無いため、id をキーに行を回収して expected と突き合わせる。
+    let mut got: HashMap<i64, AllTypesRow> = HashMap::with_capacity(usize::try_from(n).unwrap());
+    for b in &batches {
+        let id_a = b.column(0).as_primitive::<Int64Type>();
+        let flag_a = b.column(1).as_boolean();
+        let class_a = b.column(2).as_primitive::<Int32Type>();
+        let score_a = b.column(3).as_primitive::<Float64Type>();
+        let name_a = b.column(4).as_string::<i32>();
+        let tag_a = b.column(5).as_string::<i32>();
+        let amount_a = b.column(6).as_primitive::<Decimal128Type>();
+        let created_a = b.column(7).as_primitive::<Date32Type>();
+        let event_a = b.column(8).as_primitive::<TimestampMicrosecondType>();
+        let payload_a = b.column(9).as_binary::<i32>();
+        let geom_a = b.column(10).as_binary::<i32>();
+        for i in 0..b.num_rows() {
+            let id = id_a.value(i);
+            got.insert(
+                id,
+                AllTypesRow {
+                    flag: if flag_a.is_null(i) {
+                        None
+                    } else {
+                        Some(flag_a.value(i))
+                    },
+                    class: if class_a.is_null(i) {
+                        None
+                    } else {
+                        Some(class_a.value(i))
+                    },
+                    score: if score_a.is_null(i) {
+                        None
+                    } else {
+                        Some(score_a.value(i))
+                    },
+                    name: name_a.value(i).to_owned(),
+                    tag: tag_a.value(i).to_owned(),
+                    amount: amount_a.value(i),
+                    created: created_a.value(i),
+                    event_at: event_a.value(i),
+                    payload: payload_a.value(i).to_owned(),
+                    geom: geom_a.value(i).to_owned(),
+                },
+            );
+        }
+    }
+
+    assert_eq!(got.len(), usize::try_from(n).unwrap());
+    for i in 0..n {
+        let row = got.get(&i).unwrap_or_else(|| panic!("row id={i} missing"));
+        let expected = expected_row(i, base_micros);
+        assert_eq!(row.flag, expected.flag, "row {i} flag");
+        assert_eq!(row.class, expected.class, "row {i} class");
+        // f64 は bit-identical を to_bits 比較で確認（COPY BINARY は IEEE 754 BE 直書きのため）。
+        match (row.score, expected.score) {
+            (Some(a), Some(b)) => {
+                assert_eq!(a.to_bits(), b.to_bits(), "row {i} score bits");
+            }
+            (None, None) => {}
+            _ => panic!("row {i} score null mismatch"),
+        }
+        assert_eq!(row.name, expected.name, "row {i} name");
+        assert_eq!(row.tag, expected.tag, "row {i} tag");
+        assert_eq!(row.amount, expected.amount, "row {i} amount");
+        assert_eq!(row.created, expected.created, "row {i} created");
+        assert_eq!(row.event_at, expected.event_at, "row {i} event_at");
+        assert_eq!(row.payload, expected.payload, "row {i} payload");
+        assert_eq!(row.geom, expected.geom, "row {i} geom");
+    }
+
+    cleanup(&url, &table);
+}
+
+/// 行 i に対する expected 値を再現する純関数。null は型ごとに異なる素数で散らし、
+/// 列間で null bitmap の越境を起こりやすくする。
+fn expected_row(i: i64, base_micros: i64) -> AllTypesRow {
+    let flag = if i % 11 == 0 { None } else { Some(i % 2 == 0) };
+    let class = if i % 13 == 0 {
+        None
+    } else {
+        Some(i32::try_from(i % 7).expect("i%7 fits i32"))
+    };
+    let score = if i % 17 == 0 {
+        None
+    } else {
+        // 1/8 刻みは f64 で正確に表現できるため、IEEE754 BE 直書きでも bit-identical。
+        Some(f64::from(i32::try_from(i).expect("n<=1000 fits i32")) * 0.125)
+    };
+    // name は固定長 15 B (`name_` + 10 桁 0 埋め)。bench スキーマの「固定 16 B 相当」を
+    // テスト側で再現したもので、ピッタリ 16 B である必要は無い。
+    let name = format!("name_{i:010}");
+    // tag は 4..=32 B の可変長。
+    let tag_len = 4 + usize::try_from(i.rem_euclid(29)).expect("rem fits usize");
+    let tag: String = (0..tag_len)
+        .map(|j| {
+            let j_i64 = i64::try_from(j).expect("tag_len<=32 fits i64");
+            let off = u8::try_from((i + j_i64).rem_euclid(26)).expect("rem fits u8");
+            char::from(b'a' + off)
+        })
+        .collect();
+    // 1.234... × 10^18 を係数とすると i=999 で約 1.23×10^21、Decimal128(38,10) の値域に収まる。
+    let amount: i128 = i128::from(i) * 1_234_567_890_123_456_789i128;
+    let created = 20100 + i32::try_from(i % 365).expect("i%365 fits i32");
+    let event_at = base_micros + i;
+    let payload: Vec<u8> = (0..16u8)
+        .map(|j| (u8::try_from(i & 0xff).expect("masked fits u8")).wrapping_add(j))
+        .collect();
+    let lon = f64::from(i32::try_from(i % 360).expect("i%360 fits i32")) - 180.0;
+    let lat = f64::from(i32::try_from(i % 180).expect("i%180 fits i32")) - 90.0;
+    let geom = wkb::encode(&Geom::Point(lon, lat)).unwrap();
+    AllTypesRow {
+        flag,
+        class,
+        score,
+        name,
+        tag,
+        amount,
+        created,
+        event_at,
+        payload,
+        geom,
+    }
 }
 
 #[test]
