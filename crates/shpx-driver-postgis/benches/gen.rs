@@ -1,20 +1,12 @@
-//! v0.3 cycle 3c: PostGIS bench 用の合成データ生成器。
+//! PostGIS bench 用の合成データ生成器。
 //!
-//! `benches/copy_binary.rs` から `mod gen;` で読み込まれる内部モジュール。
-//!
-//! # 中間フォーマット
-//!
-//! Parquet を採用する（プランで検討した GPKG では Decimal128 が SQLite affinity の
-//! 影響でロスレス保存できないため）。Parquet は Arrow 型を完全保存し、`ogr2ogr` も
+//! 中間フォーマットは Parquet。GPKG (SQLite) では Decimal128 が affinity の影響で
+//! ロスレス保存できないため避ける。Parquet なら Arrow 型を完全保存し、ogr2ogr も
 //! GDAL 3.7+ の Parquet driver で同じファイルを直接読めるので、shpx と ogr2ogr に
-//! 同一バイト列の入力を与える「公平な比較」が成立する。
-//!
-//! # 再現性
-//!
-//! `StdRng::seed_from_u64(SEED)` 固定。row 数とサイズを `MANIFEST.txt` に書き出し、
-//! 同じ row 数で再生成要求が来た場合はファイル再利用してベンチ全体の起動時間を短縮する。
+//! 同一バイト列の入力を与えた公平比較が成立する。
 
-#![allow(dead_code)] // bench main から呼ばれない関数は warning 抑制対象。
+// bench main からは呼ばれない関数は cargo の自動 dead-code 検出に引っかかるため抑制する。
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::fs;
@@ -27,8 +19,6 @@ use arrow_array::builder::{
 };
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
-use rand::rngs::StdRng;
-use rand::SeedableRng;
 use shpx_core::{
     schema::{GeometryMeta, GeometryType, GEOMETRY_META_KEY},
     Crs, Driver, Uri, WriteOpts,
@@ -36,13 +26,6 @@ use shpx_core::{
 use shpx_driver_parquet::ParquetDriver;
 use shpx_geom::wkb::{self, Geom};
 
-/// 合成 GPKG/Parquet の決定論的乱数シード。`tests/bulk_roundtrip.rs::expected_row` と
-/// 同じ生成ルールに揃えれば 10 列同居 bit-identical テストも兼任できる構造。
-pub const SEED: u64 = 0x0011_0303_C0DE;
-
-/// 1 batch あたりの行数。Arrow ビルダのメモリ使用量と Parquet row group の粒度を
-/// バランスする実用値（`shpx-driver-parquet` の write_batch は受けたバッチを 1 つの
-/// row group として扱う実装と仮定）。
 const CHUNK: usize = 50_000;
 
 /// 指定 row 数の Parquet を `dir/points_<rows>.parquet` に確保する。既に同 row 数の
@@ -78,9 +61,6 @@ fn write_synthetic(rows: usize, path: &Path) {
         .open_write(&uri, schema.clone(), crs, &opts)
         .expect("parquet open_write");
 
-    // RNG は使用しないが、将来的に乱数化したくなった際の入口として保持。
-    let mut _rng = StdRng::seed_from_u64(SEED);
-
     let mut written: usize = 0;
     while written < rows {
         let n = CHUNK.min(rows - written);
@@ -91,8 +71,8 @@ fn write_synthetic(rows: usize, path: &Path) {
     writer.finish().expect("parquet finish");
 }
 
-/// ベンチスキーマ。`tests/bulk_roundtrip.rs::bulk_all_types_together` と 1:1 で揃え、
-/// 型網羅テストとベンチデータが同一ロジックで生成されることを保証する。
+/// `tests/bulk_roundtrip.rs::bulk_all_types_together` と 1:1 で揃えた型網羅スキーマ。
+/// ここを変更したら同テストの `expected_row` も同期させること。
 pub fn build_schema() -> SchemaRef {
     let crs = Some(Crs::from_epsg(4326));
     let mut fields = vec![
@@ -139,13 +119,15 @@ fn build_batch(schema: SchemaRef, start: usize, n: usize) -> RecordBatch {
     let mut payload_b = BinaryBuilder::with_capacity(n, n * 16);
     let mut geom_b = BinaryBuilder::with_capacity(n, n * 21);
 
-    let base_micros: i64 = 1_777_680_000_000_000; // 2026-04-25T00:00:00Z
+    // 2026-04-25T00:00:00Z UTC の microseconds since epoch。
+    // null pattern (素数 11/13/17) や定数係数も含め、tests/bulk_roundtrip.rs::expected_row
+    // と一字一句揃えること。値がずれると bit-identical テストが ベンチデータを通らなくなる。
+    let base_micros: i64 = 1_777_680_000_000_000;
 
     for k in 0..n {
         let idx = i64::try_from(start + k).expect("row index fits i64");
         id_b.append_value(idx);
 
-        // null pattern: tests/bulk_roundtrip.rs::expected_row と同一の素数で散らす。
         if idx % 11 == 0 {
             flag_b.append_null();
         } else {
@@ -159,7 +141,7 @@ fn build_batch(schema: SchemaRef, start: usize, n: usize) -> RecordBatch {
         if idx % 17 == 0 {
             score_b.append_null();
         } else {
-            // 1/8 刻みは f64 完全表現可能。bench input の Parquet も bit-identical を保つ。
+            // 1/8 刻みは f64 完全表現可能。Parquet→PostgreSQL を経ても bit-identical。
             score_b.append_value(f64::from(i32::try_from(idx & 0x7FFF_FFFF).unwrap()) * 0.125);
         }
         name_b.append_value(format!("name_{idx:010}"));
@@ -175,7 +157,6 @@ fn build_batch(schema: SchemaRef, start: usize, n: usize) -> RecordBatch {
 
         let amount: i128 = i128::from(idx) * 1_234_567_890_123_456_789i128;
         amount_b.append_value(amount);
-        // 2025-01-01 を起点にした緩い分布。bit-identical 比較は不要だが日付列を埋める。
         let created = 20100 + i32::try_from(idx % 365).expect("idx%365 fits i32");
         created_b.append_value(created);
         event_b.append_value(base_micros + idx);

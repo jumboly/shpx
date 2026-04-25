@@ -229,7 +229,7 @@ v0.3 cycle 3b 完了時点で以下は未対応:
 - COPY BINARY format の trailer は i16 BE `-1`。各 row の field count は i16 BE。各 field は `i32 length` + payload で、length=-1 が NULL。詳細は PostgreSQL ドキュメント "Binary Format" 節を参照。
 - numeric の binary 表現は `i16 ndigits / i16 weight / u16 sign / u16 dscale / [i16 digit; ndigits]`（NBASE=10000）。Decimal128 の i128 値を絶対値化 → 4 桁ごとに分割 → 末尾 0 桁トリム → weight 計算で組み立てる。`PgNumeric` 構造体に encode/decode を集約。
 
-## Benchmark (v0.3 cycle 3c)
+## Benchmark
 
 v0.3 完了基準の 1 つ「1000 万行 × 10 属性で `ogr2ogr` の 50% 以上の速度」を計測するための手順と数値を記録する。
 
@@ -254,7 +254,7 @@ SHPX_TEST_PG_URL=pg://shpx:shpx@localhost:5432/shpx_test \
 
 ### 計測結果
 
-実測値は v0.3 リリース時に確定する（commit E）。本節は手順を確定させた段階で、数値は TBD のまま release commit で更新する。
+実測値は v0.3 リリース時に確定する。本節は手順を確定させた段階で、数値は TBD のまま release commit で更新する。
 
 | 入力 row 数 | shpx (median) | ogr2ogr (median) | shpx / ogr2ogr | 判定 |
 |---|---|---|---|---|

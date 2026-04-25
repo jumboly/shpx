@@ -344,10 +344,6 @@ fn bulk_thousand_rows_with_nulls_roundtrip() {
     cleanup(&url, &table);
 }
 
-/// 10 列同居 1k 行 bit-identical テスト。bench (`benches/copy_binary.rs`) のスキーマと
-/// 1:1 で揃えてあり、ベンチデータが COPY BINARY 経由で正しく往復することを保証する
-/// 回帰検出器を兼ねる。型ごとの個別テストでは検出できない、列バッファの境界・null
-/// bitmap の越境バグを 1 ファイル内で再現させる。
 struct AllTypesRow {
     flag: Option<bool>,
     class: Option<i32>,
@@ -361,7 +357,9 @@ struct AllTypesRow {
     geom: Vec<u8>,
 }
 
-// 10 列同居の往復は型ごとの個別ヘルパに分割すると意味が薄れるため 1 関数に束ねる。
+/// `benches/gen.rs` のベンチスキーマと 1:1 揃えた 10 列を同時に往復させ、列バッファの
+/// 境界や null bitmap の越境を 1 ファイル内で再現させるための型網羅テスト。10 列を
+/// 個別ヘルパに分割すると意味が薄れるため 1 関数に束ねる。
 #[allow(clippy::too_many_lines)]
 #[test]
 fn bulk_all_types_together() {
@@ -534,8 +532,8 @@ fn bulk_all_types_together() {
     cleanup(&url, &table);
 }
 
-/// 行 i に対する expected 値を再現する純関数。null は型ごとに異なる素数で散らし、
-/// 列間で null bitmap の越境を起こりやすくする。
+/// 行 i の期待値。null pattern (素数 11/13/17) と各定数係数を `benches/gen.rs::build_batch`
+/// と完全に揃えること。値がずれると bit-identical テストが ベンチデータを通らなくなる。
 fn expected_row(i: i64, base_micros: i64) -> AllTypesRow {
     let flag = if i % 11 == 0 { None } else { Some(i % 2 == 0) };
     let class = if i % 13 == 0 {
@@ -546,13 +544,10 @@ fn expected_row(i: i64, base_micros: i64) -> AllTypesRow {
     let score = if i % 17 == 0 {
         None
     } else {
-        // 1/8 刻みは f64 で正確に表現できるため、IEEE754 BE 直書きでも bit-identical。
+        // 1/8 刻みは f64 完全表現可能。Parquet→PostgreSQL 経由でも bit-identical。
         Some(f64::from(i32::try_from(i).expect("n<=1000 fits i32")) * 0.125)
     };
-    // name は固定長 15 B (`name_` + 10 桁 0 埋め)。bench スキーマの「固定 16 B 相当」を
-    // テスト側で再現したもので、ピッタリ 16 B である必要は無い。
     let name = format!("name_{i:010}");
-    // tag は 4..=32 B の可変長。
     let tag_len = 4 + usize::try_from(i.rem_euclid(29)).expect("rem fits usize");
     let tag: String = (0..tag_len)
         .map(|j| {
@@ -561,7 +556,7 @@ fn expected_row(i: i64, base_micros: i64) -> AllTypesRow {
             char::from(b'a' + off)
         })
         .collect();
-    // 1.234... × 10^18 を係数とすると i=999 で約 1.23×10^21、Decimal128(38,10) の値域に収まる。
+    // i=999 で約 1.23×10^21、Decimal128(38,10) の値域に収まる係数。
     let amount: i128 = i128::from(i) * 1_234_567_890_123_456_789i128;
     let created = 20100 + i32::try_from(i % 365).expect("i%365 fits i32");
     let event_at = base_micros + i;

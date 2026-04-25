@@ -1,20 +1,11 @@
-#!/bin/sh
-# v0.3 cycle 3c: PostGIS bulk write の shpx vs ogr2ogr 比較ハーネス。
+#!/bin/bash
+# PostGIS bulk write の shpx vs ogr2ogr 比較ハーネス。完了基準は ROADMAP の
+# 「shpx が ogr2ogr の 50% 以上の速度」(shpx_secs <= 2.0 * ogr_secs)。
+# 詳細は docs/POSTGIS.md の Benchmark 節を参照。
 #
-# 同一の Parquet を入力にして
-#   - shpx convert --insert-mode=bulk
-#   - ogr2ogr -f PostgreSQL ... --config PG_USE_COPY YES
-# を順に実行し、`/usr/bin/time -p` の wall-clock 秒で比較する。完了基準
-# (`docs/ROADMAP.md` v0.3) は「shpx が ogr2ogr の 50% 以上の速度」=
-# `shpx_secs <= 2.0 * ogr_secs` を満たすこと。満たさなければ exit 1。
+# 必要コマンド: cargo / ogr2ogr (GDAL 3.7+ Parquet driver 同梱) / psql
 #
-# 使い方:
-#   SHPX_TEST_PG_URL=pg://shpx:shpx@localhost:5432/shpx_test \
-#       scripts/bench-vs-ogr.sh --rows 10000000
-#
-# 必要な外部コマンド: cargo, ogr2ogr (GDAL 3.7+ で Parquet driver 同梱), psql
-#
-# 結果は stdout に表として出力し、`docs/POSTGIS.md` の Benchmark 節に貼り付ける。
+# bash 必須 (関数内の `local` を使うため)。
 
 set -eu
 

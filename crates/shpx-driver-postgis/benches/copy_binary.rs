@@ -1,14 +1,8 @@
-//! v0.3 cycle 3c: PostGIS COPY BINARY 経路の criterion ベンチ。
+//! PostGIS COPY BINARY 経路の criterion ベンチ。
 //!
-//! `SHPX_TEST_PG_URL` が設定されているときのみ実 DB に書き込む。未設定なら eprintln
-//! で skip して exit 0（ローカル/CI どちらでも `cargo bench --no-run` が緑になる）。
-//!
-//! 行数は環境変数 `SHPX_BENCH_ROWS` で切替（default 100k = smoke、CI workflow_dispatch
-//! では 10M を渡す）。1 イテレーションが数十秒〜数分のため `sample_size(10)` 必須。
-//!
-//! 計測対象は `bulk_write` + `finish`（COPY BINARY 全フェーズ）。Parquet 読み込みも
-//! ループ内に含まれるが、`StreamReader` 部分の純粋オーバーヘッドは PostGIS 書き込みに
-//! 比べて十分小さい想定。ogr2ogr 比較も同じ Parquet を入力にするため公平性は保たれる。
+//! `SHPX_TEST_PG_URL` 必須。未設定時は eprintln で skip し exit 0。行数は
+//! `SHPX_BENCH_ROWS` で切替（既定 100k smoke、リリース計測は 10M）。詳細は
+//! `docs/POSTGIS.md` の Benchmark 節を参照。
 
 mod gen;
 
@@ -25,9 +19,8 @@ fn pg_url() -> Option<String> {
     env::var("SHPX_TEST_PG_URL").ok().filter(|s| !s.is_empty())
 }
 
-/// `target/bench-data/` を返す。`CARGO_MANIFEST_DIR` (= `crates/shpx-driver-postgis`)
-/// から 2 段親の workspace ルート → `target/bench-data` に解決する。
 fn bench_data_dir() -> PathBuf {
+    // CARGO_MANIFEST_DIR (= crates/shpx-driver-postgis) から 2 段親の workspace ルート。
     let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace = crate_dir
         .parent()
@@ -52,6 +45,7 @@ fn bench_pg_write(c: &mut Criterion) {
     let input = gen::ensure_parquet(rows, &dir);
 
     let mut group = c.benchmark_group("postgis_bulk");
+    // 1 イテレーションが数十秒〜数分のため最小サンプル数。
     group.sample_size(10);
     group.warm_up_time(Duration::from_secs(5));
     group.measurement_time(Duration::from_secs(900));
@@ -68,8 +62,6 @@ fn bench_pg_write(c: &mut Criterion) {
     );
 
     group.finish();
-
-    // bench 終了時にテーブルを掃除する（次回 bench / 統合テストで残骸が衝突しないように）。
     drop_bench_table(&url, rows);
 }
 
