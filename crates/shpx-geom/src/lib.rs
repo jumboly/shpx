@@ -2,6 +2,12 @@
 //!
 //! v0.1 では PROJ 非依存。CRS は EPSG コードのみで保持・伝搬する。
 
+pub mod epsg_wkt1;
+pub mod projjson;
 pub mod wkb;
+pub mod wkt1_prj;
 
+pub use epsg_wkt1::epsg_to_wkt1;
+pub use projjson::minimal_for_epsg;
 pub use wkb::{decode, encode, Geom};
+pub use wkt1_prj::extract_epsg;
