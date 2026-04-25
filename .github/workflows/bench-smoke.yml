@@ -1,0 +1,56 @@
+# v0.3 cycle 3c: PostGIS bench smoke。
+#
+# 通常 PR では走らない（既存 ci.yml は無変更）。手動 `workflow_dispatch` で
+# 起動し、10 万行（既定）のベンチが完走することと bit-identical テスト
+# `bulk_all_types_together` が緑であることだけを確認する smoke。
+#
+# 1000 万行の本計測（v0.3 リリース判定）は別途 `scripts/bench-vs-ogr.sh`
+# をローカル/専用ホストで実行する想定で、CI では走らせない。
+name: bench-smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      rows:
+        description: "Bench input row count (smoke は数万〜10 万、リリース計測は 10000000)"
+        required: false
+        default: "100000"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    services:
+      postgis:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: shpx
+          POSTGRES_PASSWORD: shpx
+          POSTGRES_DB: shpx_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U shpx -d shpx_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      SHPX_TEST_PG_URL: pg://shpx:shpx@localhost:5432/shpx_test
+      SHPX_BENCH_ROWS: ${{ github.event.inputs.rows }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # `proj` crate がシステム libproj を pkg-config で検出する（既存 ci.yml と揃える）。
+      - run: sudo apt-get update && sudo apt-get install -y libproj-dev pkg-config
+      # 10 列同居 bit-identical テストが緑であることを最初に確認（ベンチデータの
+      # 往復が壊れていないことの保証）。
+      - name: bulk_all_types_together
+        run: cargo test -p shpx-driver-postgis --test bulk_roundtrip bulk_all_types_together --locked
+      # criterion ベンチを `--quick` モードで完走させる。sample_size と measurement_time を
+      # 強制的に最小化し、smoke として成立を確認する（数値そのものは記録しない）。
+      - name: cargo bench (smoke)
+        run: cargo bench -p shpx-driver-postgis --bench copy_binary -- --quick --warm-up-time 1 --measurement-time 1
