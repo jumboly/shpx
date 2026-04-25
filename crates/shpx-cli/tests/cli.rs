@@ -176,6 +176,7 @@ fn drivers_lists_shp_and_parquet() {
         .stdout(contains("- shp"))
         .stdout(contains("- parquet"))
         .stdout(contains("- csv"))
+        .stdout(contains("- geojson"))
         .stdout(contains("schemes:"))
         .stdout(contains("read+write"));
 }
@@ -216,6 +217,77 @@ fn convert_shp_to_csv_then_back() {
         .success();
     assert!(back.exists());
     assert!(back.with_extension("prj").exists());
+}
+
+#[test]
+fn convert_shp_to_geojson_then_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let shp = dir.path().join("p.shp");
+    let geojson = dir.path().join("p.geojson");
+    let back = dir.path().join("back.shp");
+    make_point_shp(&shp);
+
+    // SHP → GeoJSON（SHP の CRS は EPSG:4326 で WGS84 制約を満たす）
+    Command::cargo_bin("shpx")
+        .unwrap()
+        .args([
+            "convert",
+            shp.to_str().unwrap(),
+            geojson.to_str().unwrap(),
+            "--overwrite",
+        ])
+        .assert()
+        .success();
+    assert!(geojson.exists());
+
+    // info で 2 行・EPSG:4326 が表示されること。
+    Command::cargo_bin("shpx")
+        .unwrap()
+        .args(["info", geojson.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(contains("driver:  geojson"))
+        .stdout(contains("rows:    2"))
+        .stdout(contains("crs:     EPSG:4326"));
+
+    // GeoJSON → SHP
+    Command::cargo_bin("shpx")
+        .unwrap()
+        .args([
+            "convert",
+            geojson.to_str().unwrap(),
+            back.to_str().unwrap(),
+            "--overwrite",
+        ])
+        .assert()
+        .success();
+    assert!(back.exists());
+    assert!(back.with_extension("prj").exists());
+}
+
+#[test]
+fn convert_shp_to_geojsonl_uses_lines_format() {
+    let dir = tempfile::tempdir().unwrap();
+    let shp = dir.path().join("p.shp");
+    let ndjson = dir.path().join("p.geojsonl");
+    make_point_shp(&shp);
+
+    Command::cargo_bin("shpx")
+        .unwrap()
+        .args([
+            "convert",
+            shp.to_str().unwrap(),
+            ndjson.to_str().unwrap(),
+            "--overwrite",
+        ])
+        .assert()
+        .success();
+    let raw = std::fs::read_to_string(&ndjson).unwrap();
+    let lines: Vec<&str> = raw.lines().collect();
+    // 2 件の Point → 2 行。各行が Feature object。
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].starts_with('{'));
+    assert!(lines[0].contains(r#""type":"Feature""#));
 }
 
 #[test]
