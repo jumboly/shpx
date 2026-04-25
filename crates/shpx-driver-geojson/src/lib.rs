@@ -15,6 +15,7 @@ use shpx_core::{
     WriteOpts,
 };
 
+pub mod geom_convert;
 pub mod options;
 pub mod util;
 
