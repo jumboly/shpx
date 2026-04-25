@@ -65,10 +65,10 @@
 - 接続: `pg://user:pass@host/db?table=...`
 
 **完了基準**:
-- [ ] 1000万行 × 10 属性のベンチで `ogr2ogr` の 50% 以上の速度
-- [ ] decimal(38, 10) / timestamptz / bytea が往復で bit-identical
-- [ ] geometry の SRID と座標が無損失
-- [ ] CI で `docker compose up postgis` テスト
+- [x] 1000万行 × 10 属性のベンチで `ogr2ogr` の 50% 以上の速度（実測 0.453、`docs/POSTGIS.md` Benchmark 節参照）
+- [x] decimal(38, 10) / timestamptz / bytea が往復で bit-identical（cycle 2 の `tests/bulk_roundtrip.rs::bulk_decimal128_38_10_bit_identical` ほか）
+- [x] geometry の SRID と座標が無損失（cycle 1 の `tests/roundtrip.rs`）
+- [x] CI で `docker compose up postgis` テスト（`.github/workflows/ci.yml` の `services.postgis`）
 
 **サブ cycle 構成** (v0.2 と同じく cycle ごとに `/clear` して clean に再開する):
 
@@ -77,7 +77,7 @@
 - **cycle 3 は 3a / 3b / 3c に分割する**:
   - **cycle 3a — reader 拡張**（完了）: `shpx-core::ReadOpts` に `where_clause` / `select` / `query` を追加。`shpx-cli` の `convert` に `--where '<sql>'` / `--select col1,col2` / `--query '<sql>'` を追加（`--query` は他 2 つと clap 排他）。PostGIS reader を「table モード（WHERE / 列絞り）」と「query モード（任意 SQL のサブクエリ化）」の 2 経路に分け、geometry 列は `ST_AsEWKB` でラップしたまま再利用する。geometry 列を含まない抽出と `--query` の末尾セミコロン混入はエラー。
   - **cycle 3b — writer 拡張**（完了）: `shpx-core::WriteOpts` に `CreateTable` / `CreateIndex` enum を追加し、`shpx-cli` に `--create-table=if-not-exists|always|never`（既定 `if-not-exists`）と `--create-index=auto|always|never`（既定 `auto`）を追加。`--create-table` と既存 `--overwrite` は直交し、`--overwrite && --create-table=never` は整合性エラー。`--create-index=auto` は `create_table != Never` のときのみ GIST index を生成し、bulk 経路では COPY 完了後に発行する。SRID 解決時に `spatial_ref_sys` を probe し、欠けていれば `Crs.wkt` または `shpx_geom::epsg_to_wkt1(code)` 同梱マップから `srtext` を組み立てて `INSERT ... ON CONFLICT (srid) DO NOTHING` で best-effort 登録する。WKT が解決できない場合は INSERT スキップ（PostGIS の geometry 列は spatial_ref_sys 行が無くても動作するため）。env-gated の統合テスト 9 件と option 整合性ユニットテスト 2 件を追加。
-  - **cycle 3c — ベンチと完了基準**: 1000万行 × 10 属性のベンチを criterion 等で整備し、`ogr2ogr` の 50% 以上であることを再計測。decimal(38, 10) / timestamptz / bytea / geometry の bit-identical 往復は cycle 2 で達成済みなので最終確認のみ。完了基準すべてクリアで v0.3 リリース。
+  - **cycle 3c — ベンチと完了基準**（完了）: 1000万行 × 10 属性のベンチを criterion で整備（`crates/shpx-driver-postgis/benches/copy_binary.rs` + `gen.rs`）、`scripts/bench-vs-ogr.sh` で ogr2ogr との median wall-clock 比較。実測値 (10M 行 × 3 runs median) は shpx 28.46 s / ogr2ogr 62.84 s / 比 0.453 で完了基準（≤ 2.0）をクリア。詳細は `docs/POSTGIS.md` の Benchmark 節参照。型網羅 bit-identical テスト `bulk_all_types_together` も追加（`tests/bulk_roundtrip.rs`）。
 
 ---
 

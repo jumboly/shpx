@@ -254,22 +254,26 @@ SHPX_TEST_PG_URL=pg://shpx:shpx@localhost:5432/shpx_test \
 
 ### 計測結果
 
-実測値は v0.3 リリース時に確定する。本節は手順を確定させた段階で、数値は TBD のまま release commit で更新する。
+shpx は ogr2ogr の median wall-clock で約 2.2 倍速く（`shpx / ogr2ogr = 0.453`）、完了基準（≤ 2.0）をクリア。
 
-| 入力 row 数 | shpx (median) | ogr2ogr (median) | shpx / ogr2ogr | 判定 |
+| 入力 row 数 | shpx (median, 3 runs) | ogr2ogr (median, 3 runs) | shpx / ogr2ogr | 判定 |
 |---|---|---|---|---|
-| 100,000 (smoke) | TBD | TBD | TBD | TBD |
-| 10,000,000 (release gate) | TBD | TBD | TBD | TBD |
+| 10,000,000 | 28.46 s | 62.84 s | **0.453** | PASS |
+
+個別計測値:
+
+- shpx: 29.63 s / 28.46 s / 27.73 s
+- ogr2ogr: 62.84 s / 63.50 s / 60.49 s
 
 ### 計測環境
 
-リリース時の確定値とともに以下を記録する:
+- GDAL: 3.12.3 "Chicoutimi" (2026-03-17 release), Parquet driver 同梱
+- PostgreSQL / PostGIS: `postgis/postgis:16-3.4` (Docker, linux/amd64 image)
+- ハードウェア: Apple Silicon (A18 Pro, 6 cores), 8 GiB RAM, internal NVMe SSD
+- OS: macOS (Darwin 25.4.0 arm64)
+- PG パラメタ: `synchronous_commit=off` / `full_page_writes=off` を bench harness が一時設定（終了時に `RESET ALL`）
 
-- GDAL バージョン（`ogrinfo --version`）
-- PostGIS イメージ（既定 `postgis/postgis:16-3.4`）
-- ハードウェア（CPU モデル / 物理コア数 / メモリ / ディスク種別）
-
-CI 上で取得する数値ではないため、再現性確保のためにこの 3 項目を必ず控える。
+CI で取得する数値ではないため再現時はこの 4 項目を控えること。同条件で揃えれば bench-vs-ogr.sh が同様の比率を再現する見込み。
 
 ## Future work
 
