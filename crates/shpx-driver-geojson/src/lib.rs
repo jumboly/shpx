@@ -17,6 +17,7 @@ use shpx_core::{
 
 pub mod geom_convert;
 pub mod options;
+pub mod reader;
 pub mod util;
 
 /// GeoJSON ドライバ。ステートレスな factory。
@@ -62,11 +63,9 @@ impl Driver for GeoJsonDriver {
         }
     }
 
-    fn open_read(&self, _uri: &Uri, _opts: &ReadOpts) -> Result<Box<dyn LayerReader>> {
-        // Reader は次コミットで実装する。骨格コミットでは not implemented を返す。
-        Err(util::driver_msg(
-            "open_read is not yet implemented (skeleton commit)",
-        ))
+    fn open_read(&self, uri: &Uri, opts: &ReadOpts) -> Result<Box<dyn LayerReader>> {
+        let r = reader::GeoJsonReader::open(uri, opts)?;
+        Ok(Box::new(r))
     }
 
     fn open_write(
