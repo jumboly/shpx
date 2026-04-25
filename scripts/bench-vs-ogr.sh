@@ -7,7 +7,7 @@
 #
 # bash 必須 (関数内の `local` を使うため)。
 
-set -eu
+set -euo pipefail
 
 usage() {
     cat <<'USAGE'
@@ -38,6 +38,11 @@ done
 
 : "${SHPX_TEST_PG_URL:?SHPX_TEST_PG_URL must be set (e.g. pg://shpx:shpx@localhost:5432/shpx_test)}"
 OGR2OGR_BIN="${OGR2OGR_BIN:-ogr2ogr}"
+
+# OGR の PG ドライバは libpq URI として `postgresql://` のみ受ける。shpx 独自の
+# `pg://` は libpq に通らず "missing = after ..." で sliently failure するため
+# (ogr2ogr が 0 秒で偽の成功を返してしまう) スキームだけ書き換える。
+OGR_PG_URL="${SHPX_TEST_PG_URL/#pg:\/\//postgresql://}"
 
 # Parquet driver の有無を最初に確認（無ければ早期失敗）。
 if ! "$OGR2OGR_BIN" --formats 2>/dev/null | grep -qi "Parquet"; then
@@ -104,33 +109,45 @@ trap 'echo "==> resetting PG params"; \
     psql_q "DROP TABLE IF EXISTS public.bench_shpx" || true; \
     psql_q "DROP TABLE IF EXISTS public.bench_ogr"  || true' EXIT
 
+# run_tool: 計測対象コマンドを `/usr/bin/time -p` で囲んで wall-clock 秒を返す。
+# コマンドが失敗 (= 0 行も書かれていない可能性) したら早期に止める。silently 0 秒
+# 成功して比較を歪めるバグを以前踏んだため。
+run_tool() {
+    local label="$1"; shift
+    local out rc
+    out=$(/usr/bin/time -p "$@" 2>&1) || rc=$?
+    rc=${rc:-0}
+    if [ "$rc" -ne 0 ]; then
+        echo "$out" >&2
+        echo "ERROR: $label exited with $rc" >&2
+        return "$rc"
+    fi
+    echo "$out" | awk '/^real/ {print $2}'
+}
+
 run_shpx() {
     local table="$1"
     psql_q "DROP TABLE IF EXISTS public.$table"
-    # /usr/bin/time -p は POSIX 時間出力（real / user / sys 各 1 行）
-    /usr/bin/time -p sh -c "
-        $SHPX_BIN convert \
-            --insert-mode=bulk \
-            --create-table=always \
-            --create-index=auto \
-            '$INPUT' \
-            '${SHPX_TEST_PG_URL}?table=$table'
-    " 2>&1 | awk '/^real/ {print $2}'
+    run_tool "shpx" "$SHPX_BIN" convert \
+        --insert-mode=bulk \
+        --create-table=always \
+        --create-index=auto \
+        "$INPUT" \
+        "${SHPX_TEST_PG_URL}?table=$table"
 }
 
 run_ogr() {
     local table="$1"
     psql_q "DROP TABLE IF EXISTS public.$table"
-    /usr/bin/time -p sh -c "
-        $OGR2OGR_BIN -f PostgreSQL 'PG:$SHPX_TEST_PG_URL' \
-            '$INPUT' \
-            -nln '$table' \
-            -lco SPATIAL_INDEX=NONE \
-            -lco PRECISION=NO \
-            -lco GEOMETRY_NAME=geom \
-            --config PG_USE_COPY YES \
-            -overwrite
-    " 2>&1 | awk '/^real/ {print $2}'
+    run_tool "ogr2ogr" "$OGR2OGR_BIN" \
+        -f PostgreSQL "PG:$OGR_PG_URL" \
+        "$INPUT" \
+        -nln "$table" \
+        -lco SPATIAL_INDEX=NONE \
+        -lco PRECISION=NO \
+        -lco GEOMETRY_NAME=geom \
+        --config PG_USE_COPY YES \
+        -overwrite
 }
 
 median() {
