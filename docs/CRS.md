@@ -59,10 +59,25 @@ GeoJSON は仕様（RFC 7946）で **WGS84（経緯度、EPSG:4326）以外を�
 - `--reproject 'PROJCRS["..."]'` (WKT2)
 - `--reproject '+proj=...'` (proj-string、非推奨)
 
-実装:
-- パイプライン上で batch 単位に WKB デコード → PROJ 変換 → WKB 再エンコード
-- `rayon` で batch 内並列、`tokio` で batch 間 pipelining
-- PROJ context は thread-local（PROJ は非 thread-safe）
+実装（v0.2 cycle 5 で完了）:
+- `proj` crate（libproj バインディング）を `shpx-geom::Reprojector` から呼び出す
+- パイプライン上で batch 単位に geom 列を WKB デコード → PROJ 変換 → WKB 再エンコード
+- PROJ context は thread-local。`Proj` 自体が `!Send` なので `Reprojector` は CRS spec
+  文字列のみを保持し、`Proj` は (src_spec, dst_spec) キーで thread-local キャッシュする
+- `Proj::new_known_crs` が `proj_normalize_for_visualization` を適用するため、
+  EPSG:4326 のような lat-lon 系も traditional XY (=lon, lat) で扱える
+- 既定はシステム libproj を pkg-config で検出。`shpx-cli` の `bundled-proj` feature を
+  有効化すると libproj/SQLite を C ソースから static link する（`cargo-dist` 配布用）
+
+未対応（v0.3 以降）:
+- `rayon` による batch 内並列化（v0.2 はシリアル）
+- libproj の network grid 取得（`proj` の `network` feature は OFF）
+
+## RFC 7946 (GeoJSON) の自動 reproject
+
+GeoJSON writer は v0.2 cycle 5 から、非 EPSG:4326 入力を内部 `Reprojector` で
+透過的に EPSG:4326 へ変換する。`--reproject` の明示指定無しで動作する。
+入力 CRS が解決不能な場合のみ `Error::Crs` で停止する。
 
 ## EPSG コードの解決
 

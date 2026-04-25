@@ -9,7 +9,7 @@ use shpx_core::OnLoss;
 #[command(
     name = "shpx",
     version,
-    about = "ジオ空間データ変換 CLI（v0.1: Shapefile / GeoParquet）"
+    about = "ジオ空間データ変換 CLI（v0.2: SHP / GeoParquet / CSV / GeoJSON / GPKG / FlatGeobuf + --reproject）"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -58,6 +58,11 @@ pub struct ConvertArgs {
     /// 入力 CRS が無いとき補完する EPSG（例: `EPSG:4326`）。
     #[arg(long)]
     pub src_crs: Option<String>,
+
+    /// 出力時に reproject する目標 CRS（例: `EPSG:3857`）。WKT2 / proj-string も受理する。
+    /// 入力 CRS が解決できないとエラーになるため `--src-crs` と併用すること。
+    #[arg(long)]
+    pub reproject: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]

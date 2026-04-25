@@ -10,6 +10,12 @@ description = "shpx CLI（convert / info サブコマンド）"
 [lints]
 workspace = true
 
+# `cargo-dist` で配布する単一バイナリ用に、libproj を bundled でビルドさせる。
+# default ビルドはシステム libproj を pkg-config で検出するため、cmake / clang 不要。
+[features]
+default       = []
+bundled-proj  = ["shpx-geom/bundled-proj"]
+
 # CLI バイナリ名は `shpx`。crate 名と分けることでパッケージ名衝突を避ける。
 [[bin]]
 name = "shpx"
@@ -23,6 +29,7 @@ shpx-driver-csv     = { path = "../shpx-driver-csv" }
 shpx-driver-fgb     = { path = "../shpx-driver-fgb" }
 shpx-driver-geojson = { path = "../shpx-driver-geojson" }
 shpx-driver-gpkg    = { path = "../shpx-driver-gpkg" }
+shpx-geom           = { path = "../shpx-geom" }
 arrow-schema        = { workspace = true }
 clap                = { workspace = true }
 serde_json          = { workspace = true }
@@ -36,4 +43,5 @@ predicates   = { workspace = true }
 tempfile     = { workspace = true }
 arrow-array  = { workspace = true }
 arrow-schema = { workspace = true }
+parquet      = { workspace = true }
 serde_json   = { workspace = true }

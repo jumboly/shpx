@@ -10,8 +10,18 @@ description = "shpx のジオメトリ表現・WKB エンコーダ・CRS ユー�
 [lints]
 workspace = true
 
+# `bundled-proj` を有効化すると `proj` クレートが libproj/SQLite を C ソースから
+# ビルドして static link する（`cmake` / `clang` 必須）。default は系列の
+# libproj (pkg-config) を使うので dev ビルドはこれらを要求しない。
+[features]
+default      = []
+bundled-proj = ["proj/bundled_proj"]
+
 [dependencies]
-shpx-core  = { path = "../shpx-core" }
-serde      = { workspace = true }
-serde_json = { workspace = true }
-regex      = { workspace = true }
+shpx-core    = { path = "../shpx-core" }
+arrow-array  = { workspace = true }
+arrow-schema = { workspace = true }
+proj         = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+regex        = { workspace = true }

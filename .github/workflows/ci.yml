@@ -32,6 +32,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # `proj` crate がシステム libproj を pkg-config で検出する（bundled_proj 未指定）。
+      - run: sudo apt-get update && sudo apt-get install -y libproj-dev pkg-config
       # clippy warning ゼロを完了基準としているため -D warnings で失敗させる。
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -49,4 +51,5 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
       - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libproj-dev pkg-config
       - run: cargo test --workspace --locked

@@ -17,14 +17,15 @@ GDAL 非依存・Rust 製の空間データ相互変換 CLI。Arrow RecordBatch 
 | SQL Server (`mssql://`) | ✓ | ✓ | staging table → bulk_insert |
 | SpatiaLite (`sqlite://`) | ✓ | ✓ | TX batch |
 
-## 使い方（予定）
+## 使い方
 
 ```bash
 # 拡張子から推論
 shpx convert parcels.shp parcels.gpkg
 shpx convert parcels.gpkg parcels.parquet --reproject EPSG:4326
+shpx convert parcels.shp parcels.geojson  # 非 WGS84 入力は自動で WGS84 へ変換
 
-# URI で明示
+# URI で明示（v0.3 以降）
 shpx convert parcels.shp 'pg://user:pass@host/db?table=public.parcels&create=if-not-exists'
 shpx convert 'mssql://host/db?table=dbo.cities' cities.parquet
 
@@ -33,6 +34,15 @@ shpx info parcels.gpkg
 shpx schema parcels.gpkg
 shpx drivers
 ```
+
+## ビルド要件
+
+- Rust 1.85 以上
+- システムに **libproj** がインストール済みであること（`--reproject` および GeoJSON writer の自動 WGS84 変換で利用）
+  - macOS: `brew install proj`
+  - Ubuntu / Debian: `apt-get install libproj-dev pkg-config`
+  - Windows: vcpkg 等で `proj` を導入する
+- `cargo install shpx --features bundled-proj` で libproj/SQLite を同梱した単一バイナリをビルドできる（`cmake` / `clang` が必要）。`cargo-dist` で配布するバイナリも本フラグでビルドする想定。
 
 ## 設計ドキュメント
 
@@ -48,7 +58,7 @@ shpx drivers
 
 ## ステータス
 
-v0.1.0 リリース済み（2026-04-25）。v0.2 進行中で、現在は SHP / GeoParquet / CSV (WKT) / GeoJSON / GeoJSON Lines / GeoPackage / FlatGeobuf ドライバが利用可能（`cargo run -- convert` / `info` / `drivers`）。残作業は PROJ 統合 (`--reproject`)。変更履歴は [CHANGELOG.md](CHANGELOG.md)。
+v0.2.0 リリース済み（2026-04-25）。SHP / GeoParquet / CSV (WKT) / GeoJSON / GeoJSON Lines / GeoPackage / FlatGeobuf ドライバ + `--reproject EPSG:xxxx`（PROJ 統合）+ GeoJSON writer の RFC 7946 自動 WGS84 強制が利用可能。次マイルストーン v0.3 では PostGIS ドライバを予定。変更履歴は [CHANGELOG.md](CHANGELOG.md)。
 
 ## ライセンス
 

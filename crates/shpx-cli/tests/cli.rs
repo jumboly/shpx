@@ -428,3 +428,146 @@ fn info_with_unknown_extension_fails() {
         .failure()
         .stderr(contains("no driver"));
 }
+
+/// `--reproject EPSG:3857` で出力 Parquet が EPSG:3857 にタグされ、
+/// 座標が経緯度から Web メルカトル (m オーダー) に変換されていること。
+#[test]
+fn convert_shp_to_parquet_with_reproject() {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use std::fs::File;
+
+    let dir = tempfile::tempdir().unwrap();
+    let shp = dir.path().join("p.shp");
+    let parquet = dir.path().join("p.parquet");
+    make_point_shp(&shp);
+
+    Command::cargo_bin("shpx")
+        .unwrap()
+        .args([
+            "convert",
+            shp.to_str().unwrap(),
+            parquet.to_str().unwrap(),
+            "--overwrite",
+            "--reproject",
+            "EPSG:3857",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("shpx")
+        .unwrap()
+        .args(["info", parquet.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(contains("crs:     EPSG:3857"));
+
+    // 元の Point は (139.7, 35.7) [lon, lat]。3857 後は数百万 m スケール。
+    let file = File::open(&parquet).unwrap();
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
+    let mut reader = builder.build().unwrap();
+    let batch = reader.next().unwrap().unwrap();
+    let geom_col = batch
+        .column_by_name("geometry")
+        .expect("geometry column present");
+    let arr = geom_col
+        .as_any()
+        .downcast_ref::<arrow_array::BinaryArray>()
+        .unwrap();
+    let g = wkb::decode(arr.value(0)).unwrap();
+    let Geom::Point(x, y) = g else {
+        panic!("not Point");
+    };
+    // 139.7 度 ≈ 15555000 m, 35.7 度 ≈ 4260000 m (Web メルカトル定義式)。
+    assert!(
+        (15_500_000.0..16_000_000.0).contains(&x),
+        "x out of 3857 range: {x}"
+    );
+    assert!(
+        (4_200_000.0..4_300_000.0).contains(&y),
+        "y out of 3857 range: {y}"
+    );
+}
+
+/// 入力 CRS が解決できないファイル (CRS 無し CSV) で `--reproject` を指定すると
+/// エラーで停止する。`--src-crs` を併用すれば成功する。
+#[test]
+fn reproject_without_src_crs_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let shp = dir.path().join("p.shp");
+    let csv = dir.path().join("p.csv");
+    let parquet = dir.path().join("p.parquet");
+    make_point_shp(&shp);
+
+    // CSV を経由して CRS 情報を落とす。
+    Command::cargo_bin("shpx")
+        .unwrap()
+        .args([
+            "convert",
+            shp.to_str().unwrap(),
+            csv.to_str().unwrap(),
+            "--overwrite",
+        ])
+        .assert()
+        .success();
+
+    // --src-crs 無しでの --reproject はエラー。
+    Command::cargo_bin("shpx")
+        .unwrap()
+        .args([
+            "convert",
+            csv.to_str().unwrap(),
+            parquet.to_str().unwrap(),
+            "--overwrite",
+            "--reproject",
+            "EPSG:3857",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("--reproject requires source CRS"));
+
+    // --src-crs 併用で成功する。
+    Command::cargo_bin("shpx")
+        .unwrap()
+        .args([
+            "convert",
+            csv.to_str().unwrap(),
+            parquet.to_str().unwrap(),
+            "--overwrite",
+            "--reproject",
+            "EPSG:3857",
+            "--src-crs",
+            "EPSG:4326",
+        ])
+        .assert()
+        .success();
+}
+
+/// src と target が同一 CRS なら no-op パスが選ばれる（出力データの整合性を確認）。
+#[test]
+fn reproject_identity_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let shp = dir.path().join("p.shp");
+    let parquet = dir.path().join("p.parquet");
+    make_point_shp(&shp);
+
+    Command::cargo_bin("shpx")
+        .unwrap()
+        .args([
+            "convert",
+            shp.to_str().unwrap(),
+            parquet.to_str().unwrap(),
+            "--overwrite",
+            "--reproject",
+            "EPSG:4326",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("shpx")
+        .unwrap()
+        .args(["info", parquet.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(contains("rows:    2"))
+        .stdout(contains("crs:     EPSG:4326"));
+}

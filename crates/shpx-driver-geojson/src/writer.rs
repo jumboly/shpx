@@ -3,9 +3,9 @@
 //! - FeatureCollection (`.geojson`): `{"type":"FeatureCollection","features":[...]}`
 //! - GeoJSONL (`.geojsonl` / `.ndjson` / `.jsonl`): 1 行 1 Feature
 //!
-//! いずれの形式でも RFC 7946 §4 に従い、出力 CRS は EPSG:4326 のみ許可する。
-//! それ以外の CRS は [`Error::Crs`] で停止し、ユーザに upstream での reproject を促す。
-//! （driver 内蔵 reprojection は `docs/GEOJSON.md` の Future work 参照。）
+//! 出力は RFC 7946 §4 に従い EPSG:4326 (WGS84) で固定する。非 WGS84 入力は
+//! [`Reprojector`] により透過的に EPSG:4326 へ変換する。入力 CRS が解決できない場合のみ
+//! [`Error::Crs`] で停止し、ユーザに `--src-crs` の指定を促す。
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -27,11 +27,14 @@ use serde_json::{Map as JsonMap, Number, Value as JsonValue};
 use shpx_core::{
     schema::find_geometry_column, Crs, Error, LayerWriter, OnLoss, Result, Uri, WriteOpts,
 };
-use shpx_geom::wkb;
+use shpx_geom::{wkb, Reprojector};
 
 use crate::geom_convert::geom_to_geometry;
 use crate::options::{OutputFormat, ResolvedWriteOpts};
 use crate::util::{apply_on_loss, date32, driver_err, driver_msg, loss_kind};
+
+/// 出力 CRS。RFC 7946 §4 で WGS84 固定。
+const OUTPUT_CRS_EPSG: u32 = 4326;
 
 /// GeoJSON / GeoJSONL の `LayerWriter` 実装。
 pub struct GeoJsonWriter {
@@ -46,6 +49,9 @@ pub struct GeoJsonWriter {
     skipped_cols: Vec<usize>,
     on_loss: OnLoss,
     pretty: bool,
+    /// 非 WGS84 入力を EPSG:4326 へ透過変換する（RFC 7946 準拠）。
+    /// 入力が既に EPSG:4326 / CRS 不明の場合は `None`。
+    reprojector: Option<Reprojector>,
 }
 
 impl GeoJsonWriter {
@@ -53,18 +59,12 @@ impl GeoJsonWriter {
         let resolved = ResolvedWriteOpts::resolve(uri, opts)?;
         let path = PathBuf::from(uri.path());
 
-        // RFC 7946 §4: WGS84 (EPSG:4326) のみ許可。reprojection 未実装のため明示エラーで停止する。
-        match crs {
-            None => {} // 既定 EPSG:4326 として扱う（書き出し時に `crs` メンバは出さない）
-            Some(c) if c.epsg_code() == Some(4326) => {}
-            Some(c) => {
-                return Err(Error::Crs(format!(
-                    "geojson writer requires EPSG:4326 (RFC 7946); got {:?}. \
-                     Reproject upstream before writing.",
-                    c.epsg_code()
-                )));
-            }
-        }
+        // 非 WGS84 入力は内部 Reprojector で透過変換する。CRS 不明はそのまま EPSG:4326 として扱う。
+        let reprojector = match crs {
+            None => None,
+            Some(c) if c.epsg_code() == Some(OUTPUT_CRS_EPSG) => None,
+            Some(c) => Some(Reprojector::new(c, &Crs::from_epsg(OUTPUT_CRS_EPSG))?),
+        };
 
         if !resolved.overwrite && path.exists() {
             return Err(Error::Format(format!(
@@ -95,14 +95,24 @@ impl GeoJsonWriter {
             skipped_cols,
             on_loss: opts.on_loss,
             pretty: resolved.pretty,
+            reprojector,
         })
     }
 }
 
 impl LayerWriter for GeoJsonWriter {
     fn write_batch(&mut self, batch: &RecordBatch) -> Result<()> {
-        let cols: Vec<&dyn Array> = (0..batch.num_columns())
-            .map(|i| batch.column(i).as_ref())
+        let owned_batch;
+        let batch_ref: &RecordBatch = match (self.reprojector.as_ref(), self.geom_index) {
+            (Some(r), Some(gi)) => {
+                owned_batch = r.transform_batch(batch, gi)?;
+                &owned_batch
+            }
+            _ => batch,
+        };
+
+        let cols: Vec<&dyn Array> = (0..batch_ref.num_columns())
+            .map(|i| batch_ref.column(i).as_ref())
             .collect();
         let fields: Vec<&Field> = self.schema.fields().iter().map(AsRef::as_ref).collect();
 
@@ -111,7 +121,7 @@ impl LayerWriter for GeoJsonWriter {
             .as_mut()
             .ok_or_else(|| driver_msg("write_batch called after finish"))?;
 
-        for row in 0..batch.num_rows() {
+        for row in 0..batch_ref.num_rows() {
             let feature = build_feature_json(
                 &fields,
                 &cols,

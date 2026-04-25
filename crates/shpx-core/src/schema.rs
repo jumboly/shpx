@@ -112,6 +112,36 @@ pub fn require_geometry_column(
     })
 }
 
+/// schema の geometry 列メタデータに含まれる CRS を `new_crs` で差し替えた新しい schema を返す。
+///
+/// reprojection 適用後、writer に渡す Arrow schema が元の src CRS のまま残ると、
+/// writer 側の `Field::metadata()` ベースの CRS 取得経路が古いコードを参照してしまう。
+/// 本関数で field metadata 側も target CRS に揃える。
+///
+/// geometry 列が存在しなければ schema をそのまま返す。
+pub fn replace_geometry_crs(
+    schema: &arrow_schema::SchemaRef,
+    new_crs: Option<crate::Crs>,
+) -> crate::Result<arrow_schema::SchemaRef> {
+    use std::sync::Arc;
+
+    let Some((idx, _, mut meta)) = find_geometry_column(schema)? else {
+        return Ok(schema.clone());
+    };
+    meta.crs = new_crs;
+    let json = meta.to_json()?;
+
+    let mut fields: Vec<arrow_schema::FieldRef> = schema.fields().iter().cloned().collect();
+    let mut new_field: arrow_schema::Field = (*fields[idx]).clone();
+    let mut m = new_field.metadata().clone();
+    m.insert(GEOMETRY_META_KEY.to_string(), json);
+    new_field.set_metadata(m);
+    fields[idx] = Arc::new(new_field);
+
+    let new_schema = arrow_schema::Schema::new_with_metadata(fields, schema.metadata().clone());
+    Ok(Arc::new(new_schema))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

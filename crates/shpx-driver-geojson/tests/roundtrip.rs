@@ -540,24 +540,47 @@ fn typed_int_property_roundtrip_feature_collection() {
     assert_eq!(count.value(1), -7);
 }
 
+/// 非 WGS84 入力は GeoJSON writer 内部の Reprojector で透過変換される (RFC 7946 §4)。
+/// 入力 EPSG:3857 の点を流し込み、出力 GeoJSON が経緯度に変換されていることを確認する。
 #[test]
-fn writer_rejects_non_wgs84_crs() {
+fn writer_auto_reprojects_non_wgs84_to_wgs84() {
+    use arrow_array::{builder::BinaryBuilder, ArrayRef, RecordBatch};
+    use shpx_geom::wkb;
+    use std::sync::Arc;
+
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("3857.geojson");
     let schema = schema_with_geom(vec![], GeometryType::Point, Some(Crs::from_epsg(3857)));
     let driver = GeoJsonDriver::new();
     let uri = Uri::from_path(p.to_string_lossy().to_string());
-    let r = driver.open_write(
-        &uri,
-        schema,
-        Some(Crs::from_epsg(3857)),
-        &default_write_opts(),
-    );
-    match r {
-        Err(shpx_core::Error::Crs(msg)) => assert!(msg.contains("EPSG:4326")),
-        Err(other) => panic!("expected Error::Crs, got {other:?}"),
-        Ok(_) => panic!("expected Error::Crs, got Ok(_)"),
-    }
+
+    // 東京駅付近の Web メルカトル座標 (m)。WGS84 換算で (139.7671, 35.68124) 付近。
+    let point_3857 = wkb::Geom::Point(15_558_325.04, 4_256_749.97);
+    let mut bb = BinaryBuilder::new();
+    bb.append_value(wkb::encode(&point_3857).unwrap());
+    let cols: Vec<ArrayRef> = vec![Arc::new(bb.finish())];
+    let batch = RecordBatch::try_new(schema.clone(), cols).unwrap();
+
+    let mut w = driver
+        .open_write(
+            &uri,
+            schema,
+            Some(Crs::from_epsg(3857)),
+            &default_write_opts(),
+        )
+        .unwrap();
+    w.write_batch(&batch).unwrap();
+    w.finish().unwrap();
+
+    let out = std::fs::read_to_string(&p).unwrap();
+    // WGS84 への自動変換が行われ、座標値が経緯度レンジに収まる（自動 reproject が起きた証拠）。
+    // 入力 3857 値は東京付近の近似で粒度が荒いので、緩めの閾値で範囲確認のみ行う。
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let coords = &v["features"][0]["geometry"]["coordinates"];
+    let lon = coords[0].as_f64().unwrap();
+    let lat = coords[1].as_f64().unwrap();
+    assert!((139.0..141.0).contains(&lon), "lon out of range: {lon}");
+    assert!((35.0..37.0).contains(&lat), "lat out of range: {lat}");
 }
 
 #[test]

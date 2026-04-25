@@ -11,7 +11,7 @@
 - 書き:
   - `.geojson` — `{"type":"FeatureCollection","features":[...]}`
   - `.geojsonl` / `.ndjson` / `.jsonl` — 改行区切り 1 Feature/行
-  - **EPSG:4326 のみ**（RFC 7946 §4 準拠）。`crs` メンバは出力しない（既定 WGS84）
+  - **出力は EPSG:4326 固定**（RFC 7946 §4 準拠）。非 WGS84 入力は内部 `Reprojector` で自動変換する。`crs` メンバは出力しない
 - ジオメトリ型: Point / LineString / Polygon / MultiPoint / MultiLineString / MultiPolygon（XY のみ）
 
 ## サポート対象拡張子と出力形式
@@ -41,12 +41,10 @@ GeoJSONL には top-level の概念が無いため、上記 1 → 3 の順で補
 
 ### 書き込み
 
-RFC 7946 §4 に従い **EPSG:4326 のみ許可**。それ以外の CRS は `Error::Crs` で停止し、ユーザに upstream での reproject を促す。
-
-```text
-geojson writer requires EPSG:4326 (RFC 7946); got Some(3857).
-Reproject upstream (`--target-crs EPSG:4326` is planned for v0.3).
-```
+RFC 7946 §4 に従い出力は **EPSG:4326 のみ**。v0.2 cycle 5 から、非 WGS84 入力は内部
+`Reprojector` で透過的に EPSG:4326 へ変換してから書き出す（明示的な `--reproject` 指定は不要）。
+入力 CRS が解決できない場合（ファイルに CRS 情報が無く `--src-crs` も未指定）のみ、
+`Error::Crs` で停止する。
 
 `crs` メンバは出力しない（RFC 7946 §3.3）。
 
@@ -149,7 +147,6 @@ RFC 8259 で `Number` 表現が禁じられているため、Float の NaN / Inf
 
 ### Future work
 
-- `--target-crs EPSG:4326` で writer 側 reproject（v0.3 の PROJ 統合と同時）
 - `--geojson-crs-extension` で非標準 `crs` メンバの書き出し（PostGIS / Leaflet 互換用途）
 - `Feature.id` 専用列（`_id`）でのラウンドトリップ
 - foreign members の保全（属性カラムまたは driver-specific メタデータ経由）
