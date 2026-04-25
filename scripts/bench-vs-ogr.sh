@@ -67,8 +67,20 @@ if [ ! -f "$INPUT" ]; then
 fi
 
 # PG パラメタを bench 用に一時調整（compose 設定は汚染しない）。
-PG_PSQL_ARGS="$SHPX_TEST_PG_URL"
-psql_q() { psql "$PG_PSQL_ARGS" -v ON_ERROR_STOP=1 -At -c "$1" >/dev/null; }
+# PG への SQL 発行: host に psql があれば host から libpq URI で接続。
+# 無ければ docker-compose.yml の `postgis` サービス内 psql に fallback する
+# (このリポジトリの compose 設定に固有: ユーザー shpx / DB shpx_test)。
+if command -v psql >/dev/null 2>&1; then
+    psql_q() {
+        psql "$SHPX_TEST_PG_URL" -v ON_ERROR_STOP=1 -At -c "$1" >/dev/null
+    }
+else
+    PSQL_SERVICE="${PSQL_SERVICE:-postgis}"
+    psql_q() {
+        docker compose exec -T "$PSQL_SERVICE" \
+            psql -U shpx -d shpx_test -v ON_ERROR_STOP=1 -At -c "$1" >/dev/null
+    }
+fi
 
 echo "==> tuning PG bench parameters (synchronous_commit=off, full_page_writes=off)"
 psql_q "ALTER SYSTEM SET synchronous_commit = off"
