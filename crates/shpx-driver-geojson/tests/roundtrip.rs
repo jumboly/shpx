@@ -314,6 +314,66 @@ fn three_d_coordinates_rejected() {
     }
 }
 
+// ---- GeoJSONL (NDJSON) reader テスト ----
+
+#[test]
+fn geojsonl_reads_one_feature_per_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("data.geojsonl");
+    write_geojson(
+        &p,
+        concat!(
+            r#"{"type":"Feature","geometry":{"type":"Point","coordinates":[1,2]},"properties":{"name":"a"}}"#,
+            "\n",
+            r#"{"type":"Feature","geometry":{"type":"Point","coordinates":[3,4]},"properties":{"name":"b"}}"#,
+            "\n",
+            r#"{"type":"Feature","geometry":{"type":"Point","coordinates":[5,6]},"properties":{"name":"c"}}"#,
+            "\n",
+        ),
+    );
+    let (_s, _c, batches) = read_back(&p, None);
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].num_rows(), 3);
+    let g = geom_col(&batches[0]);
+    assert_eq!(wkb::decode(g.value(0)).unwrap(), Geom::Point(1.0, 2.0));
+    assert_eq!(wkb::decode(g.value(2)).unwrap(), Geom::Point(5.0, 6.0));
+}
+
+#[test]
+fn geojsonl_skips_blank_and_comment_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("with_blanks.geojsonl");
+    write_geojson(
+        &p,
+        concat!(
+            "# header comment\n",
+            "\n",
+            r#"{"type":"Feature","geometry":{"type":"Point","coordinates":[1,2]},"properties":{}}"#,
+            "\n",
+            "   \n",
+            r#"{"type":"Feature","geometry":{"type":"Point","coordinates":[3,4]},"properties":{}}"#,
+            "\n",
+        ),
+    );
+    let (_s, _c, batches) = read_back(&p, None);
+    assert_eq!(batches[0].num_rows(), 2);
+}
+
+#[test]
+fn ndjson_extension_uses_geojson_driver() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("data.ndjson");
+    write_geojson(
+        &p,
+        concat!(
+            r#"{"type":"Feature","geometry":{"type":"Point","coordinates":[0,0]},"properties":{}}"#,
+            "\n",
+        ),
+    );
+    let (_s, _c, batches) = read_back(&p, None);
+    assert_eq!(batches[0].num_rows(), 1);
+}
+
 // ---- Writer 連携テスト用のスタブ（次コミットで body 追加） ----
 
 #[allow(dead_code)]

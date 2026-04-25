@@ -66,12 +66,8 @@ impl GeoJsonReader {
 
         let (features, crs_from_doc) = match resolved.format {
             OutputFormat::FeatureCollection => parse_feature_collection(&body)?,
-            // 次コミットで実装するため一旦 not implemented にする。
-            OutputFormat::Lines => {
-                return Err(driver_msg(
-                    "GeoJSONL reader is not yet implemented (skeleton commit)",
-                ));
-            }
+            // GeoJSONL は 1 行 1 Feature の NDJSON。top-level に CRS の概念は無い。
+            OutputFormat::Lines => (parse_geojson_lines(&body)?, None),
         };
 
         // ReadOpts.src_crs が指定されていればそれを優先する（CSV と同じ慣習）。
@@ -128,6 +124,30 @@ fn parse_feature_collection(body: &str) -> Result<(Vec<Feature>, Option<Crs>)> {
         }
     };
     Ok((features, crs))
+}
+
+/// GeoJSON Lines (NDJSON) を `Vec<Feature>` にパースする。
+///
+/// - 空行 (whitespace のみ) は skip
+/// - `#` で始まる行は skip（NDJSON 規格上は不要だが、コメント行を入れる実装が現実に存在するため寛容に）
+/// - 1 行 = 1 Feature を要求する。`FeatureCollection` 行を含むのは仕様外として拒否する
+fn parse_geojson_lines(body: &str) -> Result<Vec<Feature>> {
+    let mut features = Vec::new();
+    for (lineno, raw) in body.lines().enumerate() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let f: Feature = serde_json::from_str(trimmed).map_err(|e| {
+            driver_msg(format!(
+                "GeoJSONL line {}: {e}",
+                // 0-indexed → 人間向けに 1-indexed
+                lineno + 1
+            ))
+        })?;
+        features.push(f);
+    }
+    Ok(features)
 }
 
 /// 旧仕様の top-level `crs` メンバを `Crs` に解釈する。
