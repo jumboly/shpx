@@ -23,6 +23,7 @@ pub mod reader;
 pub mod runtime;
 pub mod type_map;
 pub mod util;
+pub mod writer;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SqlServerDriver;
@@ -72,15 +73,13 @@ impl Driver for SqlServerDriver {
 
     fn open_write(
         &self,
-        _uri: &Uri,
-        _schema: SchemaRef,
-        _crs: Option<Crs>,
-        _opts: &WriteOpts,
+        uri: &Uri,
+        schema: SchemaRef,
+        crs: Option<Crs>,
+        opts: &WriteOpts,
     ) -> Result<Box<dyn LayerWriter>> {
-        // cycle 1 commit 4 で `writer::SqlServerWriter::open` に差し替える。
-        Err(util::driver_msg(
-            "writer is not yet implemented (v0.4 cycle 1 commit 4)",
-        ))
+        let w = writer::SqlServerWriter::open(uri, schema, crs.as_ref(), opts)?;
+        Ok(Box::new(w))
     }
 
     fn open_bulk_write(
