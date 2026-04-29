@@ -17,6 +17,8 @@ use shpx_core::{
     StringEncoding, Uri, WriteOpts,
 };
 
+pub mod conn;
+pub mod options;
 pub mod runtime;
 pub mod util;
 
