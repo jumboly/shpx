@@ -19,3 +19,24 @@ services:
       interval: 2s
       timeout: 5s
       retries: 30
+
+  # SQL Server 2022 (mssql) integration テスト用。Apple Silicon では `--platform
+  # linux/amd64` で起動するが、x86_64 / GitHub Actions では platform 指定は不要。
+  # image は起動時にユーザ DB を自動作成しないため、初回起動後に
+  # `docker exec shpx-mssql /opt/mssql-tools18/bin/sqlcmd ... -Q "CREATE DATABASE shpx_test"`
+  # を 1 度だけ実行する必要がある。SA パスワードは「8 文字以上 / 大文字 / 小文字 / 数字 /
+  # 記号から 3 種類以上」の SQL Server 既定強度ポリシーを満たす。
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: shpx-mssql
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "Shpx_test_pw1!"
+      MSSQL_PID: Developer
+    ports:
+      - "1433:1433"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Shpx_test_pw1!' -C -Q 'SELECT 1' || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
