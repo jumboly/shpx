@@ -18,6 +18,7 @@ use shpx_driver_gpkg as _;
 use shpx_driver_parquet as _;
 use shpx_driver_postgis as _;
 use shpx_driver_shp as _;
+use shpx_driver_sqlserver as _;
 
 /// 全 Driver のキャッシュ。`OnceLock` で初回アクセス時に 1 度だけ集約する。
 static DRIVERS: OnceLock<Vec<&'static dyn Driver>> = OnceLock::new();
@@ -162,6 +163,13 @@ mod tests {
         let d = select_driver(&Uri::from_path("postgresql://h/db?table=t"));
         assert!(d.is_some());
         assert_eq!(d.unwrap().name(), "postgis");
+    }
+
+    #[test]
+    fn select_driver_for_mssql_url() {
+        let d = select_driver(&Uri::from_path("mssql://sa:pass@localhost/db?table=t"));
+        assert!(d.is_some());
+        assert_eq!(d.unwrap().name(), "sqlserver");
     }
 
     #[test]

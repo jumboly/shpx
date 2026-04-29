@@ -1,0 +1,32 @@
+[package]
+name = "shpx-driver-sqlserver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "shpx 用 SQL Server (Microsoft SQL Server / Azure SQL) ドライバ"
+
+[lints]
+workspace = true
+
+[dependencies]
+shpx-core      = { path = "../shpx-core" }
+shpx-geom      = { path = "../shpx-geom" }
+arrow-array    = { workspace = true }
+arrow-schema   = { workspace = true }
+chrono         = { workspace = true }
+tokio          = { workspace = true }
+tokio-util     = { workspace = true }
+tiberius       = { workspace = true }
+rust_decimal   = { workspace = true }
+uuid           = { workspace = true }
+futures-util   = { workspace = true }
+tracing        = { workspace = true }
+bytes          = { workspace = true }
+
+[dev-dependencies]
+shpx-driver-shp     = { path = "../shpx-driver-shp" }
+shpx-driver-parquet = { path = "../shpx-driver-parquet" }
+tempfile            = { workspace = true }
+tracing-subscriber  = { workspace = true }

@@ -15,6 +15,7 @@ members = [
     "crates/shpx-driver-gpkg",
     "crates/shpx-driver-fgb",
     "crates/shpx-driver-postgis",
+    "crates/shpx-driver-sqlserver",
     "crates/shpx-cli",
 ]
 
@@ -97,6 +98,20 @@ tokio-postgres = { version = "0.7", default-features = false, features = ["runti
 postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }
 bytes          = "1"
 futures-util   = { version = "0.3", default-features = false }
+
+# SQL Server driver の async クライアント。`tds73` (SQL Server 2008+) と `rustls`
+# (macOS の native TLS は SQL Server 2019+ で TLS handshake が失敗する既知問題があるため
+# pure rustls を強制)、`rust_decimal` (tiberius の Numeric write 経路の scale 0 以外で
+# のバグ回避)、`chrono` (NaiveDateTime/DateTime<Utc> を datetime2/datetimeoffset へ
+# ネイティブ bind) を有効化。`default-features = false` で OS-specific TLS backend を排除。
+tiberius       = { version = "0.12", default-features = false, features = ["tds73", "rustls", "chrono", "rust_decimal"] }
+# tiberius は futures-io ベースの AsyncRead/Write を要求するため、tokio TcpStream を
+# `compat()` でブリッジする。
+tokio-util     = { version = "0.7", features = ["compat"] }
+# tiberius 経由の Decimal128 ↔ T-SQL `decimal(p,s)` 変換に使う。
+rust_decimal   = "1"
+# staging テーブル名のユニーク suffix。接続スコープ #temp でも衝突回避用。
+uuid           = { version = "1", features = ["v4"] }
 
 # ログ
 tracing            = "0.1"

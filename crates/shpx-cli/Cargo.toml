@@ -30,6 +30,7 @@ shpx-driver-fgb     = { path = "../shpx-driver-fgb" }
 shpx-driver-geojson = { path = "../shpx-driver-geojson" }
 shpx-driver-gpkg    = { path = "../shpx-driver-gpkg" }
 shpx-driver-postgis = { path = "../shpx-driver-postgis" }
+shpx-driver-sqlserver = { path = "../shpx-driver-sqlserver" }
 shpx-geom           = { path = "../shpx-geom" }
 arrow-schema        = { workspace = true }
 clap                = { workspace = true }
