@@ -86,14 +86,30 @@
 **スコープ**:
 - `shpx-driver-sqlserver`: `tiberius` ベース
 - staging テーブル経由 bulk writer（案B、設計は DESIGN.md 参照）
-- reader: `STAsBinary()` 経由で WKB 取得
-- 接続: `mssql://user:pass@host/db?table=...&trusted_connection=true`
+- reader: `STAsBinary()` 経由で WKB 取得（v0.4 は table モード固定、`--where`/`--select`/`--query` は v0.5+）
+- 接続: `mssql://user:pass@host/db?table=...&geom_type=geometry|geography`
 - `--insert-mode=bulk|batch`
 
 **完了基準**:
 - [ ] geometry / geography 双方で staging 経由 bulk insert が動く
 - [ ] chunk size 1M でも tempdb 溢れなし（chunk ごと commit）
 - [ ] CI で `docker compose up mssql` テスト
+
+**確定済み設計判断**:
+- **reader 拡張は v0.5+ に先送り**: writer (staging bulk) と完了基準達成を優先。v0.4 reader は table モード固定。
+- **`--create-index=auto` は no-op**: SQL Server `CREATE SPATIAL INDEX` は `BOUNDING_BOX` 必須で未知 SRID では失敗するため、Auto は黙って何もしないに振る。`Always` 指定時のみ既知 EPSG（4326/3857）の同梱 bbox 表で生成、未知 SRID は明示エラー。geography は `BOUNDING_BOX` 不要。
+- **staging chunk 既定 100,000 行**: Express edition / 低メモリ dev 環境で安全側。bench 時のみ `SHPX_MSSQL_BULK_CHUNK=1000000` で 1M に上げる。
+- **geometry vs geography 切替**: URI クエリ `?geom_type=geometry|geography`、未指定は `geometry`。schema field metadata の `edges=spherical` がある場合のみ既定を `geography` に上書き。
+- **認証**: SQL 認証のみ。`?trusted_connection=true` は CLI 受理 → driver で「未対応」エラー（v0.5+ 予約）。
+- **SRS 自動登録は不要**: `sys.spatial_reference_systems` は SQL Server 同梱 seed 済みのため、PostGIS の `register_srs_if_missing` 相当は実装しない。
+- **`--insert-mode`**: `bulk|batch` のみ（CLI の `auto` は `Capabilities::bulk_load = true` 経由で実質 `auto = bulk`）。
+
+**サブ cycle 構成** (v0.3 と同じく cycle ごとに `/clear` して clean に再開する):
+
+- **cycle 1 — 基盤と最小往復**: workspace に `crates/shpx-driver-sqlserver` 追加、`mssql://` URI を tiberius `Config` に変換、reader (table モード固定、`STAsBinary` + `STSrid` ラップ)、writer (`CREATE TABLE` + 行単位 prepared INSERT で `geometry::STGeomFromWKB` 経由)、`Capabilities { read, write, !bulk_load }`。`docker-compose.yml` に `mssql` service、`.github/workflows/ci.yml` に `services.mssql` + `SHPX_TEST_SQLSERVER_URL` env + DB 作成 step。
+- **cycle 2 — staging bulk writer (案B)**: `BulkLoadWriter` 実装、`Capabilities::bulk_load = true`、chunk loop（既定 100K 行、`SHPX_MSSQL_BULK_CHUNK` env override 可）で `BEGIN TRAN` → `#shpx_stage_<uuid>` 作成 → `tiberius::Client::bulk_insert` → `INSERT INTO target SELECT ..., {geometry|geography}::STGeomFromWKB(geom_wkb, geom_srid) FROM #stage` → `TRUNCATE` → `COMMIT TRAN` → 次 chunk。decimal は `rust_decimal::Decimal` 経由（tiberius Numeric write バグ回避）。geography 時は CRS 不在で既定 4326 にフォールバック。bit-identical 往復テスト（decimal(38,10) / timestamptz / bytea）。
+- **cycle 3a — writer 拡張**: `--create-table=if-not-exists|always|never` (PostGIS と同形)、`--create-index` 対応（`Auto` は no-op、`Always` のみ `CREATE SPATIAL INDEX [...] WITH (BOUNDING_BOX = ...)` を発行 / geography は BOUNDING_BOX なし）、SRID 解決（`--src-crs` → schema metadata → on_loss フォールバック）。`--overwrite && create_table=Never` 整合性エラー。
+- **cycle 3b — ベンチと完了基準 + ドキュメント**: criterion bench（1M / 10M 行 × 10 属性 + Point）、`scripts/bench-vs-ogr-mssql.sh` で `ogr2ogr -f MSSQLSpatial` との median wall-clock 比較。完了基準目標 ≤ 0.6 倍（PostGIS の 0.5 より緩い、staging のラウンドトリップが 1 余分のため）。`bulk_all_types_together` / `bulk_geography_all_geom_types` 追加。`docs/SQLSERVER.md` 新設、`docs/DATA_TYPES.md` の SQL Server 列確定、`Cargo.toml` を `0.4.0` へ bump、release commit。
 
 ---
 
