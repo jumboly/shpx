@@ -19,7 +19,9 @@ use shpx_core::{
 
 pub mod conn;
 pub mod options;
+pub mod reader;
 pub mod runtime;
+pub mod type_map;
 pub mod util;
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -63,11 +65,9 @@ impl Driver for SqlServerDriver {
         }
     }
 
-    fn open_read(&self, _uri: &Uri, _opts: &ReadOpts) -> Result<Box<dyn LayerReader>> {
-        // cycle 1 commit 3 で `reader::SqlServerReader::open` に差し替える。
-        Err(util::driver_msg(
-            "reader is not yet implemented (v0.4 cycle 1 commit 3)",
-        ))
+    fn open_read(&self, uri: &Uri, opts: &ReadOpts) -> Result<Box<dyn LayerReader>> {
+        let r = reader::SqlServerReader::open(uri, opts)?;
+        Ok(Box::new(r))
     }
 
     fn open_write(
