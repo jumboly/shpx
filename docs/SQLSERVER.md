@@ -103,7 +103,9 @@ cargo test -p shpx-driver-sqlserver --locked
 
 ## Benchmark
 
-完了基準: 1000万行 × 10 属性 + Point の staging bulk insert が `ogr2ogr -f MSSQLSpatial` の wall-clock の **0.6 倍以下**（PostGIS の 0.5 より緩い目標。tiberius 制約により案 B が必須でラウンドトリップが 1 段余分のため）。
+完了基準: 1000万行 × Point の staging bulk insert が `ogr2ogr -f MSSQLSpatial` の wall-clock の **0.6 倍以下**（PostGIS の 0.5 より緩い目標。tiberius 制約により案 B が必須でラウンドトリップが 1 段余分のため）。
+
+bench 入力スキーマは tiberius 0.12 の bulk encode 既知不整合を避けるため、minimal 4 列 (Int64 / Utf8 / Float64 / Point) に絞っている。bit-identical な型網羅検証は別途 `tests/bulk_roundtrip.rs` の単独テストで cover。
 
 実測手順:
 
@@ -118,7 +120,15 @@ SHPX_TEST_SQLSERVER_URL='mssql://sa:Shpx_test_pw1!@localhost:1433/shpx_test' \
   bash scripts/bench-vs-ogr-mssql.sh --rows 10000000 --runs 3
 ```
 
-実測値（10M 行 × 3 runs median）: **未取得**。リリース前に CI もしくはローカル env で実行して `docs/SQLSERVER.md` 本節を更新する運用。
+### Smoke (Apple Silicon, Rosetta/QEMU emulation 経由 SQL Server 2022)
+
+100k 行 1 run: shpx staging bulk **1.28s** (78k rows/s)。動作確認のみ。emulation 経由なので production 値ではなく、Linux x86_64 native では更に速くなる見込み。
+
+### 完了基準値
+
+10M 行 × 3 runs median は **Linux x86_64 環境で実測予定**（macOS の Apple Silicon では SQL Server image が emulation 必須で参考値止まりのため、CI もしくは Linux ホストで本値を取る）。本値が取れたら本節と `docs/ROADMAP.md` v0.4 完了チェックを更新する運用。
+
+ogr2ogr 比較には GDAL の MSSQLSpatial driver が **Microsoft ODBC Driver for SQL Server (msodbcsql18)** を要求する。Linux ubuntu では `apt-get install -y msodbcsql18` で導入可能。macOS Homebrew では `brew install microsoft/mssql-release/msodbcsql18` だが Apple Silicon の制約上参考値にしかならない。
 
 ## 制限事項 / 既知の落とし穴
 

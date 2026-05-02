@@ -2392,7 +2392,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "shpx-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2418,7 +2418,7 @@ dependencies = [
 
 [[package]]
 name = "shpx-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2430,7 +2430,7 @@ dependencies = [
 
 [[package]]
 name = "shpx-driver-csv"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2446,7 +2446,7 @@ dependencies = [
 
 [[package]]
 name = "shpx-driver-fgb"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2464,7 +2464,7 @@ dependencies = [
 
 [[package]]
 name = "shpx-driver-geojson"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2481,7 +2481,7 @@ dependencies = [
 
 [[package]]
 name = "shpx-driver-gpkg"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2498,7 +2498,7 @@ dependencies = [
 
 [[package]]
 name = "shpx-driver-parquet"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -2515,7 +2515,7 @@ dependencies = [
 
 [[package]]
 name = "shpx-driver-postgis"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2537,7 +2537,7 @@ dependencies = [
 
 [[package]]
 name = "shpx-driver-shp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2553,7 +2553,7 @@ dependencies = [
 
 [[package]]
 name = "shpx-driver-sqlserver"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2577,7 +2577,7 @@ dependencies = [
 
 [[package]]
 name = "shpx-geom"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",

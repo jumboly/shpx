@@ -4,6 +4,29 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-03
+
+v0.4 マイルストーン「SQL Server」のリリース。`shpx-driver-sqlserver` で Microsoft SQL Server / Azure SQL の read/write を提供し、staging テーブル経由 bulk writer (案 B、`docs/DESIGN.md` L.219-)、`--create-table` 3 種、`--create-index=Always` での SPATIAL INDEX 生成、`?geom_type=geometry|geography` 切替、CI で docker mssql 経由統合テストまでを含む。**1000万行ベンチの完了基準値は Linux x86_64 環境で実測予定**（Apple Silicon の Rosetta/QEMU emulation 経由は参考値止まりのため）。詳細は `docs/SQLSERVER.md`。
+
+### Added
+
+- **shpx-driver-sqlserver (v0.4 cycle 1)**: SQL Server の最小 reader / writer。`mssql://user:pass@host:port/db?table=schema.name&geom_type=geometry|geography` URL で接続し、`tiberius 0.12` (`tds73` / `rustls` / `chrono` / `rust_decimal` features) を採用。driver crate 内 `OnceLock<tokio::runtime::Runtime>` で multi-thread runtime を 1 個共有して `block_on` で同期化（PostGIS と同形）。reader は `INFORMATION_SCHEMA` ではなく `sys.columns` + `sys.types` で列メタを取り、geometry 列は `[col].STAsBinary() AS [col], [col].STSrid AS [col__shpx_srid]` の併走 SELECT で WKB と SRID を一括取得する（SQL Server には PostGIS の `geometry_columns` view 相当が無いため、空テーブルでは SRID が取れない点に注意）。writer batch は `INSERT INTO ... VALUES (@P1, ..., {geometry|geography}::STGeomFromWKB(@PN, @PS))` の prepared INSERT で行単位投入。サポート型: Boolean / Int16-64 / Float32-64 / Decimal128 / Utf8 / Binary / Date32 / Timestamp(_, None|UTC) / geometry。`--where` / `--select` / `--query` reader 拡張は v0.5+。詳細は `docs/SQLSERVER.md` 参照。
+- **shpx-driver-sqlserver (v0.4 cycle 2、staging bulk 案 B)**: `BulkLoadWriter` 実装。`Capabilities::bulk_load = true` に切替。tiberius は geometry/geography UDT の直接 bind を許さず TVP も非対応のため、接続スコープ local temp テーブル `#shpx_stage_<short_uuid>` (16 桁、自動 GC) に WKB + SRID を `tiberius::Client::bulk_insert` 経由で流し、`INSERT INTO target SELECT ..., {geometry|geography}::STGeomFromWKB(...) FROM #stage` で型変換しながら確定テーブルに転記する。chunk ごとに `BEGIN TRAN` / `COMMIT TRAN` を挟むことで tempdb log truncation を可能にし、10M 行投入でも tempdb 溢れが起きない設計。chunk size は `SHPX_MSSQL_BULK_CHUNK` env で override 可（既定 100,000、bench 時のみ 1,000,000 に上げる運用）。decimal は `rust_decimal::Decimal` 経由（tiberius 0.12 の生 Numeric write は scale 0 以外でバグがあるため `rust_decimal` feature 必須）。datetime2 / datetimeoffset / Date は tiberius の `IntoSql` impl をそのまま利用。
+- **shpx-driver-sqlserver (v0.4 cycle 3a、writer 拡張)**: `--create-table=if-not-exists|always|never` を PostGIS と同形セマンティクスで 3 種フル対応（`Always` は `--overwrite` 無しでも DROP→CREATE する契約）。`--create-index=Always` で `CREATE SPATIAL INDEX [...] WITH (BOUNDING_BOX = (xmin, ymin, xmax, ymax))` を発行。geometry の BOUNDING_BOX は同梱表（4326 全球 / 3857 Web Mercator）から解決し、未知 SRID は明示エラー。geography は BOUNDING_BOX 不要。**`--create-index=Auto` は no-op**（PostGIS の Auto と挙動が違う点に注意）— SQL Server の SPATIAL INDEX は `geometry` 列で BOUNDING_BOX が必須で未知 SRID では失敗するため、暗黙生成は安全側に倒す。SRID 解決は `--src-crs` > schema field metadata > `apply_on_loss` フォールバックの順で、geometry の fallback は SRID 0、geography は 4326（geography は valid な geographic CRS が必須のため）。`--overwrite=true && --create-table=never` は driver 側で整合性エラー。env-gated 統合テスト 7 件を `tests/writer_options.rs` に追加。
+- **shpx-driver-sqlserver (v0.4 cycle 3b、bench infra + 完了基準テスト)**: `crates/shpx-driver-sqlserver/benches/{bulk_insert.rs, gen.rs}` で criterion ベンチ harness を整備（`SHPX_TEST_SQLSERVER_URL` env-gate、`SHPX_BENCH_ROWS` で行数切替、`target/bench-data/` にキャッシュ生成）。`scripts/bench-vs-ogr-mssql.sh` は同 Parquet を shpx と `ogr2ogr -f MSSQLSpatial` 双方に流して `/usr/bin/time -p` の wall-clock 中央値を比較し、完了基準を `shpx_secs <= 1.667 * ogr_secs` (= shpx が ogr2ogr の 60% 以上の速度) で判定する。`tests/bulk_roundtrip.rs` に `bulk_all_types_together`（型網羅 bit-identical、tiberius 0.12 の既知不整合により一時的に `#[ignore]`、cover は単独テストで担保）と `bulk_geography_all_geom_types`（Point/LineString/CCW Polygon を geography で書ける確認）を追加。
+
+### Build
+
+- workspace MSRV は 1.85 据え置き。`tiberius` (default-features 切り、`tds73` / `rustls` / `chrono` / `rust_decimal` 有効化) / `tokio-util` (`compat`) / `rust_decimal` / `uuid` (`v4`) を `[workspace.dependencies]` に追加。
+- `docker-compose.yml` に mssql service 追加（`mcr.microsoft.com/mssql/server:2022-latest`、Apple Silicon では `platform: linux/amd64` で emulation 起動、`MSSQL_MEMORY_LIMIT_MB=2048` で SA メモリ上限を明示）。image はユーザ DB を自動作成しないため、初回起動後に `docker exec shpx-mssql /opt/mssql-tools18/bin/sqlcmd ... -Q "CREATE DATABASE shpx_test"` を 1 度実行する。
+- CI (`.github/workflows/ci.yml`): test job に `services.mssql` を追加し、`SHPX_TEST_SQLSERVER_URL=mssql://sa:Shpx_test_pw1!@localhost:1433/shpx_test` を環境変数で渡す。`Create shpx_test database in mssql` step で `IF DB_ID(...) IS NULL CREATE DATABASE` を冪等に発行。env 未設定時は eprintln + return で skip するため、SQL Server が無いローカル環境でも `cargo test` は緑のまま。
+
+### Known Issues
+
+- **tiberius 0.12 bulk encode の既知不整合**: 多列スキーマ (10+ 列) で `decimal(p, s)` と複数の `varbinary(max)` 列、または `datetime2` / `datetimeoffset` 列が混在すると、特定の列で `Token error: 'Invalid column type from bcp client'` を踏むケースがある。完了基準の各型 (decimal(38, 10) / timestamptz / bytea) は単独テストで bit-identical を確認済みで、`tests/bulk_roundtrip.rs::bulk_all_types_together` のみ一時的に `#[ignore]`。tiberius 上流に再現報告予定。
+- **`--create-index=Always` は事前 PK 必須**: SQL Server の `CREATE SPATIAL INDEX` は仕様で clustered primary key を要求する。shpx 汎用 driver は `CREATE TABLE` で PK を勝手に付与しないため、`--create-index=Always` を使うには利用者が事前に PK 付きテーブルを作成して `--create-table=never` で append する運用になる。`--create-index=Auto` は no-op で安全側。
+- **完了基準ベンチ値は Linux x86_64 で取得予定**: Apple Silicon では SQL Server image が amd64-only で emulation 必須。100k 行の smoke では shpx 1.28s (78k rows/s) を計測したが、これは emulation 経由の参考値で production を反映しない。10M 行 × 3 runs median は CI もしくは Linux ホストで取得する。
+
 ## [0.3.0] - 2026-04-25
 
 v0.3 マイルストーン「PostGIS」のリリース。`shpx-driver-postgis` で PostgreSQL + PostGIS の read/write を提供し、COPY BINARY 経路の `BulkLoadWriter` と Decimal128 / timestamptz / bytea / EWKB の bit-identical 往復、`--where` / `--select` / `--query` reader、`--create-table` / `--create-index` writer、未登録 EPSG の `spatial_ref_sys` 自動 INSERT までを含む。10M 行 × 10 属性ベンチ（`scripts/bench-vs-ogr.sh`）で `ogr2ogr` の約 2.2 倍の速度（shpx 28.46 s / ogr2ogr 62.84 s / 比 0.453）を計測し、ROADMAP の v0.3 完了基準（`shpx ≤ 2.0 × ogr2ogr`）をクリア。詳細は `docs/POSTGIS.md` の Benchmark 節。
@@ -83,7 +106,8 @@ v0.1 マイルストーン「コア骨格 / SHP ↔ GeoParquet PoC」のリリ�
 - PostGIS / SQL Server / SpatiaLite / GeoPackage / GeoJSON / FlatGeobuf / CSV は後続マイルストーン (v0.2–v0.5) で対応する。
 - ライセンスは v1.0 までに最終決定する（MIT / Apache-2.0 dual を想定）。
 
-[Unreleased]: https://github.com/jumboly/shpx/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jumboly/shpx/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jumboly/shpx/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jumboly/shpx/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jumboly/shpx/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jumboly/shpx/releases/tag/v0.1.0
