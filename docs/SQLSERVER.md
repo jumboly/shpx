@@ -123,10 +123,12 @@ SHPX_TEST_SQLSERVER_URL='mssql://sa:Shpx_test_pw1!@localhost:1433/shpx_test' \
 ## 制限事項 / 既知の落とし穴
 
 - **reader 拡張 (`--where` / `--select` / `--query`) は v0.5+**: v0.4 では指定すると明示エラー。tiberius 経由の動的 UDT 検出と `--query` のサブクエリ化は工数のため後回しにした。
+- **`--create-index=Always` は事前 PK 必須**: SQL Server の `CREATE SPATIAL INDEX` は仕様で **clustered primary key を要求** する。shpx writer は汎用 driver として `CREATE TABLE` 時に PK を勝手に付与しないため、`--create-index=Always` を使うには利用者が事前に PK 付きテーブルを CREATE しておき `--create-table=never` で append する運用になる。`--create-index=Auto` は no-op で何もしないので安全側。
 - **認証は SQL 認証のみ**: `?trusted_connection=true` は受理するが driver で reject。Windows 認証（SSPI）と Azure AD は v0.5+ 予定。
 - **macOS の TLS**: tiberius を `rustls` feature で有効化済み（`native-tls` は SQL Server 2019+ で TLS handshake 失敗の既知問題があるため）。
 - **decimal の bit-identical**: `rust_decimal::Decimal` の内部 scale (0..=28) と Arrow `Decimal128` の scale (0..=38) が一致しない場合、reader 側で 10^delta スケーリングする。SQL Server 側の値が schema 通りに格納されている限り delta は 0 になる（schema を介さず生 Numeric 値を流すケースで可能性あり）。
 - **`#temp` テーブルのスコープ**: tiberius の `Client` 接続が切断されると `#shpx_stage_<uuid>` も消える。bulk 中に接続が切れた場合は途中までの行が target テーブルに既に COMMIT 済みである可能性があり、再実行時は `--create-table=always` または手動で target を DROP する。
+- **tiberius 0.12 bulk encode の既知不整合**: 多列スキーマ (10+ 列) で `decimal(p, s)` と複数の `varbinary(max)` 列が同一テーブルにあると、特定の列で `Token error: Invalid column type from bcp client` を踏むケースがある（`tests/bulk_roundtrip.rs::bulk_all_types_together` を `#[ignore]` で再現可能）。完了基準の各型 (decimal(38, 10) / timestamptz / bytea) は単独テスト (`bulk_decimal_38_10_bit_identical` / `bulk_timestamptz_and_int64_bit_identical` / `bulk_point_with_attributes_roundtrip` の WKB 経路) で bit-identical を確認済み。tiberius 上流に再現報告予定。
 - **MS-SSCLRT native UDT bulk**: 真の native binary geometry encoder は v1.x 以降の検討。tiberius 上流に PR を出すかフォーク派生を持つかは未決定（`docs/ROADMAP.md` v1.x 候補）。
 
 ## 関連ドキュメント

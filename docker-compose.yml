@@ -20,19 +20,25 @@ services:
       timeout: 5s
       retries: 30
 
-  # SQL Server 2022 (mssql) integration テスト用。Apple Silicon では `--platform
-  # linux/amd64` で起動するが、x86_64 / GitHub Actions では platform 指定は不要。
+  # SQL Server 2022 (mssql) integration テスト用。
+  # SQL Server image は amd64-only のため、Apple Silicon では Rosetta/QEMU
+  # emulation が必要。x86_64 / GitHub Actions では `platform` 指定は無視される。
   # image は起動時にユーザ DB を自動作成しないため、初回起動後に
   # `docker exec shpx-mssql /opt/mssql-tools18/bin/sqlcmd ... -Q "CREATE DATABASE shpx_test"`
   # を 1 度だけ実行する必要がある。SA パスワードは「8 文字以上 / 大文字 / 小文字 / 数字 /
   # 記号から 3 種類以上」の SQL Server 既定強度ポリシーを満たす。
   mssql:
     image: mcr.microsoft.com/mssql/server:2022-latest
+    platform: linux/amd64
     container_name: shpx-mssql
     environment:
       ACCEPT_EULA: "Y"
       MSSQL_SA_PASSWORD: "Shpx_test_pw1!"
       MSSQL_PID: Developer
+      # SQL Server は既定でホストメモリ全量を取りに行くため明示的に上限を設定する。
+      # 2 GB は SQL Server 2022 の最低要件で、Apple Silicon の Rosetta/QEMU emulation
+      # 経由でも動作することを smoke で確認済み。production 用途では適宜上げる。
+      MSSQL_MEMORY_LIMIT_MB: "2048"
     ports:
       - "1433:1433"
     healthcheck:

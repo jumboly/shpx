@@ -11,7 +11,7 @@ use arrow_schema::{DataType, Field};
 use shpx_core::{
     schema::GeometryType, CreateIndex, CreateTable, Crs, Driver, OnLoss, ReadOpts, Uri, WriteOpts,
 };
-use shpx_driver_sqlserver::{conn, runtime::runtime, SqlServerDriver};
+use shpx_driver_sqlserver::{conn::{self, simple_query}, runtime::runtime, SqlServerDriver};
 use shpx_geom::wkb::{self, Geom};
 use tiberius::Row;
 
@@ -224,16 +224,32 @@ fn always_index_creates_for_4326() {
     };
     let table = unique_table("shpx_always_idx");
     let uri = uri_with_table(&url, &table);
+
+    // SQL Server `CREATE SPATIAL INDEX` は clustered PK を要求する仕様のため、
+    // shpx 汎用 driver は --create-table 経路で PK を勝手に作らない。
+    // テストでは PK 付きテーブルを事前に手動 CREATE して
+    // `--create-table=never + --create-index=always` で index 生成のみ検証する。
+    let mut client = conn::connect(&url).unwrap();
+    simple_query(
+        &mut client,
+        format!(
+            "CREATE TABLE [dbo].[{table}] ( \
+               [id] int NOT NULL CONSTRAINT [pk_{table}] PRIMARY KEY CLUSTERED, \
+               [geom] geometry NULL )"
+        ),
+    )
+    .unwrap();
+    drop(client);
+
     let driver = SqlServerDriver::new();
     let batch = one_point_batch(Some(Crs::from_epsg(4326)));
-
     let mut w = driver
         .open_write(
             &uri,
             batch.schema(),
             Some(Crs::from_epsg(4326)),
             &WriteOpts {
-                create_table: CreateTable::IfNotExists,
+                create_table: CreateTable::Never,
                 create_index: CreateIndex::Always,
                 ..Default::default()
             },

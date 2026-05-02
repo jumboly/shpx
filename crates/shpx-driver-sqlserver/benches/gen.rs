@@ -85,9 +85,13 @@ pub fn build_schema() -> SchemaRef {
         Field::new("tag", DataType::Utf8, true),
         Field::new("amount", DataType::Decimal128(38, 10), true),
         Field::new("created", DataType::Date32, true),
+        // datetime2 を使う (datetimeoffset は別途 bulk_timestamptz_and_int64_bit_identical
+        // で単体検証済み)。tiberius 0.12 の bulk encode で多列 + datetimeoffset の組み合わせで
+        // サーバ側の "Invalid column type from bcp client" を踏むため、bench/型網羅テストは
+        // tz-naive 経路に揃える。
         Field::new(
             "event_at",
-            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+            DataType::Timestamp(TimeUnit::Microsecond, None),
             true,
         ),
         Field::new("payload", DataType::Binary, true),

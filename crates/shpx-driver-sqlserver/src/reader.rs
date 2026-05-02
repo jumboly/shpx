@@ -152,25 +152,23 @@ struct ColumnInfo {
 
 /// `INFORMATION_SCHEMA.COLUMNS` を引いて列順 + 型を取る。
 fn describe_columns(client: &mut SqlClient, schema: &str, table: &str) -> Result<Vec<ColumnInfo>> {
-    // SQL Server の geometry / geography 列は `DATA_TYPE` が空文字 (`''`) で
-    // `USER_DEFINED_TYPE_NAME` に `geometry` / `geography` が入る場合と、`DATA_TYPE`
-    // 自体に `geometry` / `geography` が入る場合がある（schema 配下 vs sys スキーマ依存）。
-    // どちらでも拾えるよう `COALESCE` で `DATA_TYPE != '' なら DATA_TYPE、空なら
-    // USER_DEFINED_TYPE_NAME` を使う。
+    // `INFORMATION_SCHEMA.COLUMNS` の `DATA_TYPE` は UDT (geometry/geography) 列で
+    // 空文字を返すバージョンがあり、追加列 `USER_DEFINED_TYPE_NAME` は標準 view に
+    // 存在しない (実装依存)。確実なのは `sys.columns` + `sys.types` で `t.name` から
+    // UDT 名を直接取る方法。is_nullable は bit、precision/scale は tinyint で返る。
     let sql = "
         SELECT
-            COLUMN_NAME,
-            ORDINAL_POSITION,
-            CASE
-                WHEN DATA_TYPE = '' THEN ISNULL(USER_DEFINED_TYPE_NAME, '')
-                ELSE DATA_TYPE
-            END AS RESOLVED_TYPE,
-            IS_NULLABLE,
-            NUMERIC_PRECISION,
-            NUMERIC_SCALE
-        FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = @P1 AND TABLE_NAME = @P2
-        ORDER BY ORDINAL_POSITION
+            c.name,
+            t.name AS type_name,
+            c.is_nullable,
+            c.precision,
+            c.scale
+        FROM sys.columns c
+        INNER JOIN sys.types t ON t.user_type_id = c.user_type_id
+        INNER JOIN sys.objects o ON o.object_id = c.object_id
+        INNER JOIN sys.schemas s ON s.schema_id = o.schema_id
+        WHERE s.name = @P1 AND o.name = @P2 AND o.type = 'U'
+        ORDER BY c.column_id
     ";
 
     let rt = runtime()?;
@@ -191,26 +189,27 @@ fn describe_columns(client: &mut SqlClient, schema: &str, table: &str) -> Result
 
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let name: &str = row.try_get(0).map_err(|e| driver_err(&e))?.unwrap_or("");
-        // CASE 式の戻り値は `nvarchar` で返るため tiberius は `&str` で取れる。
-        // 名前を別の `String` にコピーしないと `row` の借用が後段で衝突する。
-        let name = name.to_string();
-        let resolved_type: &str = row.try_get(2).map_err(|e| driver_err(&e))?.unwrap_or("");
-        let resolved_type_lc = resolved_type.to_ascii_lowercase();
-        let is_nullable_str: &str = row.try_get(3).map_err(|e| driver_err(&e))?.unwrap_or("YES");
-        let nullable = is_nullable_str.eq_ignore_ascii_case("YES");
+        let name: String = row
+            .try_get::<&str, _>(0)
+            .map_err(|e| driver_err(&e))?
+            .unwrap_or("")
+            .to_string();
+        let type_name: &str = row.try_get(1).map_err(|e| driver_err(&e))?.unwrap_or("");
+        let type_name_lc = type_name.to_ascii_lowercase();
+        let nullable: bool = row.try_get(2).map_err(|e| driver_err(&e))?.unwrap_or(true);
 
-        let is_geom = is_geometry_type_name(&resolved_type_lc);
+        let is_geom = is_geometry_type_name(&type_name_lc);
         let arrow_type = if is_geom {
-            // geometry 列は WKB 経由で Arrow Binary として運ぶ。schema metadata に
-            // `GeometryMeta` を埋める処理は build_arrow_schema 側で行う。
             DataType::Binary
         } else {
-            // INFORMATION_SCHEMA は precision/scale を `int` として返す。tiberius は
-            // i32 で受けられる。`decimal/numeric` 以外は None でも問題ない。
-            let p: Option<i32> = row.try_get(4).map_err(|e| driver_err(&e))?;
-            let s: Option<i32> = row.try_get(5).map_err(|e| driver_err(&e))?;
-            sqlserver_type_to_arrow(&resolved_type_lc, p, s).map_err(|e| match e {
+            // sys.columns.precision / scale は tinyint。tiberius は i32 経由で取れない
+            // ので u8 で取って i32 にキャストする。NULL になることは無い (NOT NULL 列だが、
+            // 念のため Option で受ける)。
+            let p_u8: Option<u8> = row.try_get(3).map_err(|e| driver_err(&e))?;
+            let s_u8: Option<u8> = row.try_get(4).map_err(|e| driver_err(&e))?;
+            let p = p_u8.map(i32::from);
+            let s = s_u8.map(i32::from);
+            sqlserver_type_to_arrow(&type_name_lc, p, s).map_err(|e| match e {
                 Error::Schema(msg) => Error::Schema(format!("column `{name}`: {msg}")),
                 other => other,
             })?
