@@ -1,6 +1,13 @@
 //! ドライバ共通ユーティリティ。PostGIS driver の `util.rs` と同形パターン。
 
-use arrow_array::{Array, ArrowPrimitiveType, PrimitiveArray};
+use arrow_array::{
+    types::{
+        TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
+        TimestampSecondType,
+    },
+    Array, ArrowPrimitiveType, PrimitiveArray,
+};
+use arrow_schema::TimeUnit;
 use shpx_core::{Error, OnLoss, Result};
 
 /// このドライバの識別名（`Driver::name` 戻り値、`Error::Driver.name`、tracing target に使う）。
@@ -86,6 +93,23 @@ pub fn bbox_for_epsg(code: u32) -> Option<(f64, f64, f64, f64)> {
         4326 => Some((-180.0, -90.0, 180.0, 90.0)),
         3857 => Some((-20_037_508.34, -20_048_966.10, 20_037_508.34, 20_048_966.10)),
         _ => None,
+    }
+}
+
+/// Arrow timestamp 配列から指定行の値をナノ秒 i64 で取り出す。
+/// batch / bulk の両経路で共有する。
+pub fn timestamp_to_nanos(unit: TimeUnit, array: &dyn Array, row: usize, name: &str) -> Result<i64> {
+    match unit {
+        TimeUnit::Nanosecond => Ok(primitive::<TimestampNanosecondType>(array, row)),
+        TimeUnit::Microsecond => primitive::<TimestampMicrosecondType>(array, row)
+            .checked_mul(1_000)
+            .ok_or_else(|| driver_msg(format!("column `{name}`: timestamp µs→ns overflow"))),
+        TimeUnit::Millisecond => primitive::<TimestampMillisecondType>(array, row)
+            .checked_mul(1_000_000)
+            .ok_or_else(|| driver_msg(format!("column `{name}`: timestamp ms→ns overflow"))),
+        TimeUnit::Second => primitive::<TimestampSecondType>(array, row)
+            .checked_mul(1_000_000_000)
+            .ok_or_else(|| driver_msg(format!("column `{name}`: timestamp s→ns overflow"))),
     }
 }
 

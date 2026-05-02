@@ -1,4 +1,4 @@
-//! SQL Server reader/writer の往復統合テスト (v0.4 cycle 1)。
+//! SQL Server reader/writer (table モード) の往復統合テスト。
 //!
 //! `SHPX_TEST_SQLSERVER_URL` 環境変数が設定されている場合のみ実行する（未設定なら
 //! `eprintln!` を 1 行出して `return`）。CI では `services.mssql` を立てて

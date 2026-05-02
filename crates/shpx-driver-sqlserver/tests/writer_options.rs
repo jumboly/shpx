@@ -1,7 +1,5 @@
 //! `--create-table` (3 種) と `--create-index` (Auto / Always / Never)、SRID 解決の
-//! 整合性テスト (v0.4 cycle 3a)。
-//!
-//! 全テスト env-gated (`SHPX_TEST_SQLSERVER_URL` 未設定時は eprintln + return で skip)。
+//! 整合性テスト。env-gated (`SHPX_TEST_SQLSERVER_URL` 未設定時は eprintln + return で skip)。
 
 use std::sync::Arc;
 

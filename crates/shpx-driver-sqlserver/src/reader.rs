@@ -1,12 +1,12 @@
 //! SQL Server の `LayerReader` 実装。
 //!
-//! v0.4 cycle 1 は table モード固定: テーブル全件 SELECT を 1 度だけ発行し、結果を
-//! Arrow `RecordBatch` に詰めて in-memory に保持する。`--where` / `--select` /
-//! `--query` 拡張は v0.5+ の reader 拡張で実装する。
+//! v0.4 では table モード固定: テーブル全件 SELECT を 1 度だけ発行し、結果を
+//! Arrow `RecordBatch` に詰めて in-memory に保持する (`--where` / `--select` /
+//! `--query` は将来拡張)。
 //!
 //! geometry 列は `[col].STAsBinary() AS [col]` で OGC 標準 WKB を取得し、`STSrid` を
-//! 併走列として取り出して `Crs` に詰める。SRID 0 は `Crs` を None にする
-//! （SRID = 0 は SQL Server の「未指定」を表す）。
+//! 併走列として取り出して `Crs` に詰める。SRID 0 は SQL Server の「未指定」を表す
+//! ため `Crs` を None にする。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -52,22 +52,20 @@ pub struct SqlServerReader {
 
 impl SqlServerReader {
     pub fn open(uri: &Uri, opts: &ReadOpts) -> Result<Self> {
-        // v0.4 cycle 1 では `--where` / `--select` / `--query` を未対応にする
-        // （v0.5+ で reader 拡張として実装予定）。早期に明示エラーで弾くことで
-        // CLI 利用者の混乱を防ぐ。
+        // `--where` / `--select` / `--query` は将来拡張。CLI 利用者を早期に弾く。
         if opts.query.is_some() {
             return Err(driver_msg(
-                "--query is not supported by sqlserver driver in v0.4 (planned for v0.5+)",
+                "--query is not supported by sqlserver driver (planned for a later release)",
             ));
         }
         if opts.where_clause.is_some() {
             return Err(driver_msg(
-                "--where is not supported by sqlserver driver in v0.4 (planned for v0.5+)",
+                "--where is not supported by sqlserver driver (planned for a later release)",
             ));
         }
         if opts.select.is_some() {
             return Err(driver_msg(
-                "--select is not supported by sqlserver driver in v0.4 (planned for v0.5+)",
+                "--select is not supported by sqlserver driver (planned for a later release)",
             ));
         }
 
@@ -93,7 +91,6 @@ impl SqlServerReader {
             })?;
 
         let geom_col_name = columns[geom_idx].name.clone();
-        let actual_geom_kind = columns[geom_idx].sql_type_name.clone();
         let (probe_srid, geom_type) =
             probe_geometry_metadata(client, &qualified, &geom_col_name)?;
 
@@ -107,10 +104,11 @@ impl SqlServerReader {
 
         let rows = exec_select(client, &select_sql)?;
 
-        // 値の入った最初の行から実 SRID を取り直して上書き（probe で `geometry_columns`
-        // に相当する view が SQL Server に無いため、常に最初の non-NULL 行を頼りにする）。
-        let final_crs = crs.or_else(|| extract_srid_from_first_row(&rows, geom_idx).and_then(epsg_to_crs));
-        let _ = actual_geom_kind; // schema metadata に使う場面は cycle 3a 以降で検討
+        // probe で SRID が取れなかった (テーブルが空だった) 場合のみ、SELECT 結果から
+        // 最初の non-NULL 行で SRID を補う。`or_else` の短絡により crs が既に Some なら走らない。
+        let final_crs = crs.or_else(|| {
+            extract_srid_from_first_row(&rows, geom_idx).and_then(epsg_to_crs)
+        });
 
         let batch = rows_to_record_batch(&schema, &columns, geom_idx, &rows)?;
         let row_count = batch.num_rows();
@@ -145,8 +143,6 @@ impl LayerReader for SqlServerReader {
 #[derive(Debug, Clone)]
 struct ColumnInfo {
     name: String,
-    /// `INFORMATION_SCHEMA.COLUMNS.DATA_TYPE` の小文字文字列。
-    sql_type_name: String,
     /// Arrow に対応する型（geometry の場合は `Binary` で代用）。
     arrow_type: DataType,
     /// SQL Server の geometry / geography 列か。
@@ -222,7 +218,6 @@ fn describe_columns(client: &mut SqlClient, schema: &str, table: &str) -> Result
 
         out.push(ColumnInfo {
             name,
-            sql_type_name: resolved_type_lc,
             arrow_type,
             is_geometry: is_geom,
             nullable,
@@ -620,14 +615,12 @@ mod tests {
         vec![
             ColumnInfo {
                 name: "name".into(),
-                sql_type_name: "nvarchar".into(),
                 arrow_type: DataType::Utf8,
                 is_geometry: false,
                 nullable: true,
             },
             ColumnInfo {
                 name: "geom".into(),
-                sql_type_name: "geometry".into(),
                 arrow_type: DataType::Binary,
                 is_geometry: true,
                 nullable: true,

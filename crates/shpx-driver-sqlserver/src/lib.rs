@@ -2,14 +2,10 @@
 //! `LayerWriter`。
 //!
 //! `mssql://user:pass@host:1433/db?table=<name>` で接続。reader は
-//! `SELECT [geom].STAsBinary() AS [geom], ...` で WKB を取得する。writer は
+//! `SELECT [geom].STAsBinary() AS [geom], ...` で WKB を取得し、writer は
 //! `--insert-mode=bulk` 時に `#shpx_stage_<uuid>` 経由の staging bulk
-//! (案 B、`docs/DESIGN.md` 参照) で `geometry::STGeomFromWKB(...)` に
-//! 流し込む。サポート型・制限・将来計画は `docs/SQLSERVER.md`（cycle 3b で追加）を
-//! 参照。
-//!
-//! 本ファイルは v0.4 cycle 1 commit 1 の workspace 配線時点。reader/writer の
-//! 実装は cycle 1 commit 3 以降の各サブモジュールで埋めていく。
+//! (案 B、`docs/DESIGN.md` L.219-) で `geometry::STGeomFromWKB(...)` に流し込む。
+//! サポート型・制限・将来計画は `docs/SQLSERVER.md` を参照。
 
 use arrow_schema::SchemaRef;
 use shpx_core::{
@@ -55,12 +51,8 @@ impl Driver for SqlServerDriver {
             read: true,
             write: true,
             random_access: false,
-            // cycle 2 で staging 経由 `BulkLoadWriter` を実装。`#shpx_stage_<uuid>` に
-            // WKB + SRID を流して `INSERT…SELECT geometry::STGeomFromWKB` で確定テーブルへ
-            // 転記するパターン。
             bulk_load: true,
             supports_blob: true,
-            // cycle 2 で `rust_decimal::Decimal` 経由の Decimal128 ↔ T-SQL `decimal(p,s)` を実装。
             supports_decimal: true,
             supports_timestamp_tz: true,
             string_encoding: StringEncoding::Fixed("utf-8"),
@@ -116,7 +108,6 @@ mod tests {
         assert!(caps.supports_blob);
         assert!(caps.supports_timestamp_tz);
         assert!(caps.supports_decimal);
-        // cycle 2 で staging bulk が入ったため bulk_load=true。
         assert!(caps.bulk_load);
         assert_eq!(caps.max_decimal_precision, Some(38));
         match caps.string_encoding {

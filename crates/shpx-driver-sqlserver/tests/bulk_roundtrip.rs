@@ -1,4 +1,4 @@
-//! SQL Server staging bulk writer (`#shpx_stage_<uuid>` 経由) の往復統合テスト (v0.4 cycle 2)。
+//! SQL Server staging bulk writer (`#shpx_stage_<uuid>` 経由) の往復統合テスト。
 //!
 //! `SHPX_TEST_SQLSERVER_URL` 環境変数が設定されている場合のみ実行する。CI では
 //! `services.mssql` 経由で実 DB に対して走る。
@@ -247,14 +247,13 @@ fn bulk_timestamptz_and_int64_bit_identical() {
 }
 
 #[test]
-fn bulk_chunked_at_5_rows() {
+fn bulk_many_rows_single_transaction_sanity() {
     let Some(url) = mssql_url() else {
         eprintln!("SHPX_TEST_SQLSERVER_URL unset; skipping chunked bulk test");
         return;
     };
-    // Note: SHPX_MSSQL_BULK_CHUNK は OnceLock 経由でキャッシュされるため、テスト全体で
-    // 1 度だけ effective になる。ここでは未設定でも default 100,000 で動くことを
-    // 確認しつつ、12 行が単一トランザクションで完走することを見る (chunk 内挙動の sanity)。
+    // 12 行が単一トランザクションで完走することの sanity check。実 chunk 境界を
+    // またぐ挙動 (`SHPX_MSSQL_BULK_CHUNK=5` 等) は実 SQL Server に対するベンチで確認する。
     let table = unique_table("shpx_bulk_chunk");
     let uri = uri_with_table(&url, &table);
 

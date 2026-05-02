@@ -1,24 +1,18 @@
-//! SQL Server の `LayerWriter` 実装（v0.4 cycle 1 は batch のみ、bulk は cycle 2）。
+//! SQL Server の `LayerWriter` / `BulkLoadWriter` 実装。
 //!
-//! - 行単位 prepared INSERT を `Query::new(sql).bind(value)` で組み立てて発行する。
-//! - geometry 列は tiberius が UDT 直接 bind 不可のため、`varbinary(max)` (WKB) と
-//!   `int` (SRID) を 2 引数 bind し、SQL 側で `geometry::STGeomFromWKB(@PN, @PS)` /
-//!   `geography::STGeomFromWKB(@PN, @PS)` に流し込む。これは v1 案 B (DESIGN.md L.219-)
-//!   の最小形でもあるため cycle 2 staging bulk と挙動が揃う。
-//! - cycle 1 の CREATE TABLE は「`--overwrite=true` なら DROP → CREATE / 既存なら append /
-//!   無ければ CREATE」の最小ロジック。`--create-table` の 3 種フル対応 (`IfNotExists` /
-//!   `Always` / `Never`) と `--create-index` 対応は cycle 3a で詳細化する。
+//! geometry 列は tiberius が UDT 直接 bind 不可のため、`varbinary(max)` (WKB) と
+//! `int` (SRID) を 2 引数 bind し、SQL 側で `{geometry|geography}::STGeomFromWKB(@PN, @PS)`
+//! に流し込む。案 B (`docs/DESIGN.md` L.219-) の前提で、batch / bulk の両経路で
+//! geometry 経路の SQL は同じ shape を使う。
 
 use arrow_array::{
     cast::AsArray,
     types::{
         Date32Type, Decimal128Type, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type,
-        TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
-        TimestampSecondType,
     },
     Array, RecordBatch,
 };
-use arrow_schema::{DataType, SchemaRef, TimeUnit};
+use arrow_schema::{DataType, SchemaRef};
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use rust_decimal::Decimal;
 use shpx_core::{
@@ -35,31 +29,23 @@ use crate::staging::{resolve_chunk_size, run_bulk_chunks};
 use crate::type_map::arrow_to_decl;
 use crate::util::{
     apply_on_loss, bbox_for_epsg, driver_err, driver_msg, loss_kind, primitive, quote_ident,
-    quote_qualified,
+    quote_qualified, timestamp_to_nanos,
 };
 
 pub struct SqlServerWriter {
     client: Option<SqlClient>,
     schema: SchemaRef,
     geom_index: usize,
-    /// geometry 列を除く属性列の Arrow インデックス。
     attr_indices: Vec<usize>,
     insert_sql: String,
     qualified: String,
     srid: i32,
-    /// `geometry` か `geography` か。INSERT 文に embed 済みだが、spatial index 発行時に
-    /// `geometry` のみ BOUNDING_BOX を要求するため、`finish()` での分岐に使う。
+    /// `finish()` での SPATIAL INDEX 発行時に `geometry` のみ BOUNDING_BOX を要求する分岐に使う。
     geom_kind: GeomKind,
-    /// `--create-index` 戦略 (`finish()` で参照)。
     create_index: CreateIndex,
-    /// この writer が `CREATE TABLE` を発行したかどうか。`CreateIndex::Auto` 判定用に
-    /// 保持しておくが、SQL Server では Auto は no-op に倒すため現状参照しない
-    /// （`docs/ROADMAP.md` v0.4 の確定済み判断 #2）。
-    #[allow(dead_code)]
-    table_was_created: bool,
-    /// geometry 列名 (quote 前)。SPATIAL INDEX のターゲット列に使う。
+    /// SPATIAL INDEX 名と対象列を組み立てるため `qualified` とは別に持つ (quote 後の qualified
+    /// から逆引きする方が解が無くなるため)。
     geom_col_name: String,
-    /// テーブル名 (quote 前)。SPATIAL INDEX 名 `idx_<table>_<geom>` に使う。
     table_name: String,
 }
 
@@ -96,23 +82,20 @@ impl SqlServerWriter {
 
         let existed_before = table_exists(&mut client, &resolved.schema, &resolved.table)?;
 
-        // `--create-table` の 3 種フル対応 (PostGIS と同形のセマンティクス):
-        // - Never:        既存必須。無ければエラー、あれば CREATE 発行せず append。
-        // - IfNotExists:  既存なら append、無ければ CREATE。
-        // - Always:       既存なら DROP → CREATE、無ければ CREATE。
-        let table_was_created = match resolved.create_table {
+        // 3 種セマンティクス (PostGIS と同形):
+        //   Never:       既存必須。無ければエラー、あれば append のみ
+        //   IfNotExists: 既存なら append、無ければ CREATE
+        //   Always:      既存なら DROP → CREATE (--overwrite 無しでも DROP するのが Always の契約)
+        match resolved.create_table {
             CreateTable::Never => {
                 if !existed_before {
                     return Err(driver_msg(format!(
                         "--create-table=never: table {qualified} does not exist"
                     )));
                 }
-                false
             }
             CreateTable::IfNotExists => {
-                if existed_before {
-                    false
-                } else {
+                if !existed_before {
                     let sql = build_create_table_sql(
                         &schema,
                         &attr_indices,
@@ -121,18 +104,11 @@ impl SqlServerWriter {
                         resolved.geom_type,
                     )?;
                     conn::simple_query(&mut client, sql)?;
-                    true
                 }
             }
             CreateTable::Always => {
                 if existed_before {
-                    // 既存テーブルを DROP してから CREATE。`--overwrite` と区別したいのは
-                    // 「明示的に Always を指定した場合は overwrite フラグ無しでも DROP する」
-                    // という契約 (PostGIS と同形)。
-                    conn::simple_query(
-                        &mut client,
-                        format!("DROP TABLE {qualified}"),
-                    )?;
+                    conn::simple_query(&mut client, format!("DROP TABLE {qualified}"))?;
                 }
                 let sql = build_create_table_sql(
                     &schema,
@@ -142,9 +118,8 @@ impl SqlServerWriter {
                     resolved.geom_type,
                 )?;
                 conn::simple_query(&mut client, sql)?;
-                true
             }
-        };
+        }
 
         let insert_sql = build_insert_sql(
             &schema,
@@ -164,7 +139,6 @@ impl SqlServerWriter {
             srid,
             geom_kind: resolved.geom_type,
             create_index: resolved.create_index,
-            table_was_created,
             geom_col_name: geom_field_name,
             table_name: resolved.table,
         })
@@ -172,28 +146,17 @@ impl SqlServerWriter {
 
     /// `--create-index` 戦略に従って SPATIAL INDEX を発行する。`finish()` から 1 度だけ呼ぶ。
     ///
-    /// - `Never`: 何もしない
-    /// - `Auto`: no-op (確定済み判断 #2 — SQL Server の SPATIAL INDEX は BOUNDING_BOX 必須で
-    ///   未知 SRID では失敗するため、暗黙生成は避ける)
-    /// - `Always`:
-    ///   - geometry: 既知 EPSG (4326/3857) は `bbox_for_epsg` 同梱表で `BOUNDING_BOX` を埋め、
-    ///     未知 SRID は明示エラー
-    ///   - geography: BOUNDING_BOX 不要 (経緯度全球が暗黙の範囲)
+    /// SQL Server の `Auto` は no-op に倒す。SPATIAL INDEX は `geometry` 列で
+    /// `BOUNDING_BOX` が必須で未知 SRID では失敗するため、暗黙生成は安全側に倒す
+    /// (`docs/SQLSERVER.md` の判断記録参照)。`Always` 指定のみ明示有効化する。
     fn maybe_create_spatial_index(&mut self) -> Result<()> {
-        let should_create = match self.create_index {
-            CreateIndex::Never | CreateIndex::Auto => false,
-            CreateIndex::Always => true,
-        };
-        if !should_create {
+        if !matches!(self.create_index, CreateIndex::Always) {
             return Ok(());
         }
         let client = self
             .client
             .as_mut()
             .ok_or_else(|| driver_msg("maybe_create_spatial_index called after finish"))?;
-        let idx_name = quote_ident(&format!("idx_{}_{}", self.table_name, self.geom_col_name));
-        let geom_col = quote_ident(&self.geom_col_name);
-
         let sql = build_spatial_index_sql(
             &self.qualified,
             &self.table_name,
@@ -201,14 +164,12 @@ impl SqlServerWriter {
             self.geom_kind,
             self.srid,
         )?;
-        let _ = idx_name;
-        let _ = geom_col;
         conn::simple_query(client, sql)
     }
 }
 
-/// `CREATE SPATIAL INDEX` 文を組み立てる（pure、テスト容易性のため writer から分離）。
-/// `geometry` のみ `BOUNDING_BOX` を要求し、未知 SRID は明示エラー。
+/// `CREATE SPATIAL INDEX` 文を組み立てる。`geometry` のみ `BOUNDING_BOX` を要求し、
+/// 未知 SRID は明示エラー。`geography` は BOUNDING_BOX 不要（経緯度全球が暗黙）。
 fn build_spatial_index_sql(
     qualified: &str,
     table_name: &str,
@@ -256,8 +217,8 @@ impl LayerWriter for SqlServerWriter {
         let rt = runtime()?;
 
         rt.block_on(async {
-            // tiberius は generic な transaction API を持たないので BEGIN / COMMIT を文字列で発行する。
-            // 1 batch を 1 トランザクションにまとめることで失敗時の roll-back 単位を batch に揃える。
+            // tiberius に generic な transaction API は無いため BEGIN / COMMIT を文字列で発行する。
+            // 1 batch = 1 トランザクションにすることで失敗時の roll-back 単位を batch に揃える。
             client
                 .simple_query("BEGIN TRAN")
                 .await
@@ -287,10 +248,9 @@ impl LayerWriter for SqlServerWriter {
     }
 
     fn finish(mut self: Box<Self>) -> Result<()> {
-        // bulk 経路と batch 経路の双方で「データ投入完了 → SPATIAL INDEX」の順を統一する
-        // （PostGIS の GIST index と同じ位置）。
+        // bulk / batch 双方で「データ投入完了 → SPATIAL INDEX」の順を統一する (PostGIS の
+        // GIST index と同じ位置)。
         self.maybe_create_spatial_index()?;
-        // tiberius Client は Drop で接続切断される。明示 close は無い。
         let _ = self.client.take();
         Ok(())
     }
@@ -625,22 +585,6 @@ fn arrow_to_boxed(
             )));
         }
     })
-}
-
-/// Arrow timestamp 配列から指定行の値をナノ秒 i64 で取り出す。
-fn timestamp_to_nanos(unit: TimeUnit, array: &dyn Array, row: usize, name: &str) -> Result<i64> {
-    match unit {
-        TimeUnit::Nanosecond => Ok(primitive::<TimestampNanosecondType>(array, row)),
-        TimeUnit::Microsecond => primitive::<TimestampMicrosecondType>(array, row)
-            .checked_mul(1_000)
-            .ok_or_else(|| driver_msg(format!("column `{name}`: timestamp µs→ns overflow"))),
-        TimeUnit::Millisecond => primitive::<TimestampMillisecondType>(array, row)
-            .checked_mul(1_000_000)
-            .ok_or_else(|| driver_msg(format!("column `{name}`: timestamp ms→ns overflow"))),
-        TimeUnit::Second => primitive::<TimestampSecondType>(array, row)
-            .checked_mul(1_000_000_000)
-            .ok_or_else(|| driver_msg(format!("column `{name}`: timestamp s→ns overflow"))),
-    }
 }
 
 #[cfg(test)]

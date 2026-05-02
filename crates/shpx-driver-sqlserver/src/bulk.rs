@@ -1,12 +1,10 @@
 //! Arrow `RecordBatch` の各行を tiberius `TokenRow` に詰めるエンコーダ。
 //!
-//! `BulkLoadRequest::send(row: TokenRow<'a>)` は `ColumnData<'a>` の Vec を直接受け取る
-//! ため、PostGIS の `copy_binary.rs` のような自前 binary フォーマット組立は不要で、
-//! 各 Arrow セルを `ColumnData` の variant に詰め替えるだけで済む。bulk-only encoding は
-//! `'static` lifetime に固定して `TokenRow<'static>` を返す（owned `Cow` を使う）。
-//!
 //! geometry 列は WKB と SRID を 2 つの追加列として行末に詰める。staging テーブル側の
 //! `[shpx_geom_wkb] varbinary(max)`, `[shpx_geom_srid] int` の 2 列に対応する。
+//!
+//! 案 B (DESIGN.md L.219-) の前提として、geometry/geography UDT の直接 bind は
+//! tiberius が許さないため、ここでは行末で WKB+SRID に展開した形のみを生成する。
 
 use std::borrow::Cow;
 
@@ -14,21 +12,15 @@ use arrow_array::{
     cast::AsArray,
     types::{
         Date32Type, Decimal128Type, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type,
-        TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
-        TimestampSecondType,
     },
     Array, RecordBatch,
 };
-use arrow_schema::{DataType, SchemaRef, TimeUnit};
-use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc};
+use arrow_schema::{DataType, SchemaRef};
+use chrono::{DateTime, Duration, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use shpx_core::{Error, Result};
-use tiberius::{
-    numeric::Numeric,
-    time::{Date, DateTime2, DateTimeOffset, Time},
-    ColumnData, TokenRow,
-};
+use tiberius::{numeric::Numeric, ColumnData, IntoSql, TokenRow};
 
-use crate::util::{driver_msg, primitive};
+use crate::util::{driver_msg, primitive, timestamp_to_nanos};
 
 /// 1 行 (`row` 番目) の Arrow セルを `TokenRow<'static>` に展開する。
 ///
@@ -36,7 +28,7 @@ use crate::util::{driver_msg, primitive};
 /// 1. `attr_indices` の各属性列を順に
 /// 2. `[shpx_geom_wkb]` (varbinary, WKB)
 /// 3. `[shpx_geom_srid]` (int, SRID)
-pub fn encode_row(
+pub(crate) fn encode_row(
     schema: &SchemaRef,
     batch: &RecordBatch,
     attr_indices: &[usize],
@@ -86,41 +78,11 @@ fn arrow_to_column_data(
                 ColumnData::Bit(Some(array.as_boolean().value(row)))
             }
         }
-        DataType::Int16 => {
-            if is_null {
-                ColumnData::I16(None)
-            } else {
-                ColumnData::I16(Some(primitive::<Int16Type>(array, row)))
-            }
-        }
-        DataType::Int32 => {
-            if is_null {
-                ColumnData::I32(None)
-            } else {
-                ColumnData::I32(Some(primitive::<Int32Type>(array, row)))
-            }
-        }
-        DataType::Int64 => {
-            if is_null {
-                ColumnData::I64(None)
-            } else {
-                ColumnData::I64(Some(primitive::<Int64Type>(array, row)))
-            }
-        }
-        DataType::Float32 => {
-            if is_null {
-                ColumnData::F32(None)
-            } else {
-                ColumnData::F32(Some(primitive::<Float32Type>(array, row)))
-            }
-        }
-        DataType::Float64 => {
-            if is_null {
-                ColumnData::F64(None)
-            } else {
-                ColumnData::F64(Some(primitive::<Float64Type>(array, row)))
-            }
-        }
+        DataType::Int16 => primitive_or_null::<Int16Type>(array, row, is_null, ColumnData::I16),
+        DataType::Int32 => primitive_or_null::<Int32Type>(array, row, is_null, ColumnData::I32),
+        DataType::Int64 => primitive_or_null::<Int64Type>(array, row, is_null, ColumnData::I64),
+        DataType::Float32 => primitive_or_null::<Float32Type>(array, row, is_null, ColumnData::F32),
+        DataType::Float64 => primitive_or_null::<Float64Type>(array, row, is_null, ColumnData::F64),
         DataType::Utf8 => {
             if is_null {
                 ColumnData::String(None)
@@ -154,48 +116,38 @@ fn arrow_to_column_data(
             }
         }
         DataType::Date32 => {
+            // tiberius の `IntoSql for NaiveDate` 経由。100ns 解像度や AD 0001 起点の
+            // 日数換算は tiberius 側に集約されている。
             if is_null {
-                ColumnData::Date(None)
+                Option::<NaiveDate>::None.into_sql()
             } else {
                 let days = primitive::<Date32Type>(array, row);
                 let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch");
                 let d = epoch
                     .checked_add_signed(Duration::days(i64::from(days)))
                     .ok_or_else(|| driver_msg(format!("column `{name}`: date overflow")))?;
-                ColumnData::Date(Some(naive_date_to_tds(d)?))
+                Some(d).into_sql()
             }
         }
         DataType::Timestamp(unit, None) => {
             if is_null {
-                ColumnData::DateTime2(None)
+                Option::<NaiveDateTime>::None.into_sql()
             } else {
                 let nanos = timestamp_to_nanos(*unit, array, row, name)?;
-                let secs = nanos.div_euclid(1_000_000_000);
-                let nanos_part = nanos.rem_euclid(1_000_000_000);
-                let nanos_u = u32::try_from(nanos_part).map_err(|_| {
-                    driver_msg(format!("column `{name}`: timestamp nanos overflow"))
-                })?;
-                let dt = DateTime::<Utc>::from_timestamp(secs, nanos_u)
-                    .ok_or_else(|| driver_msg(format!("column `{name}`: timestamp overflow")))?
-                    .naive_utc();
-                ColumnData::DateTime2(Some(naive_datetime_to_tds(dt)?))
+                let dt = nanos_to_utc(nanos, name)?.naive_utc();
+                Some(dt).into_sql()
             }
         }
         DataType::Timestamp(unit, Some(_)) => {
+            // tiberius の `IntoSql for DateTime<Utc>` は `ColumnData::DateTime2` を返してしまうため、
+            // `datetimeoffset` 列に書くには `DateTime<FixedOffset>` 経由で `DateTimeOffset` を作らせる。
             if is_null {
-                ColumnData::DateTimeOffset(None)
+                Option::<DateTime<FixedOffset>>::None.into_sql()
             } else {
                 let nanos = timestamp_to_nanos(*unit, array, row, name)?;
-                let secs = nanos.div_euclid(1_000_000_000);
-                let nanos_part = nanos.rem_euclid(1_000_000_000);
-                let nanos_u = u32::try_from(nanos_part).map_err(|_| {
-                    driver_msg(format!("column `{name}`: timestamp nanos overflow"))
-                })?;
-                let dt = Utc
-                    .timestamp_opt(secs, nanos_u)
-                    .single()
-                    .ok_or_else(|| driver_msg(format!("column `{name}`: timestamp overflow")))?;
-                ColumnData::DateTimeOffset(Some(datetime_utc_to_tds(dt)?))
+                let utc = nanos_to_utc(nanos, name)?;
+                let zero = FixedOffset::east_opt(0).expect("0 offset");
+                Some(utc.with_timezone(&zero)).into_sql()
             }
         }
         DataType::Decimal128(_p, s) => {
@@ -217,50 +169,27 @@ fn arrow_to_column_data(
     })
 }
 
-fn timestamp_to_nanos(unit: TimeUnit, array: &dyn Array, row: usize, name: &str) -> Result<i64> {
-    match unit {
-        TimeUnit::Nanosecond => Ok(primitive::<TimestampNanosecondType>(array, row)),
-        TimeUnit::Microsecond => primitive::<TimestampMicrosecondType>(array, row)
-            .checked_mul(1_000)
-            .ok_or_else(|| driver_msg(format!("column `{name}`: timestamp µs→ns overflow"))),
-        TimeUnit::Millisecond => primitive::<TimestampMillisecondType>(array, row)
-            .checked_mul(1_000_000)
-            .ok_or_else(|| driver_msg(format!("column `{name}`: timestamp ms→ns overflow"))),
-        TimeUnit::Second => primitive::<TimestampSecondType>(array, row)
-            .checked_mul(1_000_000_000)
-            .ok_or_else(|| driver_msg(format!("column `{name}`: timestamp s→ns overflow"))),
-    }
+fn primitive_or_null<T: arrow_array::ArrowPrimitiveType>(
+    array: &dyn Array,
+    row: usize,
+    is_null: bool,
+    wrap: fn(Option<T::Native>) -> ColumnData<'static>,
+) -> ColumnData<'static> {
+    wrap(if is_null {
+        None
+    } else {
+        Some(primitive::<T>(array, row))
+    })
 }
 
-/// `NaiveDate` を tiberius の `Date` 表現 (`days_since_year_1`) に変換する。
-/// SQL Server の `date` は AD 0001-01-01 から経過日数 u32 で表現される。
-fn naive_date_to_tds(d: NaiveDate) -> Result<Date> {
-    let base = NaiveDate::from_ymd_opt(1, 1, 1).expect("AD 0001-01-01");
-    let days = d.signed_duration_since(base).num_days();
-    let days_u = u32::try_from(days).map_err(|_| {
-        driver_msg(format!(
-            "date out of SQL Server range (got {d}; expected 0001-01-01..=9999-12-31)"
-        ))
-    })?;
-    // 3 byte エンコードのため上位 8 bit が立つと TDS protocol エラー。実用上は AD 9999 まで。
-    Ok(Date::new(days_u))
-}
-
-/// `NaiveDateTime` を tiberius の `DateTime2` 表現に変換する。100ns 解像度。
-fn naive_datetime_to_tds(dt: NaiveDateTime) -> Result<DateTime2> {
-    let date = naive_date_to_tds(dt.date())?;
-    let t = dt.time();
-    // 1 日のうちの 100ns 単位カウント。
-    let secs_in_day = u64::from(t.num_seconds_from_midnight());
-    let frac = u64::from(t.nanosecond());
-    let increments = secs_in_day * 10_000_000 + frac / 100;
-    Ok(DateTime2::new(date, Time::new(increments, 7)))
-}
-
-/// `DateTime<Utc>` を tiberius の `DateTimeOffset` (UTC 固定 offset) に変換する。
-fn datetime_utc_to_tds(dt: DateTime<Utc>) -> Result<DateTimeOffset> {
-    let dt2 = naive_datetime_to_tds(dt.naive_utc())?;
-    Ok(DateTimeOffset::new(dt2, 0))
+fn nanos_to_utc(nanos: i64, name: &str) -> Result<DateTime<Utc>> {
+    let secs = nanos.div_euclid(1_000_000_000);
+    let nanos_part = nanos.rem_euclid(1_000_000_000);
+    let nanos_u = u32::try_from(nanos_part)
+        .map_err(|_| driver_msg(format!("column `{name}`: timestamp nanos overflow")))?;
+    Utc.timestamp_opt(secs, nanos_u)
+        .single()
+        .ok_or_else(|| driver_msg(format!("column `{name}`: timestamp overflow")))
 }
 
 #[cfg(test)]
@@ -299,7 +228,7 @@ mod tests {
 
         let row = encode_row(&schema, &batch, &[0, 1], 2, 0, 4326).unwrap();
         let cells: Vec<&ColumnData<'_>> = row.iter().collect();
-        assert_eq!(cells.len(), 4); // 2 attr + 1 wkb + 1 srid
+        assert_eq!(cells.len(), 4);
         assert!(matches!(cells[0], ColumnData::I32(Some(42))));
         assert!(matches!(cells[1], ColumnData::String(Some(_))));
         assert!(matches!(cells[2], ColumnData::Binary(Some(_))));
@@ -326,15 +255,5 @@ mod tests {
         let cells: Vec<&ColumnData<'_>> = row.iter().collect();
         assert!(matches!(cells[1], ColumnData::String(None)));
         assert!(matches!(cells[2], ColumnData::Binary(None)));
-    }
-
-    #[test]
-    fn naive_date_to_tds_known_anchor() {
-        let d = NaiveDate::from_ymd_opt(2026, 5, 1).unwrap();
-        let tds = naive_date_to_tds(d).unwrap();
-        // SQL Server の date は AD 0001-01-01 起点。直接比較しないが、
-        // 2026-05-01 は 1 年 = 365 日 × 2025 + 閏年補正 で 約 739_372 日
-        // (チェックは「成功すること」と「成功した値が将来も再現可能」のみ)。
-        let _ = tds;
     }
 }
