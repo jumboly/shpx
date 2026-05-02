@@ -70,6 +70,25 @@ pub fn quote_literal(s: &str) -> String {
     format!("N'{escaped}'")
 }
 
+/// `CREATE SPATIAL INDEX` の `WITH (BOUNDING_BOX = ...)` に埋め込む既知 EPSG 用の bbox。
+///
+/// SQL Server SPATIAL INDEX は `geometry` 列に対して BOUNDING_BOX が必須で、座標系の
+/// 妥当な範囲を要求する（範囲外の geometry は index に乗らない）。同梱マップは
+/// 4326 (WGS84 経緯度) と 3857 (Web Mercator) の 2 つに絞り、それ以外の SRID で
+/// `--create-index=always` を指定した場合は明示エラーで利用者に bbox 設計を促す。
+///
+/// 値:
+/// - 4326: 全球 `(-180, -90, 180, 90)` 経緯度
+/// - 3857: Web Mercator の有効範囲 `(±20037508.34, ±20048966.10)` 相当を切り上げ
+#[must_use]
+pub fn bbox_for_epsg(code: u32) -> Option<(f64, f64, f64, f64)> {
+    match code {
+        4326 => Some((-180.0, -90.0, 180.0, 90.0)),
+        3857 => Some((-20_037_508.34, -20_048_966.10, 20_037_508.34, 20_048_966.10)),
+        _ => None,
+    }
+}
+
 /// Arrow primitive 配列の指定行から native 値を取り出す。downcast 失敗は schema mismatch で
 /// プログラムバグなので panic（呼び出し側で `DataType` を確認済みである前提）。
 pub fn primitive<T: ArrowPrimitiveType>(array: &dyn Array, row: usize) -> T::Native {
@@ -121,5 +140,17 @@ mod tests {
     #[test]
     fn apply_on_loss_skip_skips() {
         assert!(!apply_on_loss(loss_kind::MISSING_CRS_ON_SQLSERVER, "x", OnLoss::Skip).unwrap());
+    }
+
+    #[test]
+    fn bbox_for_epsg_known_codes() {
+        assert_eq!(bbox_for_epsg(4326), Some((-180.0, -90.0, 180.0, 90.0)));
+        assert!(bbox_for_epsg(3857).is_some());
+    }
+
+    #[test]
+    fn bbox_for_epsg_unknown_returns_none() {
+        assert!(bbox_for_epsg(2451).is_none());
+        assert!(bbox_for_epsg(0).is_none());
     }
 }

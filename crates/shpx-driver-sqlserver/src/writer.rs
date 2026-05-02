@@ -23,7 +23,8 @@ use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use rust_decimal::Decimal;
 use shpx_core::{
     schema::{find_geometry_column, GeometryMeta},
-    BulkLoadWriter, Crs, Error, LayerWriter, OnLoss, Result, Uri, WriteOpts,
+    BulkLoadWriter, CreateIndex, CreateTable, Crs, Error, LayerWriter, OnLoss, Result, Uri,
+    WriteOpts,
 };
 use tiberius::ToSql;
 
@@ -33,7 +34,8 @@ use crate::runtime::runtime;
 use crate::staging::{resolve_chunk_size, run_bulk_chunks};
 use crate::type_map::arrow_to_decl;
 use crate::util::{
-    apply_on_loss, driver_err, driver_msg, loss_kind, primitive, quote_ident, quote_qualified,
+    apply_on_loss, bbox_for_epsg, driver_err, driver_msg, loss_kind, primitive, quote_ident,
+    quote_qualified,
 };
 
 pub struct SqlServerWriter {
@@ -45,18 +47,19 @@ pub struct SqlServerWriter {
     insert_sql: String,
     qualified: String,
     srid: i32,
-    /// `geometry` か `geography` か。cycle 1 では INSERT 文に embed 済みなので
-    /// `write_batch` から再参照する必要は無いが、cycle 2 staging bulk と cycle 3a
-    /// spatial index 経路で参照するため保持する。
-    #[allow(dead_code)]
+    /// `geometry` か `geography` か。INSERT 文に embed 済みだが、spatial index 発行時に
+    /// `geometry` のみ BOUNDING_BOX を要求するため、`finish()` での分岐に使う。
     geom_kind: GeomKind,
-    /// この writer が `CREATE TABLE` を発行したかどうか。`CreateIndex::Auto` 判定用
-    /// （cycle 3a で使う）。cycle 1 では参照しないが構造体に持たせて cycle 間の差分を最小化。
+    /// `--create-index` 戦略 (`finish()` で参照)。
+    create_index: CreateIndex,
+    /// この writer が `CREATE TABLE` を発行したかどうか。`CreateIndex::Auto` 判定用に
+    /// 保持しておくが、SQL Server では Auto は no-op に倒すため現状参照しない
+    /// （`docs/ROADMAP.md` v0.4 の確定済み判断 #2）。
     #[allow(dead_code)]
     table_was_created: bool,
-    #[allow(dead_code)]
+    /// geometry 列名 (quote 前)。SPATIAL INDEX のターゲット列に使う。
     geom_col_name: String,
-    #[allow(dead_code)]
+    /// テーブル名 (quote 前)。SPATIAL INDEX 名 `idx_<table>_<geom>` に使う。
     table_name: String,
 }
 
@@ -93,20 +96,54 @@ impl SqlServerWriter {
 
         let existed_before = table_exists(&mut client, &resolved.schema, &resolved.table)?;
 
-        // cycle 1 では --create-table の 3 種フル対応 (Never エラー / Always 強制再作成) は
-        // cycle 3a に持ち越し。最低限 IfNotExists 相当: 既存なら何もしない、無ければ CREATE。
-        let table_was_created = if existed_before {
-            false
-        } else {
-            let create_sql = build_create_table_sql(
-                &schema,
-                &attr_indices,
-                geom_index,
-                &qualified,
-                resolved.geom_type,
-            )?;
-            conn::simple_query(&mut client, create_sql)?;
-            true
+        // `--create-table` の 3 種フル対応 (PostGIS と同形のセマンティクス):
+        // - Never:        既存必須。無ければエラー、あれば CREATE 発行せず append。
+        // - IfNotExists:  既存なら append、無ければ CREATE。
+        // - Always:       既存なら DROP → CREATE、無ければ CREATE。
+        let table_was_created = match resolved.create_table {
+            CreateTable::Never => {
+                if !existed_before {
+                    return Err(driver_msg(format!(
+                        "--create-table=never: table {qualified} does not exist"
+                    )));
+                }
+                false
+            }
+            CreateTable::IfNotExists => {
+                if existed_before {
+                    false
+                } else {
+                    let sql = build_create_table_sql(
+                        &schema,
+                        &attr_indices,
+                        geom_index,
+                        &qualified,
+                        resolved.geom_type,
+                    )?;
+                    conn::simple_query(&mut client, sql)?;
+                    true
+                }
+            }
+            CreateTable::Always => {
+                if existed_before {
+                    // 既存テーブルを DROP してから CREATE。`--overwrite` と区別したいのは
+                    // 「明示的に Always を指定した場合は overwrite フラグ無しでも DROP する」
+                    // という契約 (PostGIS と同形)。
+                    conn::simple_query(
+                        &mut client,
+                        format!("DROP TABLE {qualified}"),
+                    )?;
+                }
+                let sql = build_create_table_sql(
+                    &schema,
+                    &attr_indices,
+                    geom_index,
+                    &qualified,
+                    resolved.geom_type,
+                )?;
+                conn::simple_query(&mut client, sql)?;
+                true
+            }
         };
 
         let insert_sql = build_insert_sql(
@@ -126,11 +163,80 @@ impl SqlServerWriter {
             qualified,
             srid,
             geom_kind: resolved.geom_type,
+            create_index: resolved.create_index,
             table_was_created,
             geom_col_name: geom_field_name,
             table_name: resolved.table,
         })
     }
+
+    /// `--create-index` 戦略に従って SPATIAL INDEX を発行する。`finish()` から 1 度だけ呼ぶ。
+    ///
+    /// - `Never`: 何もしない
+    /// - `Auto`: no-op (確定済み判断 #2 — SQL Server の SPATIAL INDEX は BOUNDING_BOX 必須で
+    ///   未知 SRID では失敗するため、暗黙生成は避ける)
+    /// - `Always`:
+    ///   - geometry: 既知 EPSG (4326/3857) は `bbox_for_epsg` 同梱表で `BOUNDING_BOX` を埋め、
+    ///     未知 SRID は明示エラー
+    ///   - geography: BOUNDING_BOX 不要 (経緯度全球が暗黙の範囲)
+    fn maybe_create_spatial_index(&mut self) -> Result<()> {
+        let should_create = match self.create_index {
+            CreateIndex::Never | CreateIndex::Auto => false,
+            CreateIndex::Always => true,
+        };
+        if !should_create {
+            return Ok(());
+        }
+        let client = self
+            .client
+            .as_mut()
+            .ok_or_else(|| driver_msg("maybe_create_spatial_index called after finish"))?;
+        let idx_name = quote_ident(&format!("idx_{}_{}", self.table_name, self.geom_col_name));
+        let geom_col = quote_ident(&self.geom_col_name);
+
+        let sql = build_spatial_index_sql(
+            &self.qualified,
+            &self.table_name,
+            &self.geom_col_name,
+            self.geom_kind,
+            self.srid,
+        )?;
+        let _ = idx_name;
+        let _ = geom_col;
+        conn::simple_query(client, sql)
+    }
+}
+
+/// `CREATE SPATIAL INDEX` 文を組み立てる（pure、テスト容易性のため writer から分離）。
+/// `geometry` のみ `BOUNDING_BOX` を要求し、未知 SRID は明示エラー。
+fn build_spatial_index_sql(
+    qualified: &str,
+    table_name: &str,
+    geom_col_name: &str,
+    geom_kind: GeomKind,
+    srid: i32,
+) -> Result<String> {
+    let idx_name = quote_ident(&format!("idx_{table_name}_{geom_col_name}"));
+    let geom_col = quote_ident(geom_col_name);
+    Ok(match geom_kind {
+        GeomKind::Geometry => {
+            let srid_u = u32::try_from(srid).unwrap_or(0);
+            let bbox = bbox_for_epsg(srid_u).ok_or_else(|| {
+                driver_msg(format!(
+                    "--create-index=always for `geometry` requires a known SRID for \
+                     BOUNDING_BOX (got srid={srid}; supported: 4326, 3857)"
+                ))
+            })?;
+            let (xmin, ymin, xmax, ymax) = bbox;
+            format!(
+                "CREATE SPATIAL INDEX {idx_name} ON {qualified} ({geom_col}) \
+                 WITH (BOUNDING_BOX = ({xmin}, {ymin}, {xmax}, {ymax}))"
+            )
+        }
+        GeomKind::Geography => {
+            format!("CREATE SPATIAL INDEX {idx_name} ON {qualified} ({geom_col})")
+        }
+    })
 }
 
 impl LayerWriter for SqlServerWriter {
@@ -181,6 +287,9 @@ impl LayerWriter for SqlServerWriter {
     }
 
     fn finish(mut self: Box<Self>) -> Result<()> {
+        // bulk 経路と batch 経路の双方で「データ投入完了 → SPATIAL INDEX」の順を統一する
+        // （PostGIS の GIST index と同じ位置）。
+        self.maybe_create_spatial_index()?;
         // tiberius Client は Drop で接続切断される。明示 close は無い。
         let _ = self.client.take();
         Ok(())
@@ -636,5 +745,34 @@ mod tests {
         let geom_meta = GeometryMeta::wkb(shpx_core::schema::GeometryType::Point, None);
         let err = resolve_srid(None, &geom_meta, GeomKind::Geometry, OnLoss::Error).unwrap_err();
         assert!(matches!(err, Error::OnLoss { .. }));
+    }
+
+    #[test]
+    fn spatial_index_sql_geometry_4326() {
+        let sql = build_spatial_index_sql("[dbo].[t]", "t", "geom", GeomKind::Geometry, 4326).unwrap();
+        assert_eq!(
+            sql,
+            "CREATE SPATIAL INDEX [idx_t_geom] ON [dbo].[t] ([geom]) \
+             WITH (BOUNDING_BOX = (-180, -90, 180, 90))"
+        );
+    }
+
+    #[test]
+    fn spatial_index_sql_geometry_unknown_srid_errors() {
+        let err = build_spatial_index_sql("[dbo].[t]", "t", "geom", GeomKind::Geometry, 2451)
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("BOUNDING_BOX"), "msg was: {msg}");
+        assert!(msg.contains("2451"), "msg was: {msg}");
+    }
+
+    #[test]
+    fn spatial_index_sql_geography_no_bounding_box() {
+        let sql = build_spatial_index_sql("[dbo].[t]", "t", "geom", GeomKind::Geography, 4326)
+            .unwrap();
+        assert_eq!(
+            sql,
+            "CREATE SPATIAL INDEX [idx_t_geom] ON [dbo].[t] ([geom])"
+        );
     }
 }
