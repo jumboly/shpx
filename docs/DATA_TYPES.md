@@ -15,7 +15,7 @@ shpx の中間表現は Apache Arrow。文字列は UTF-8 を中間表現とし�
 | `Date32` | `date` | `date` | `TEXT` ISO | DATE | なし→String | string ISO | ISO | `D` (YYYYMMDD) |
 | `Time64(µs)` | `time` | `time` | `TEXT` ISO | TIME(µs) | なし→String | string | ISO | 非対応→error |
 | `Timestamp(µs, None)` | `timestamp` | `datetime2` | `TEXT` ISO | TIMESTAMP(µs) | なし→String | string ISO | ISO | 非対応→error |
-| `Timestamp(µs, UTC)` | `timestamptz` | `datetime2` + tz 注記 | `TEXT` ISO8601 +Z | TIMESTAMP(µs, UTC) | なし→String | string ISO+Z | ISO+Z | 非対応→error |
+| `Timestamp(µs, UTC)` | `timestamptz` | `datetimeoffset` | `TEXT` ISO8601 +Z | TIMESTAMP(µs, UTC) | なし→String | string ISO+Z | ISO+Z | 非対応→error |
 | `Utf8` / `LargeUtf8` | `text` | `nvarchar(max)` | `TEXT` | STRING | String | string | quoted | `C` (cpg) |
 | `Binary` / `LargeBinary` | `bytea` | `varbinary(max)` | `BLOB` | BINARY | なし→String(b64) | 非対応→error | 非対応→error | 非対応→error |
 | `List<T>` | `T[]` | 非対応→JSON 文字列 or error | `TEXT` JSON | LIST<T> | なし→String JSON | array | JSON文字列 | 非対応→error |

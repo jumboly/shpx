@@ -30,3 +30,11 @@ shpx-driver-shp     = { path = "../shpx-driver-shp" }
 shpx-driver-parquet = { path = "../shpx-driver-parquet" }
 tempfile            = { workspace = true }
 tracing-subscriber  = { workspace = true }
+# `harness=false` で criterion main を直接使うため default-features は不要
+# (`html_reports` の plotters 依存を切ってビルド時間を節約)。
+criterion           = { version = "0.5", default-features = false }
+tiberius            = { workspace = true }
+
+[[bench]]
+name    = "bulk_insert"
+harness = false

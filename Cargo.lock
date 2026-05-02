@@ -2559,6 +2559,7 @@ dependencies = [
  "arrow-schema",
  "bytes",
  "chrono",
+ "criterion",
  "futures-util",
  "rust_decimal",
  "shpx-core",

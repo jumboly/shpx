@@ -91,9 +91,9 @@
 - `--insert-mode=bulk|batch`
 
 **完了基準**:
-- [ ] geometry / geography 双方で staging 経由 bulk insert が動く
-- [ ] chunk size 1M でも tempdb 溢れなし（chunk ごと commit）
-- [ ] CI で `docker compose up mssql` テスト
+- [x] geometry / geography 双方で staging 経由 bulk insert が動く（`tests/bulk_roundtrip.rs::bulk_geography_all_geom_types` ほか、env-gated）
+- [ ] chunk size 1M でも tempdb 溢れなし（chunk ごと commit）— 実 SQL Server に対する 10M 行ベンチで確認予定
+- [x] CI で `docker compose up mssql` テスト（`.github/workflows/ci.yml` の `services.mssql`）
 
 **確定済み設計判断**:
 - **reader 拡張は v0.5+ に先送り**: writer (staging bulk) と完了基準達成を優先。v0.4 reader は table モード固定。
