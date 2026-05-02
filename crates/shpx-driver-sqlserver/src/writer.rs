@@ -23,13 +23,14 @@ use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use rust_decimal::Decimal;
 use shpx_core::{
     schema::{find_geometry_column, GeometryMeta},
-    Crs, Error, LayerWriter, OnLoss, Result, Uri, WriteOpts,
+    BulkLoadWriter, Crs, Error, LayerWriter, OnLoss, Result, Uri, WriteOpts,
 };
 use tiberius::ToSql;
 
 use crate::conn::{self, SqlClient};
 use crate::options::{GeomKind, ResolvedWriteOpts};
 use crate::runtime::runtime;
+use crate::staging::{resolve_chunk_size, run_bulk_chunks};
 use crate::type_map::arrow_to_decl;
 use crate::util::{
     apply_on_loss, driver_err, driver_msg, loss_kind, primitive, quote_ident, quote_qualified,
@@ -183,6 +184,39 @@ impl LayerWriter for SqlServerWriter {
         // tiberius Client は Drop で接続切断される。明示 close は無い。
         let _ = self.client.take();
         Ok(())
+    }
+}
+
+impl BulkLoadWriter for SqlServerWriter {
+    fn bulk_write(
+        &mut self,
+        batches: &mut dyn Iterator<Item = Result<RecordBatch>>,
+    ) -> Result<()> {
+        let Self {
+            client,
+            schema,
+            geom_index,
+            attr_indices,
+            qualified,
+            srid,
+            geom_kind,
+            ..
+        } = self;
+        let client = client
+            .as_mut()
+            .ok_or_else(|| driver_msg("bulk_write called after finish"))?;
+
+        run_bulk_chunks(
+            client,
+            schema,
+            attr_indices,
+            *geom_index,
+            qualified,
+            *geom_kind,
+            *srid,
+            batches,
+            resolve_chunk_size(),
+        )
     }
 }
 

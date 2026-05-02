@@ -17,10 +17,12 @@ use shpx_core::{
     StringEncoding, Uri, WriteOpts,
 };
 
+pub mod bulk;
 pub mod conn;
 pub mod options;
 pub mod reader;
 pub mod runtime;
+pub mod staging;
 pub mod type_map;
 pub mod util;
 pub mod writer;
@@ -53,9 +55,10 @@ impl Driver for SqlServerDriver {
             read: true,
             write: true,
             random_access: false,
-            // cycle 2 で staging 経由 `BulkLoadWriter` を実装する。cycle 1 では prepared
-            // INSERT のみなので false で開始する。
-            bulk_load: false,
+            // cycle 2 で staging 経由 `BulkLoadWriter` を実装。`#shpx_stage_<uuid>` に
+            // WKB + SRID を流して `INSERT…SELECT geometry::STGeomFromWKB` で確定テーブルへ
+            // 転記するパターン。
+            bulk_load: true,
             supports_blob: true,
             // cycle 2 で `rust_decimal::Decimal` 経由の Decimal128 ↔ T-SQL `decimal(p,s)` を実装。
             supports_decimal: true,
@@ -84,14 +87,13 @@ impl Driver for SqlServerDriver {
 
     fn open_bulk_write(
         &self,
-        _uri: &Uri,
-        _schema: SchemaRef,
-        _crs: Option<Crs>,
-        _opts: &WriteOpts,
+        uri: &Uri,
+        schema: SchemaRef,
+        crs: Option<Crs>,
+        opts: &WriteOpts,
     ) -> Result<Option<Box<dyn BulkLoadWriter>>> {
-        // cycle 1 では bulk_load=false のため、`select_writer` 側でこの経路は呼ばれない。
-        // cycle 2 で staging 経由実装に差し替える。
-        Ok(None)
+        let w = writer::SqlServerWriter::open(uri, schema, crs.as_ref(), opts)?;
+        Ok(Some(Box::new(w)))
     }
 }
 
@@ -114,8 +116,8 @@ mod tests {
         assert!(caps.supports_blob);
         assert!(caps.supports_timestamp_tz);
         assert!(caps.supports_decimal);
-        // cycle 1 commit 1 時点では bulk_load は未実装。cycle 2 で true に切り替える。
-        assert!(!caps.bulk_load);
+        // cycle 2 で staging bulk が入ったため bulk_load=true。
+        assert!(caps.bulk_load);
         assert_eq!(caps.max_decimal_precision, Some(38));
         match caps.string_encoding {
             StringEncoding::Fixed(label) => assert_eq!(label, "utf-8"),
