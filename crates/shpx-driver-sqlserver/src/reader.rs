@@ -1,15 +1,20 @@
 //! SQL Server の `LayerReader` 実装。
 //!
-//! v0.4 では table モード固定: テーブル全件 SELECT を 1 度だけ発行し、結果を
-//! Arrow `RecordBatch` に詰めて in-memory に保持する (`--where` / `--select` /
-//! `--query` は将来拡張)。
+//! v0.8 cycle 5 で eager-load (`Vec<RecordBatch>`) を撤廃し、PostGIS と同じ
+//! background OS thread + `std::sync::mpsc::sync_channel(2)` パターンで
+//! `tiberius::QueryStream` を逐次消費する真のストリーミングに置き換えた。
+//!
+//! 引き続き v0.4 の制約上 table モード固定 (`--where` / `--select` / `--query` は
+//! 将来拡張)。
 //!
 //! geometry 列は `[col].STAsBinary() AS [col]` で OGC 標準 WKB を取得し、`STSrid` を
-//! 併走列として取り出して `Crs` に詰める。SRID 0 は SQL Server の「未指定」を表す
-//! ため `Crs` を None にする。
+//! 併走列として取り出す。SRID は probe `SELECT TOP 1 ... STSrid, STGeometryType()` で
+//! 解決する (cycle 5 で従来の SELECT 結果先頭行 fallback を削除し、probe 一本に集約)。
 
 use std::collections::HashMap;
+use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::Arc;
+use std::thread;
 
 use arrow_array::{
     builder::{
@@ -21,12 +26,13 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+use futures_util::TryStreamExt;
 use rust_decimal::Decimal;
 use shpx_core::{
     schema::{GeometryMeta, GeometryType, GEOMETRY_META_KEY},
     Crs, Error, LayerReader, ReadOpts, Result, Uri,
 };
-use tiberius::Row;
+use tiberius::{QueryItem, Row};
 
 use crate::conn::{self, SqlClient};
 use crate::options::ResolvedReadOpts;
@@ -36,18 +42,22 @@ use crate::type_map::{
 };
 use crate::util::{driver_err, driver_msg, quote_ident, quote_qualified};
 
-/// 1 batch あたりの既定行数。reader は全件 in-memory で持ってから chunk するので、
-/// メモリ効率より下流（writer）の bind バッチサイズに合わせて 64Ki に固定。
+/// 1 batch あたりの既定行数。worker thread が `READ_BATCH_SIZE` 行ごとに
+/// `RecordBatch` を組んで channel に送る。下流 (writer) bind バッチサイズに合わせて
+/// 64Ki 固定。
 const DEFAULT_BATCH_SIZE: usize = 65_536;
 
 /// SRID 併走列の suffix。元の列名と衝突しにくいよう `__shpx_srid` を使う。
 const SRID_SUFFIX: &str = "__shpx_srid";
 
+/// background worker から send される 1 batch ぶん。
+type BatchChunk = std::result::Result<RecordBatch, shpx_core::Error>;
+
 pub struct SqlServerReader {
     schema: SchemaRef,
     crs: Option<Crs>,
-    rows: Vec<RecordBatch>,
-    row_count: usize,
+    /// background worker thread からの batch 受信口。
+    rx: Option<Receiver<BatchChunk>>,
 }
 
 impl SqlServerReader {
@@ -70,14 +80,17 @@ impl SqlServerReader {
         }
 
         let resolved = ResolvedReadOpts::resolve(uri, opts)?;
-        let mut client = conn::connect(uri.path())?;
-        Self::open_table_mode(&mut client, &resolved, opts)
+        let url = uri.path().to_string();
+        // probe 用の client。schema describe + SRID/geom_type probe にだけ使い、最後に drop。
+        let mut probe_client = conn::connect(&url)?;
+        Self::open_table_mode(&mut probe_client, &resolved, opts, &url)
     }
 
     fn open_table_mode(
         client: &mut SqlClient,
         resolved: &ResolvedReadOpts,
         opts: &ReadOpts,
+        url: &str,
     ) -> Result<Self> {
         let qualified = quote_qualified(&resolved.schema, &resolved.table);
         let columns = describe_columns(client, &resolved.schema, &resolved.table)?;
@@ -98,21 +111,95 @@ impl SqlServerReader {
         let schema = build_arrow_schema(&columns, geom_idx, geom_type, crs.as_ref())?;
         let select_sql = build_select_sql(&columns, geom_idx, &qualified);
 
-        let rows = exec_select(client, &select_sql)?;
+        Self::spawn_streaming(url, select_sql, schema, crs, columns, geom_idx)
+    }
 
-        // probe で SRID が取れなかった (テーブルが空だった) 場合のみ、SELECT 結果から
-        // 最初の non-NULL 行で SRID を補う。`or_else` の短絡により crs が既に Some なら走らない。
-        let final_crs =
-            crs.or_else(|| extract_srid_from_first_row(&rows, geom_idx).and_then(epsg_to_crs));
+    /// background OS thread を起動し、reader 専用に新規 connect した client から
+    /// `simple_query` で `QueryStream` を pull、`READ_BATCH_SIZE` 行ごとに
+    /// `RecordBatch` を組んで channel へ送る。
+    ///
+    /// PostGIS と同じ async-to-sync mpsc bridge パターン。reader 用 client を別途
+    /// 立てる理由は cycle 4 と同じ (probe client の lifetime と worker thread 寿命を
+    /// 切り離して所有関係を単純化)。
+    fn spawn_streaming(
+        url: &str,
+        sql: String,
+        schema: SchemaRef,
+        crs: Option<Crs>,
+        columns: Vec<ColumnInfo>,
+        geom_idx: usize,
+    ) -> Result<Self> {
+        let mut bg_client = conn::connect(url)?;
+        let rt = runtime()?;
+        let schema_for_worker = schema.clone();
+        let (tx, rx) = sync_channel::<BatchChunk>(2);
 
-        let batch = rows_to_record_batch(&schema, &columns, geom_idx, &rows)?;
-        let row_count = batch.num_rows();
-        let chunks = chunk_batch(&batch, DEFAULT_BATCH_SIZE);
+        thread::spawn(move || {
+            rt.block_on(async move {
+                let stream = match bg_client.simple_query(sql).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = tx.send(Err(driver_err(&e)));
+                        return;
+                    }
+                };
+                tokio::pin!(stream);
+
+                let mut buf: Vec<Row> = Vec::with_capacity(DEFAULT_BATCH_SIZE);
+                loop {
+                    match stream.try_next().await {
+                        Ok(Some(QueryItem::Row(row))) => {
+                            buf.push(row);
+                            if buf.len() >= DEFAULT_BATCH_SIZE {
+                                let chunk = std::mem::replace(
+                                    &mut buf,
+                                    Vec::with_capacity(DEFAULT_BATCH_SIZE),
+                                );
+                                match rows_to_record_batch(
+                                    &schema_for_worker,
+                                    &columns,
+                                    geom_idx,
+                                    &chunk,
+                                ) {
+                                    Ok(batch) => {
+                                        if tx.send(Ok(batch)).is_err() {
+                                            return; // receiver dropped
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(Err(e));
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        // Metadata token は読み飛ばす (列メタは describe_columns で別途取得済み)。
+                        Ok(Some(QueryItem::Metadata(_))) => {}
+                        Ok(None) => break,
+                        Err(e) => {
+                            let _ = tx.send(Err(driver_err(&e)));
+                            return;
+                        }
+                    }
+                }
+                if !buf.is_empty() {
+                    match rows_to_record_batch(&schema_for_worker, &columns, geom_idx, &buf) {
+                        Ok(batch) => {
+                            let _ = tx.send(Ok(batch));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Err(e));
+                        }
+                    }
+                }
+                // bg_client は async block 終端で drop され、TCP 接続も自然終了する。
+            });
+        });
+
         Ok(Self {
             schema,
-            crs: final_crs,
-            rows: chunks,
-            row_count,
+            crs,
+            rx: Some(rx),
         })
     }
 }
@@ -127,11 +214,37 @@ impl LayerReader for SqlServerReader {
     }
 
     fn row_count_hint(&self) -> Option<usize> {
-        Some(self.row_count)
+        // streaming のため事前に行数は確定しない (`SELECT COUNT(*)` を別途叩くと
+        // ラウンドトリップが増えるため敢えてやらない)。
+        None
     }
 
     fn batches(&mut self) -> Box<dyn Iterator<Item = Result<RecordBatch>> + Send + '_> {
-        Box::new(self.rows.drain(..).map(Ok))
+        let rx = self.rx.take();
+        Box::new(BatchIter { rx })
+    }
+}
+
+struct BatchIter {
+    rx: Option<Receiver<BatchChunk>>,
+}
+
+impl Iterator for BatchIter {
+    type Item = Result<RecordBatch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let rx = self.rx.as_ref()?;
+        match rx.recv() {
+            Ok(Ok(b)) => Some(Ok(b)),
+            Ok(Err(e)) => {
+                self.rx = None;
+                Some(Err(e))
+            }
+            Err(_) => {
+                self.rx = None;
+                None
+            }
+        }
     }
 }
 
@@ -293,27 +406,6 @@ fn build_select_sql(columns: &[ColumnInfo], geom_idx: usize, qualified: &str) ->
         })
         .collect();
     format!("SELECT {} FROM {qualified}", parts.join(", "))
-}
-
-fn exec_select(client: &mut SqlClient, sql: &str) -> Result<Vec<Row>> {
-    let rt = runtime()?;
-    rt.block_on(async {
-        let stream = client.simple_query(sql).await.map_err(|e| driver_err(&e))?;
-        stream.into_first_result().await.map_err(|e| driver_err(&e))
-    })
-}
-
-/// SELECT 結果の最初の non-NULL 行から SRID 列を取り出す。`build_select_sql` で
-/// geometry 列の直後に併走させた SRID 列のインデックスは `geom_idx + 1`。
-fn extract_srid_from_first_row(rows: &[Row], geom_idx: usize) -> Option<i32> {
-    for row in rows {
-        if let Ok(Some(srid)) = row.try_get::<i32, _>(geom_idx + 1) {
-            if srid > 0 {
-                return Some(srid);
-            }
-        }
-    }
-    None
 }
 
 fn rows_to_record_batch(
@@ -572,21 +664,6 @@ fn decimal_to_i128(d: Decimal, target_scale: i8, col: &str) -> Result<i128> {
     }
 }
 
-/// `RecordBatch` を `chunk_size` 単位の連続スライスに分割する。
-fn chunk_batch(batch: &RecordBatch, chunk_size: usize) -> Vec<RecordBatch> {
-    if batch.num_rows() <= chunk_size {
-        return vec![batch.clone()];
-    }
-    let mut out = Vec::with_capacity(batch.num_rows().div_ceil(chunk_size));
-    let mut offset = 0;
-    while offset < batch.num_rows() {
-        let len = (batch.num_rows() - offset).min(chunk_size);
-        out.push(batch.slice(offset, len));
-        offset += len;
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -645,17 +722,4 @@ mod tests {
         assert_eq!(decimal_to_i128(d, 2, "x").unwrap(), 123);
     }
 
-    #[test]
-    fn chunk_batch_splits_uniformly() {
-        use arrow_array::Int32Array;
-
-        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, true)]));
-        let arr = Int32Array::from(vec![Some(1), Some(2), Some(3), Some(4), Some(5)]);
-        let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
-        let chunks = chunk_batch(&batch, 2);
-        assert_eq!(chunks.len(), 3);
-        assert_eq!(chunks[0].num_rows(), 2);
-        assert_eq!(chunks[1].num_rows(), 2);
-        assert_eq!(chunks[2].num_rows(), 1);
-    }
 }
