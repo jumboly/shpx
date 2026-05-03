@@ -118,21 +118,9 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
-/// `--query` の早期バリデーション。`;` 包含と空 query を弾く。
-///
-/// PostGIS の同名関数と完全同形（driver 名だけ差し替え）。`;` を含む SQL は
-/// サブクエリとして包めない（`SELECT * FROM (SELECT ...;) AS shpx_q` が構文エラーになる）。
+/// `--query` の早期バリデーション。`shpx-rdb-common` 経由 (PostGIS / SpatiaLite で共有)。
 pub fn validate_user_query(q: &str) -> Result<()> {
-    let trimmed = q.trim();
-    if trimmed.is_empty() {
-        return Err(driver_msg(format!("{DRIVER_NAME}: --query is empty")));
-    }
-    if trimmed.contains(';') {
-        return Err(driver_msg(format!(
-            "{DRIVER_NAME}: --query must not contain `;` (semicolons cannot be wrapped in a subquery)"
-        )));
-    }
-    Ok(())
+    shpx_rdb_common::opts::validate_user_query(q, DRIVER_NAME)
 }
 
 /// `Uri::path` が含む `?table=...` 部分と、`sqlite://` の URL prefix を切り落とし、

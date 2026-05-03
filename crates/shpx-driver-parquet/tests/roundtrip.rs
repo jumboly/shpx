@@ -262,12 +262,9 @@ fn overwrite_false_fails_when_exists() {
     assert!(matches!(err, shpx_core::Error::Format(_)));
 }
 
-// v0.7 cycle 1 で Parquet driver に OnLoss skeleton を入れたが、現状の shpx は
-// Decimal128 (≤ 38) と Timestamp(Nanosecond) を ArrowWriter にそのまま渡している。
-// 以下 2 件は「writer デフォルト設定 (coerce_types=false) で precision/unit が
-// 完全保持される」ことを実機で裏付けるための回帰テスト。これらが緑である限り
-// `precision-on-parquet` / `nanosecond-truncation-on-parquet` の loss kind は
-// 実装する必要がない (cycle 3 で ROADMAP の該当列挙を訂正する根拠になる)。
+// 以下 2 件は「ArrowWriter デフォルト (coerce_types=false) で Decimal128 / Timestamp(ns)
+// が完全保持される」ことを裏付ける回帰テスト。これらが緑である限り、Parquet writer に
+// `precision-on-parquet` / `nanosecond-truncation-on-parquet` の loss kind を追加する必要は無い。
 
 #[test]
 fn timestamp_nanosecond_roundtrip_preserves_unit_and_value() {

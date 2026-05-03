@@ -19,6 +19,31 @@ pub fn validate_overwrite_compat(opts: &WriteOpts, driver_name: &'static str) ->
     Ok(())
 }
 
+/// `--query` の早期バリデーション。空 query と `;` を含む query を reject する。
+///
+/// サブクエリ化 (`SELECT ... FROM (<query>) AS shpx_q`) するため、`;` を含むと構文
+/// エラーになる。コメントや文字列リテラル中の `;` を厳密に判別するのは過剰なので、
+/// 「`;` を含めば reject」という保守的な方針 (ユーザーが SQL クライアントから末尾
+/// セミコロン付きでコピペしたケースを早めに弾くのが主目的)。
+pub fn validate_user_query(q: &str, driver_name: &'static str) -> Result<()> {
+    let trimmed = q.trim();
+    if trimmed.is_empty() {
+        return Err(Error::driver_msg(
+            driver_name,
+            format!("{driver_name}: --query is empty"),
+        ));
+    }
+    if trimmed.contains(';') {
+        return Err(Error::driver_msg(
+            driver_name,
+            format!(
+                "{driver_name}: --query must not contain `;` (semicolons cannot be wrapped in a subquery)"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -49,6 +74,23 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("--overwrite"), "msg was: {msg}");
         assert!(msg.contains("--create-table=never"), "msg was: {msg}");
+    }
+
+    #[test]
+    fn validate_user_query_rejects_semicolon_and_empty() {
+        assert!(validate_user_query("SELECT 1; SELECT 2", "test").is_err());
+        assert!(validate_user_query("SELECT 1;", "test").is_err());
+        assert!(validate_user_query("", "test").is_err());
+        assert!(validate_user_query("   ", "test").is_err());
+        assert!(validate_user_query("SELECT geom FROM t", "test").is_ok());
+    }
+
+    #[test]
+    fn validate_user_query_error_carries_driver_name() {
+        let err = validate_user_query("SELECT 1;", "myrdb").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("myrdb"), "msg was: {msg}");
+        assert!(msg.contains("`;`"), "msg was: {msg}");
     }
 
     #[test]

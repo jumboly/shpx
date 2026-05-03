@@ -719,12 +719,9 @@ fn feature_collection_writer_emits_correct_envelope() {
     assert_eq!(raw.matches(r#""type":"Feature""#).count(), 2);
 }
 
-// ---- v0.7 cycle 1: OnLoss ポリシー回帰テスト ----
-//
-// `Decimal128` と `Timestamp(Nanosecond | Microsecond)` は writer 側で
-// per-column に on_loss を解決する。Skip → properties から列消失、
-// Warn → 値はそのまま (Decimal は文字列、Timestamp は 9 桁少数で lossless)、
-// Error → `open_write` が `Error::OnLoss` で abort、を確認する。
+// `Decimal128` と `Timestamp(Nanosecond | Microsecond)` は writer の plan_skipped_columns
+// で per-column に on_loss を解決する: Skip は properties から列消失、Warn は値そのまま
+// (Decimal は文字列、Timestamp は 9 桁少数で lossless)、Error は open_write が abort。
 
 fn write_opts_with_loss(loss: OnLoss) -> WriteOpts {
     WriteOpts {
