@@ -5,9 +5,21 @@ pub mod drivers;
 pub mod info;
 pub mod schema;
 
+use serde::Serialize;
 use shpx_core::{Crs, Driver, Error, LayerReader, ReadOpts, Result, Uri};
 
 use crate::registry;
+
+/// `--format=json [--pretty]` の共通出力ヘルパ。`Error::Format` への変換と
+/// pretty/compact 分岐を 1 箇所に寄せて `schema` / `drivers` で共有する。
+pub fn serialize_json<T: Serialize>(value: &T, pretty: bool, ctx: &str) -> Result<String> {
+    let r = if pretty {
+        serde_json::to_string_pretty(value)
+    } else {
+        serde_json::to_string(value)
+    };
+    r.map_err(|e| Error::Format(format!("{ctx} json serialize failed: {e}")))
+}
 
 /// `EPSG:xxxx` 文字列を `Crs` にパースする。`None` 入力はそのまま `Ok(None)`。
 pub fn parse_src_crs(s: Option<&str>) -> Result<Option<Crs>> {

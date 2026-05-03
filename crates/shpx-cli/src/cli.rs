@@ -28,10 +28,20 @@ pub enum Cmd {
     Convert(ConvertArgs),
     /// 入力ファイルのスキーマ・CRS・行数を表示する。
     Info(InfoArgs),
-    /// 入力ファイルの Arrow スキーマを JSON で出力する。
+    /// 入力ファイルの Arrow スキーマを JSON または text で出力する。
     Schema(SchemaArgs),
     /// 登録されている driver と各 capabilities を一覧表示する。
-    Drivers,
+    Drivers(DriversArgs),
+}
+
+/// `shpx schema` / `shpx drivers` の `--format` 値。`default_value_t` は呼び出し
+/// 側で個別に指定する (`schema=Json` / `drivers=Text` で後方互換を保つため)。
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputFormatArg {
+    /// 人間可読のテキスト出力。
+    Text,
+    /// 機械可読の JSON 出力。
+    Json,
 }
 
 // `src` / `dst` は PathBuf ではなく String で受ける。`pg://user:pass@host/db?table=t`
@@ -133,7 +143,24 @@ pub struct SchemaArgs {
     #[arg(long)]
     pub encoding: Option<String>,
 
-    /// 出力 JSON を pretty-print する。既定は 1 行 compact 出力。
+    /// 出力 JSON を pretty-print する。`--format=text` 時は無視。既定は 1 行 compact 出力。
+    #[arg(long)]
+    pub pretty: bool,
+
+    /// 出力フォーマット。`json` は機械可読、`text` は人間可読の表形式。
+    /// 既定は後方互換のため `json`。
+    #[arg(long, value_enum, default_value_t = OutputFormatArg::Json)]
+    pub format: OutputFormatArg,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct DriversArgs {
+    /// 出力フォーマット。`text` は人間可読の一覧、`json` は
+    /// `[{ name, schemes, capabilities }]` 配列。既定は後方互換のため `text`。
+    #[arg(long, value_enum, default_value_t = OutputFormatArg::Text)]
+    pub format: OutputFormatArg,
+
+    /// `--format=json` 時に pretty-print する。既定は 1 行 compact。
     #[arg(long)]
     pub pretty: bool,
 }

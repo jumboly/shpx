@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### Added (v1.0 cycle 3)
+
+- **examples/*.sh ×6 + `examples/data/`**: SHP → GeoParquet (01) / SHP → PostGIS (02) / PostGIS → FGB (03) / `--reproject` (04) / `--on-loss=error|warn|skip` 比較 (05) / `--insert-mode=bulk` vs `batch` (06) の 1-shot シナリオを新設。test data は `cities.shp` (5 都市 / WGS84) / `cities-3857.shp` (Web Mercator 派生) / `lossy.csv` (DBF 10-byte 制限に引っ掛かる長い列名) を `examples/data/` にコミットし cold で `bash examples/01-*.sh` が走る。共通環境変数は `SHPX_BIN` (実行コマンド)、`OUT` (出力先 `/tmp/shpx-examples`)、`PG_URL` (PostGIS 接続)。再生成手順は `examples/data/REGENERATE.md`。
+- **README.md 5 分チュートリアル形式に再構成**: 「インストール → SHP → GeoParquet → PostGIS bulk load → reproject」の 4 ステップを冒頭に置き、各ステップから `examples/*.sh` への導線を張った。`examples` 章を新設し 6 本の表を掲載。「ライセンス」節を v1.0 cycle 1 で配置済みの `LICENSE-APACHE` / `LICENSE-MIT` / `NOTICE` に合わせて Apache-2.0 OR MIT に確定。`docs/ON_LOSS.md` / `docs/STREAMING.md` への設計ドキュメントリンクも追加。
+- **`shpx schema` / `shpx drivers` に `--format=text|json`**: `crates/shpx-core/src/capabilities.rs` の `Capabilities` / `StringEncoding` に `serde::Serialize` を生やし、`StringEncoding` は internally tagged 形式 (`{"kind":"fixed","value":"utf-8"}` / `{"kind":"configurable","value":[...]}`) でシリアライズする。`shpx drivers --format=json` は `[{ name, schemes, capabilities }]` 配列、`shpx schema --format=text` は driver 名 + `name / data_type / nullable / metadata` の表形式。後方互換のためデフォルトは据え置き (`schema=json` / `drivers=text`)、`schema --pretty` は `--format=json` と直交フラグとして残す。`crates/shpx-core/src/capabilities.rs::tests::serializes_to_stable_json_shape` で JSON 形状の互換契約を固定化 (フィールド名 / `kind` タグ / null 表現を変える PR では本テストの期待値を必ず更新する)。
+
 ## [0.8.0] - 2026-05-03
 
 v0.8 マイルストーン「Streaming Reader Parity」のリリース。reader 9 driver のうち Parquet 以外で残っていた eager-load (`Vec<Feature>` / `VecDeque<Row>` / `Vec<RecordBatch>` 等) を全廃し、`open()` 直後に全行をメモリへ載せる経路を撲滅した。10M 行クラスの入力でもピーク RSS が batch サイズ + 接続バッファに頭打ちになる構造を全 driver で揃え、v1.0 出荷時のメモリプロファイル一貫性を確保した。`LayerReader` trait シグネチャは v0.1 から不変のまま、内部実装のみを置き換える形での achievement。本リリースには 0.7.0 以降に積まれた v1.0 cycle 1〜2 (LICENSE / NOTICE / 進捗バー / `--quiet`) と v0.4 ベンチ完了確認も同梱する。
