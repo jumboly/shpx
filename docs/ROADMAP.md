@@ -116,13 +116,33 @@
 ## v0.5 — SpatiaLite
 
 **スコープ**:
-- `shpx-driver-spatialite`: `mod_spatialite` 動的ロード
-- SpatiaLite blob geometry エンコーダ/デコーダ
-- `SELECT InitSpatialMetadata()` 自動実行
+- `shpx-driver-spatialite`: `rusqlite` ベース + `mod_spatialite` 動的ロード
+- 自前 SpatiaLite blob (geometry binary) エンコーダ/デコーダ — `shpx-geom::spatialite_blob`
+- 接続後に `SELECT InitSpatialMetadata(1)` を idempotent 発行（FastInit、空 DB の seed 数秒を回避）
+- reader: `?table=` / `SHPX_SPATIALITE_TABLE` 解決、`AsBinary(geom)` で WKB 取得、SRID は `geometry_columns.srid` 参照
+- writer: 1 トランザクション + 行単位 prepared `INSERT ... GeomFromWKB(?, srid)`、`--create-table=if-not-exists|always|never`、`--create-index=auto|always|never` (Always で `SELECT CreateSpatialIndex(...)` の R*Tree)
+- 接続: `sqlite://path?table=...` / `*.sqlite` / `*.db` / `*.spatialite` ファイル拡張子
+- `bundled-spatialite` feature で配布バイナリでも mod_spatialite 同梱（cargo-dist 単一バイナリ向け）
 
 **完了基準**:
 - [ ] SpatiaLite ↔ GPKG / Shapefile の往復
-- [ ] 空間インデックス（R*Tree）のオプション作成
+- [ ] 空間インデックス（R*Tree）のオプション作成 (`--create-index=always` で `CreateSpatialIndex` 発行)
+
+**確定済み設計判断**:
+- **URI scheme は SpatiaLite が `sqlite` を専有**: `*.sqlite` / `*.db` / `*.spatialite` / `sqlite://...` はすべて SpatiaLite driver に解決する。GPKG は `*.gpkg` / `gpkg` scheme のみのまま。`?mod_spatialite=true` フラグ運用は採用しない（DESIGN.md L.149-160 表は v0.5 cycle 3 で訂正）。content-sniffing による自動振り分けは v1.0 以降の検討事項。
+- **`mod_spatialite` ロード経路の優先順**: (1) `cfg(feature = "bundled-spatialite")` 時は静的リンク版 `spatialite_init` を呼ぶ、(2) `SHPX_SPATIALITE_PATH` env でパス上書き、(3) OS 既定検索パス (`mod_spatialite`)。CI Linux は (3) で apt の `libsqlite3-mod-spatialite` を見る。
+- **`Capabilities::bulk_load = false`**: GPKG と同じく TX batch で十分。`open_bulk_write` は実装しない。`--insert-mode=auto` は自動的に batch に倒れる、`--insert-mode=bulk` 明示指定は invalid（PostGIS / SQL Server と同様の挙動）。
+- **`shpx-rdb-common` の使い分け**: `query_get` / `percent_decode` / `merge_crs` / `resolve_epsg_srid` / `apply_on_loss` / `validate_overwrite_compat` / `primitive` を再利用。SQLite に schema 概念がないため `split_qualified` / `resolve_table_name` は呼ばない。
+- **SpatiaLite blob の対応範囲**: v0.5 では XY のみ。Z/M / EMPTY / GeometryCollection は `Error::Geometry` で拒否（v1.0 以降で拡張）。MBR は WKB から走査して算出する。
+- **SRID 解決順序**: `--src-crs` > schema field metadata > `apply_on_loss` フォールバック (PostGIS / SQL Server と同型)。fallback は SRID 0 (SpatiaLite 慣習で unknown)。
+- **`spatial_ref_sys` への登録**: PostGIS と同パターンで `Crs.wkt` または `epsg_to_wkt1(code)` から組み立て、`INSERT OR IGNORE INTO spatial_ref_sys (...)` で best-effort 登録。
+- **`bundled-spatialite` の build 戦略**: libspatialite C ソースを vendor して `cc` で static link。GEOS は `geos-src` crate 経由、PROJ は workspace の `proj/bundled_proj` を流用。cycle 2 で詰まった場合は v0.6 に縮退して v0.5 はシステム libspatialite + CI apt のみで出荷する選択肢を残す。
+
+**サブ cycle 構成** (v0.3 / v0.4 と同じく cycle ごとに `/clear` して clean に再開する):
+
+- **cycle 1 — 基盤と最小往復**: workspace に `crates/shpx-driver-spatialite` 追加、`shpx-geom::spatialite_blob` モジュール (encode/decode + ユニットテスト)、`SpatialiteDriver` 雛形 (`supported_schemes = &["sqlite", "db", "spatialite"]`、`Capabilities { read, write, !bulk_load }`)、`conn.rs` で `load_extension` + `InitSpatialMetadata(1)`、reader (`AsBinary` + SRID 解決)、writer (`--overwrite` のみ、行単位 prepared INSERT)、`shpx-cli/src/registry.rs` 登録、`bundled-spatialite` feature の宣言のみ。`.github/workflows/ci.yml` (Linux) に `apt-get install libsqlite3-mod-spatialite` + env。env-gated 統合テスト 1-2 件 (`SHPX_TEST_SPATIALITE`)。
+- **cycle 2 — writer 拡張 + bundled-spatialite + R*Tree**: `--create-table` 3 種 (PostGIS と同形)、`--create-index` 3 種 (`Always` で `SELECT CreateSpatialIndex(?, ?)` の R*Tree、`Auto` は `create_table != Never` のときのみ生成)、SRID 解決順序の統一、`spatial_ref_sys` への best-effort INSERT、`--overwrite && create_table=Never` 整合性エラー。`bundled-spatialite` feature を `build.rs` + `cc` で実装、`shpx-cli/Cargo.toml` の features へ伝播。env-gated 統合テスト `tests/writer_options.rs` 7-9 件。CI に `bundled-spatialite` smoke job 追加。
+- **cycle 3 — docs + 完了基準 + 0.5.0 release**: `docs/SPATIALITE.md` 新設 (POSTGIS.md / SQLSERVER.md と同型構造)、`docs/DATA_TYPES.md` の SpatiaLite 列確定、`docs/DESIGN.md` L.149-160 訂正、`docs/CRS.md` / `docs/CONTRIBUTING.md` / `README.md` 更新、`CHANGELOG.md` v0.5.0 セクション、workspace `Cargo.toml` を `0.5.0` へ bump、release commit。完了基準テスト (SpatiaLite ↔ GPKG / SpatiaLite ↔ Shapefile の e2e 往復、CI Linux env-gated)。
 
 ---
 

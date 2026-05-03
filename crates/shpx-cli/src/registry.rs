@@ -18,6 +18,7 @@ use shpx_driver_gpkg as _;
 use shpx_driver_parquet as _;
 use shpx_driver_postgis as _;
 use shpx_driver_shp as _;
+use shpx_driver_spatialite as _;
 use shpx_driver_sqlserver as _;
 
 /// 全 Driver のキャッシュ。`OnceLock` で初回アクセス時に 1 度だけ集約する。
@@ -170,6 +171,34 @@ mod tests {
         let d = select_driver(&Uri::from_path("mssql://sa:pass@localhost/db?table=t"));
         assert!(d.is_some());
         assert_eq!(d.unwrap().name(), "sqlserver");
+    }
+
+    #[test]
+    fn select_driver_for_sqlite_url() {
+        let d = select_driver(&Uri::from_path("sqlite:///tmp/sample.sqlite?table=t"));
+        assert!(d.is_some());
+        assert_eq!(d.unwrap().name(), "spatialite");
+    }
+
+    #[test]
+    fn select_driver_for_sqlite_extension() {
+        let d = select_driver(&Uri::from_path("/tmp/sample.sqlite"));
+        assert!(d.is_some());
+        assert_eq!(d.unwrap().name(), "spatialite");
+    }
+
+    #[test]
+    fn select_driver_for_db_extension() {
+        let d = select_driver(&Uri::from_path("/tmp/sample.db"));
+        assert!(d.is_some());
+        assert_eq!(d.unwrap().name(), "spatialite");
+    }
+
+    #[test]
+    fn select_driver_for_spatialite_extension() {
+        let d = select_driver(&Uri::from_path("/tmp/sample.spatialite"));
+        assert!(d.is_some());
+        assert_eq!(d.unwrap().name(), "spatialite");
     }
 
     #[test]

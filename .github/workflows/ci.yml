@@ -80,6 +80,11 @@ jobs:
     env:
       SHPX_TEST_PG_URL: pg://shpx:shpx@localhost:5432/shpx_test
       SHPX_TEST_SQLSERVER_URL: mssql://sa:Shpx_test_pw1!@localhost:1433/shpx_test
+      # v0.5 cycle 1 から spatialite driver の integration テストを通す。
+      # `libsqlite3-mod-spatialite` を apt で入れて、`load_extension` で動的ロード
+      # できるようにする。env 未設定時は eprintln + return で skip する仕様。
+      SHPX_TEST_SPATIALITE: "1"
+      SHPX_SPATIALITE_PATH: /usr/lib/x86_64-linux-gnu/mod_spatialite
     strategy:
       fail-fast: false
       matrix:
@@ -91,7 +96,9 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y libproj-dev pkg-config
+      # `proj` (システム libproj、pkg-config) と `mod_spatialite` (rusqlite::load_extension で
+      # 動的ロード) の双方をインストール。test job 全体で共通利用する。
+      - run: sudo apt-get update && sudo apt-get install -y libproj-dev pkg-config libsqlite3-mod-spatialite
       # mssql service は起動時に shpx_test DB を作成しないため、ここで明示的に
       # CREATE DATABASE を発行する。`-C` で TLS 証明書検証を無効化（self-signed のため）。
       # `IF DB_ID(...) IS NULL` で冪等にしているので、テスト失敗 → 再実行でも壊れない。

@@ -41,6 +41,47 @@ where
     walk(g, &mut f)
 }
 
+/// [`for_each_coord_mut`] の immutable 版。
+///
+/// MBR 算出など、座標を読むだけの処理に使う。呼び出し順は同じく
+/// WKB シリアライズ順（ジオメトリ→リング→点の DFS）。
+pub fn for_each_coord<F>(g: &Geom, mut f: F)
+where
+    F: FnMut(f64, f64),
+{
+    walk_ref(g, &mut f);
+}
+
+fn walk_ref<F>(g: &Geom, f: &mut F)
+where
+    F: FnMut(f64, f64),
+{
+    match g {
+        Geom::Point(x, y) => f(*x, *y),
+        Geom::LineString(pts) | Geom::MultiPoint(pts) => {
+            for &(x, y) in pts {
+                f(x, y);
+            }
+        }
+        Geom::Polygon(rings) | Geom::MultiLineString(rings) => {
+            for r in rings {
+                for &(x, y) in r {
+                    f(x, y);
+                }
+            }
+        }
+        Geom::MultiPolygon(polys) => {
+            for poly in polys {
+                for r in poly {
+                    for &(x, y) in r {
+                        f(x, y);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn walk<F, E>(g: &mut Geom, f: &mut F) -> Result<(), E>
 where
     F: FnMut(&mut f64, &mut f64) -> Result<(), E>,
@@ -142,6 +183,17 @@ mod tests {
         let mut count = 0;
         for_each_coord_mut(&mut g, |_, _| count += 1);
         assert_eq!(count, 4 + 5 + 5);
+    }
+
+    #[test]
+    fn for_each_coord_immutable_visits_all_points() {
+        let g = Geom::MultiPolygon(vec![
+            vec![vec![(1.0, 0.0), (2.0, 0.0)]],
+            vec![vec![(3.0, 0.0)], vec![(4.0, 0.0)]],
+        ]);
+        let mut xs = Vec::new();
+        for_each_coord(&g, |x, _| xs.push(x));
+        assert_eq!(xs, vec![1.0, 2.0, 3.0, 4.0]);
     }
 
     #[test]

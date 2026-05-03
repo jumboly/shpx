@@ -1,0 +1,35 @@
+[package]
+name = "shpx-driver-spatialite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "shpx 用 SpatiaLite (sqlite://) ドライバ"
+
+[lints]
+workspace = true
+
+[features]
+# `bundled-spatialite` を有効化すると、配布バイナリ (cargo-dist) 用に
+# libspatialite を C ソースから static link する。実装は v0.5 cycle 2 で行う。
+# 現状 (cycle 1) は宣言のみで、有効化してもシステム libspatialite を見る挙動と同じ。
+bundled-spatialite = []
+
+[dependencies]
+shpx-core    = { path = "../shpx-core" }
+shpx-geom    = { path = "../shpx-geom" }
+arrow-array  = { workspace = true }
+arrow-schema = { workspace = true }
+chrono       = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+tracing      = { workspace = true }
+# `bundled` で SQLite をソースから同梱ビルドする (GPKG driver と同方針)。
+# `load_extension` で mod_spatialite を runtime ロードする。
+# `blob` / `chrono` は GPKG driver と同じく値 bind を simplify するため。
+rusqlite     = { workspace = true, features = ["bundled", "blob", "chrono", "load_extension"] }
+
+[dev-dependencies]
+tempfile           = { workspace = true }
+tracing-subscriber = { workspace = true }

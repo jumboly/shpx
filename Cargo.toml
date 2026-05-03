@@ -17,6 +17,7 @@ members = [
     "crates/shpx-driver-fgb",
     "crates/shpx-driver-postgis",
     "crates/shpx-driver-sqlserver",
+    "crates/shpx-driver-spatialite",
     "crates/shpx-cli",
 ]
 
