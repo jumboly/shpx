@@ -35,3 +35,7 @@ rusqlite     = { workspace = true, features = ["bundled", "blob", "chrono", "loa
 [dev-dependencies]
 tempfile           = { workspace = true }
 tracing-subscriber = { workspace = true }
+# 完了基準テスト (cross-driver e2e roundtrip) 用。SpatiaLite ↔ GPKG / Shapefile を
+# 直接呼び出して RecordBatch 比較するため、driver crate を dev-deps として参照する。
+shpx-driver-gpkg = { path = "../shpx-driver-gpkg" }
+shpx-driver-shp  = { path = "../shpx-driver-shp" }

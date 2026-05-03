@@ -4,42 +4,18 @@
 //! `SHPX_TEST_SPATIALITE=1` (+ 必要なら `SHPX_SPATIALITE_PATH` で .so/.dylib のパス) を
 //! セットして実行する。env 未設定時は skip。
 
-use std::collections::HashMap;
+mod common;
+
 use std::sync::Arc;
 
 use arrow_array::builder::BinaryBuilder;
 use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
-use arrow_schema::{DataType, Field, Schema};
+use arrow_schema::{DataType, Field};
+use common::{schema_with_geom, skip_if_not_enabled};
 use rusqlite::Connection;
-use shpx_core::{
-    schema::{GeometryMeta, GeometryType, GEOMETRY_META_KEY},
-    CreateIndex, CreateTable, Crs, Driver, Uri, WriteOpts,
-};
+use shpx_core::{schema::GeometryType, CreateIndex, CreateTable, Crs, Driver, Uri, WriteOpts};
 use shpx_driver_spatialite::SpatialiteDriver;
 use shpx_geom::wkb::{self, Geom};
-
-fn skip_if_not_enabled() -> bool {
-    match std::env::var("SHPX_TEST_SPATIALITE") {
-        Ok(v) if !v.is_empty() && v != "0" => false,
-        _ => {
-            eprintln!(
-                "SHPX_TEST_SPATIALITE not set; skipping (install mod_spatialite + set the env to run)"
-            );
-            true
-        }
-    }
-}
-
-fn schema_with_geom(extra: Vec<Field>, gt: GeometryType, crs: Option<Crs>) -> Arc<Schema> {
-    let mut fields = extra;
-    let meta = GeometryMeta::wkb(gt, crs);
-    let mut field = Field::new("geom", DataType::Binary, true);
-    let mut m = HashMap::new();
-    m.insert(GEOMETRY_META_KEY.to_string(), meta.to_json().unwrap());
-    field.set_metadata(m);
-    fields.push(field);
-    Arc::new(Schema::new(fields))
-}
 
 fn write_simple(
     path: &std::path::Path,
@@ -84,11 +60,9 @@ fn write_simple(
 
 fn count_rows(path: &std::path::Path, table: &str) -> i64 {
     let conn = Connection::open(path).unwrap();
-    conn.query_row(
-        &format!("SELECT COUNT(*) FROM \"{table}\""),
-        [],
-        |row| row.get::<_, i64>(0),
-    )
+    conn.query_row(&format!("SELECT COUNT(*) FROM \"{table}\""), [], |row| {
+        row.get::<_, i64>(0)
+    })
     .unwrap()
 }
 
@@ -249,12 +223,7 @@ fn create_table_never_appends_to_existing() {
         create_table: CreateTable::Never,
         ..Default::default()
     };
-    write_simple(
-        &path,
-        &[("k2", 2, Geom::Point(3.0, 4.0))],
-        &opts,
-        None,
-    );
+    write_simple(&path, &[("k2", 2, Geom::Point(3.0, 4.0))], &opts, None);
     assert_eq!(count_rows(&path, "a"), 2);
     let table_count_after: i64 = {
         let conn = Connection::open(&path).unwrap();
@@ -345,11 +314,6 @@ fn create_index_auto_creates_only_on_new_table() {
     // 2 回目: append（既存テーブル）では Auto は触らない（既存 R*Tree もそのまま）。
     // 既存 R*Tree がある状態で再度 CreateSpatialIndex を呼ぶと SpatiaLite はエラーを返すため、
     // Auto が「append 経路で発行しない」契約は finish() がエラーにならないことで担保される。
-    write_simple(
-        &path,
-        &[("k2", 2, Geom::Point(3.0, 4.0))],
-        &opts,
-        None,
-    );
+    write_simple(&path, &[("k2", 2, Geom::Point(3.0, 4.0))], &opts, None);
     assert!(rtree_shadow_exists(&path, "idx_a_geom"));
 }

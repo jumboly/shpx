@@ -56,10 +56,12 @@ shpx drivers
 - [docs/GPKG.md](docs/GPKG.md) — GeoPackage ドライバ仕様
 - [docs/FGB.md](docs/FGB.md) — FlatGeobuf ドライバ仕様
 - [docs/POSTGIS.md](docs/POSTGIS.md) — PostGIS ドライバ仕様
+- [docs/SQLSERVER.md](docs/SQLSERVER.md) — SQL Server ドライバ仕様
+- [docs/SPATIALITE.md](docs/SPATIALITE.md) — SpatiaLite ドライバ仕様
 
 ## ステータス
 
-v0.3.0 リリース済み（2026-04-25）。`shpx-driver-postgis` で `pg://` / `postgres://` / `postgresql://` URL に対応した PostGIS read/write を提供。`COPY BINARY` 自前エンコーダによる `BulkLoadWriter`、`--insert-mode=auto|bulk|batch` / `--where` / `--select` / `--query` / `--create-table` / `--create-index` の各 CLI フラグ、Decimal128(38, 10) / timestamptz / bytea / EWKB の bit-identical 往復、未登録 EPSG の `spatial_ref_sys` 自動 INSERT を含む。10M 行ベンチで `ogr2ogr` の約 2.2 倍の速度（`docs/POSTGIS.md` の Benchmark 節）。次マイルストーン v0.4 は SQL Server (`mssql://`) ドライバ。詳細は [docs/POSTGIS.md](docs/POSTGIS.md) と [docs/ROADMAP.md](docs/ROADMAP.md)、変更履歴は [CHANGELOG.md](CHANGELOG.md)。
+v0.5.0 リリース済み（2026-05-03）。`shpx-driver-spatialite` で SpatiaLite (`*.sqlite` / `*.db` / `*.spatialite` / `sqlite://`) read/write を提供。`mod_spatialite` 動的ロード + `InitSpatialMetadata(1)` の idempotent 発行、`AddGeometryColumn` 経由の `geometry_columns` 登録、`GeomFromWKB(?, srid)` での geometry I/O、`--create-table` 3 種、`--create-index=Always|Auto` での `SELECT CreateSpatialIndex(...)` R\*Tree 生成、未登録 EPSG の `spatial_ref_sys` への best-effort `INSERT OR IGNORE`、SpatiaLite ↔ GPKG / SpatiaLite ↔ Shapefile の cross-driver 往復テストまでを含む。`bundled-spatialite` feature の本実装は v0.6 へ繰り延べ（`build.rs` で libspatialite を `cc` で vendor して static link する予定）。次マイルストーンは v0.6 (bundled-spatialite + 配布バイナリ準備)。詳細は [docs/SPATIALITE.md](docs/SPATIALITE.md) と [docs/ROADMAP.md](docs/ROADMAP.md)、変更履歴は [CHANGELOG.md](CHANGELOG.md)。
 
 ## ライセンス
 

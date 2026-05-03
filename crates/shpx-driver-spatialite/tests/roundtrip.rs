@@ -4,7 +4,8 @@
 //! `SHPX_TEST_SPATIALITE=1` (+ 必要なら `SHPX_SPATIALITE_PATH` で .so/.dylib のパス) を
 //! セットして実行する。env 未設定時は skip。
 
-use std::collections::HashMap;
+mod common;
+
 use std::sync::Arc;
 
 use arrow_array::builder::BinaryBuilder;
@@ -12,41 +13,15 @@ use arrow_array::{
     cast::AsArray, Array, ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch,
     StringArray,
 };
-use arrow_schema::{DataType, Field, Schema};
-use shpx_core::{
-    schema::{GeometryMeta, GeometryType, GEOMETRY_META_KEY},
-    Crs, Driver, ReadOpts, Uri, WriteOpts,
-};
+use arrow_schema::{DataType, Field, SchemaRef};
+use common::{default_write_opts, schema_with_geom, skip_if_not_enabled};
+use shpx_core::{schema::GeometryType, Crs, Driver, ReadOpts, Uri, WriteOpts};
 use shpx_driver_spatialite::SpatialiteDriver;
 use shpx_geom::wkb::{self, Geom};
 
-/// `SHPX_TEST_SPATIALITE` env が未設定なら eprintln + return で skip。
-fn skip_if_not_enabled() -> bool {
-    match std::env::var("SHPX_TEST_SPATIALITE") {
-        Ok(v) if !v.is_empty() && v != "0" => false,
-        _ => {
-            eprintln!(
-                "SHPX_TEST_SPATIALITE not set; skipping (install mod_spatialite + set the env to run)"
-            );
-            true
-        }
-    }
-}
-
-fn schema_with_geom(extra: Vec<Field>, gt: GeometryType, crs: Option<Crs>) -> Arc<Schema> {
-    let mut fields = extra;
-    let meta = GeometryMeta::wkb(gt, crs);
-    let mut field = Field::new("geom", DataType::Binary, true);
-    let mut m = HashMap::new();
-    m.insert(GEOMETRY_META_KEY.to_string(), meta.to_json().unwrap());
-    field.set_metadata(m);
-    fields.push(field);
-    Arc::new(Schema::new(fields))
-}
-
 fn write_geoms(
     path: &std::path::Path,
-    schema: Arc<Schema>,
+    schema: SchemaRef,
     geoms: &[Option<Geom>],
     attrs: Vec<ArrayRef>,
     crs: Option<Crs>,
@@ -73,7 +48,7 @@ fn write_geoms(
 fn read_back(
     path: &std::path::Path,
     src_crs: Option<Crs>,
-) -> (Arc<Schema>, Option<Crs>, Vec<RecordBatch>) {
+) -> (SchemaRef, Option<Crs>, Vec<RecordBatch>) {
     let driver = SpatialiteDriver::new();
     let uri = Uri::from_path(path.to_string_lossy().to_string());
     let opts = ReadOpts {
@@ -85,13 +60,6 @@ fn read_back(
     let crs = r.crs().cloned();
     let batches: Vec<_> = r.batches().collect::<Result<_, _>>().unwrap();
     (schema, crs, batches)
-}
-
-fn default_write_opts() -> WriteOpts {
-    WriteOpts {
-        overwrite: true,
-        ..Default::default()
-    }
 }
 
 #[test]

@@ -4,9 +4,33 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-05-03
+
+v0.5 マイルストーン「SpatiaLite」のリリース。`shpx-driver-spatialite` で SpatiaLite (`*.sqlite` / `*.db` / `*.spatialite` / `sqlite://`) の read/write を提供する。`rusqlite` (`bundled` SQLite) + `mod_spatialite` 動的ロード、自前 `shpx-geom::spatialite_blob` コーデック、`AddGeometryColumn` 経由の `geometry_columns` 登録、`GeomFromWKB(?, srid)` でのジオメトリ I/O、`--create-table` 3 種、`--create-index` 3 種 (`Always` / `Auto` で `SELECT CreateSpatialIndex(...)` の R\*Tree)、未登録 EPSG の `spatial_ref_sys` への best-effort `INSERT OR IGNORE`、SpatiaLite ↔ GPKG / SpatiaLite ↔ Shapefile の cross-driver 往復テストまでを含む。`bundled-spatialite` feature 宣言は driver / CLI の Cargo.toml に残るが、本実装は v0.6 に繰り延べ（workspace に `build.rs` の足場が無く、libspatialite が GEOS / PROJ にも依存して vendor 範囲が cycle 1 つに収まらないため）。詳細は `docs/SPATIALITE.md`。
+
+### Added
+
+- **shpx-driver-spatialite (v0.5 cycle 1、基盤と最小往復)**: `crates/shpx-driver-spatialite` を新規追加。`SpatialiteDriver` は `supported_schemes = ["sqlite", "db", "spatialite"]` を宣言し、`Capabilities { read, write, !bulk_load, supports_blob, !supports_decimal, supports_timestamp_tz, string_encoding: Fixed("utf-8") }` を提供する。`conn.rs` で `rusqlite::Connection::open_with_flags` → `load_extension(<path>, Some("sqlite3_modspatialite_init"))` → `SELECT InitSpatialMetadata(1)` (FastInit) を idempotent に発行する流れを確立。reader は `geometry_columns` で geometry 列を解決し `AsBinary(<geom>)` で WKB を取り出す。writer は `--overwrite` のみ対応の最小版で、`AddGeometryColumn` で geometry 列を登録 + 1 トランザクション + 行単位 prepared `INSERT INTO ... GeomFromWKB(?, srid)` で投入する。SQLite の declared type ↔ Arrow `DataType` のマッピング (`type_map.rs`) は GPKG driver と同形だが UInt64 のみ `Error::Schema` で拒否（SQLite INTEGER の上限が i64 のため）。env-gated 統合テスト (`SHPX_TEST_SPATIALITE`) で Point / LineString / Polygon / MultiPoint / MultiLineString / MultiPolygon の geometry 往復、Boolean / Int64 / Float64 / Utf8 の属性往復を 1 件ずつ確認。
+- **shpx-geom (`spatialite_blob`)**: SpatiaLite blob (geometry binary) の自前 encode / decode を `spatialite_blob` モジュールに追加。XY のみ対応、Z / M / EMPTY / GeometryCollection は `Error::Geometry` で拒否。`encode` は LE 固定で MBR を WKB 走査から算出、`decode` は LE / BE 双方を読める。ユニットテスト 7 件 (roundtrip / MBR 値 / マーカー検証 / big-endian 互換) で I/O 整合性を担保。v0.5 では writer 経路は SpatiaLite 自身の `GeomFromWKB(?, srid)` に encode を委譲する方針 (自前 encode との実装ずれを回避) で、`spatialite_blob` モジュール自体は将来的な direct-bind 経路や v1.0 以降の Z/M 拡張のための基盤。
+- **shpx-driver-spatialite (v0.5 cycle 2a、writer 拡張 + R\*Tree)**: `--create-table=if-not-exists|always|never` を PostGIS と同形セマンティクスで 3 種フル対応 (`Always` は `--overwrite` 無しでも DROP→CREATE する契約、`DiscardGeometryColumn` で `geometry_columns` / R\*Tree からも紐付き行を削除してから DROP)。`--create-index=auto|always|never` を実装し、`Always` / `Auto` (新規 CREATE TABLE 経路) で `LayerWriter::finish()` の最後に `SELECT CreateSpatialIndex(<table>, <geom>)` を発行 (PostGIS の GIST index と同方針で、batch 投入完了後に index を組む方が速いため)。SRID 解決は `--src-crs` > schema field metadata > `apply_on_loss` フォールバック (SRID 0 = SpatiaLite 慣習で unknown) の順。`spatial_ref_sys` の未登録 SRID には `Crs.wkt` → `shpx_geom::epsg_to_wkt1(code)` (4326 / 3857 / 4269 / 6668 同梱) の順で `srtext` を解決し、`INSERT OR IGNORE` で best-effort 登録 (PostGIS と同パターン)。`--overwrite=true && --create-table=never` は `shpx_rdb_common::validate_overwrite_compat` で整合性エラー。env-gated 統合テスト 9 件を `tests/writer_options.rs` に追加 (3 種 × 3 種 + 整合性エラー)。
+- **shpx-driver-spatialite (v0.5 cycle 2b、bundled-spatialite を v0.6 へ繰り延べ + ROADMAP 訂正)**: `bundled-spatialite` feature の本実装 (libspatialite を C ソースから vendor して static link する build.rs) を v0.6 マイルストーンへ切り出し、v0.5 はシステム libspatialite (Linux: apt の `libsqlite3-mod-spatialite`、macOS: `brew install libspatialite`) 前提で出荷。理由は workspace に `build.rs` ファイルが一つも無く bundled C ビルドの足場がゼロであること、libspatialite が GEOS / PROJ にも依存して vendor 範囲が cycle 1 つに収まらないため。`bundled-spatialite` feature 宣言は `crates/shpx-driver-spatialite/Cargo.toml` と `crates/shpx-cli/Cargo.toml` に v0.6 予約として残し、有効化しても no-op (システム libspatialite を `load_extension` で見る挙動と同じ)。`docs/ROADMAP.md` の v0.5 / v0.6 セクションを訂正し、URI scheme は v0.5 で `sqlite` を SpatiaLite が専有することを確定 (`?mod_spatialite=true` フラグ運用は採用しない、content-sniffing は v1.0 以降)。
+- **shpx-driver-spatialite (v0.5 cycle 3、cross-driver e2e + docs + 0.5.0 release)**: 完了基準テスト `tests/cross_driver_roundtrip.rs` を追加し、SpatiaLite ↔ GPKG (Point / LineString / Polygon / MultiPolygon) と SpatiaLite ↔ Shapefile (Point / Utf8 / Float64 / Boolean、SHP の DBF Numeric は Float64 へ降格するため整数列は scope 外) の往復が e2e で機能することを確認。`docs/SPATIALITE.md` を新設 (POSTGIS.md / SQLSERVER.md と同形構造)、`docs/DATA_TYPES.md` の `SQLite/GPKG` 列を `GPKG` / `SpatiaLite` の 2 列に分割、`docs/DESIGN.md` の URI scheme 表を訂正、`docs/CRS.md` / `docs/CONTRIBUTING.md` / `README.md` を更新。
+
 ### Internal
 
-- **shpx-rdb-common 新設**: PostGIS / SQL Server の 2 driver で `options.rs` / `util.rs` / `writer.rs` に重複していた純粋ヘルパー（`percent_decode` / `query_pairs` / `split_qualified` / `resolve_table_name` / `validate_overwrite_compat` / `apply_on_loss` / `merge_crs` / `resolve_epsg_srid` / `driver_err` / `driver_msg` / `primitive`）を共通 crate `crates/shpx-rdb-common/` に抽出した。各 driver の API 公開面・エラーメッセージ・tracing target は変更なしで、CLI ユーザー視点の挙動には影響しない。次の RDB driver (MySQL 等) を追加する際の boilerplate 削減と、既存 2 driver の挙動を 1 箇所で揃える目的。`tracing::warn!(target: ...)` の target は const 要求のため、driver 側に `tracing::warn!` 呼び出しごとクロージャで残し、`shpx_rdb_common::apply_on_loss(kind, field, on_loss, warn_fn)` がそれを警告経路でだけ呼び出す設計とした。詳細は `docs/CONTRIBUTING.md` の「RDB driver を追加する場合」節と `docs/DESIGN.md` のリポジトリ構成図を参照。
+- **shpx-rdb-common 新設**: PostGIS / SQL Server の 2 driver で `options.rs` / `util.rs` / `writer.rs` に重複していた純粋ヘルパー（`percent_decode` / `query_pairs` / `split_qualified` / `resolve_table_name` / `validate_overwrite_compat` / `apply_on_loss` / `merge_crs` / `resolve_epsg_srid` / `driver_err` / `driver_msg` / `primitive`）を共通 crate `crates/shpx-rdb-common/` に抽出した。各 driver の API 公開面・エラーメッセージ・tracing target は変更なしで、CLI ユーザー視点の挙動には影響しない。次の RDB driver (MySQL 等) を追加する際の boilerplate 削減と、既存 2 driver の挙動を 1 箇所で揃える目的。`tracing::warn!(target: ...)` の target は const 要求のため、driver 側に `tracing::warn!` 呼び出しごとクロージャで残し、`shpx_rdb_common::apply_on_loss(kind, field, on_loss, warn_fn)` がそれを警告経路でだけ呼び出す設計とした。SpatiaLite driver もこの crate を再利用する (SQLite に schema 概念が無いため `split_qualified` / `resolve_table_name` は呼ばない点が差分)。詳細は `docs/CONTRIBUTING.md` の「RDB driver を追加する場合」節と `docs/DESIGN.md` のリポジトリ構成図を参照。
+
+### Build
+
+- workspace MSRV は 1.85 据え置き。新規依存はなし (`rusqlite` の `bundled` / `blob` / `chrono` / `load_extension` features を SpatiaLite driver で利用するが、いずれも GPKG driver で既に有効化済み)。
+- CI (`.github/workflows/ci.yml`): test job (Linux) に `apt-get install -y libsqlite3-mod-spatialite` step を追加し、`SHPX_TEST_SPATIALITE=1` を環境変数で渡す。`crates/shpx-driver-spatialite/tests/{roundtrip,writer_options,cross_driver_roundtrip}.rs` は env 未設定なら eprintln + return で skip するため、SpatiaLite extension が無いローカル環境でも `cargo test --workspace` は緑のまま。
+- macOS ローカル開発では `brew install libspatialite` 後に `SHPX_SPATIALITE_PATH=/opt/homebrew/lib/mod_spatialite.dylib` を立てる必要がある (Homebrew は標準のライブラリ検索パスに `mod_spatialite.dylib` を配置しないため)。
+
+### Known Issues
+
+- **`bundled-spatialite` は v0.6 で本実装**: 現状の feature 宣言は no-op で、有効化してもシステム libspatialite を `load_extension` で見る挙動と同じ。配布バイナリ向けの static link は v0.6 の `build.rs` 整備で対応する。それまでは `cargo install shpx --features bundled-spatialite` を実行しても extension のロードはランタイム経路を辿る。
+- **SpatiaLite blob の Z / M / EMPTY / GeometryCollection 非対応**: v0.5 は XY のみ。`shpx-geom::wkb` / `shpx-geom::spatialite_blob` 双方の制限であり、PostGIS / SQL Server / GPKG とも同じ制限を共有する (v1.0 以降で拡張予定)。
+- **reader filtering (`--where` / `--select` / `--query`) 未対応**: PostGIS の cycle 3a と同様の機能は v0.5+ の Future work。
 
 ## [0.4.0] - 2026-05-03
 
@@ -110,7 +134,8 @@ v0.1 マイルストーン「コア骨格 / SHP ↔ GeoParquet PoC」のリリ�
 - PostGIS / SQL Server / SpatiaLite / GeoPackage / GeoJSON / FlatGeobuf / CSV は後続マイルストーン (v0.2–v0.5) で対応する。
 - ライセンスは v1.0 までに最終決定する（MIT / Apache-2.0 dual を想定）。
 
-[Unreleased]: https://github.com/jumboly/shpx/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/jumboly/shpx/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jumboly/shpx/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jumboly/shpx/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jumboly/shpx/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jumboly/shpx/compare/v0.1.0...v0.2.0

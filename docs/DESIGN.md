@@ -149,7 +149,7 @@ shpx convert roads.shp roads.geojson        # 通常 GeoJSON FeatureCollection
 | 拡張子/スキーム | Driver | 備考 |
 |---|---|---|
 | `.shp` | shapefile | `.shx`/`.dbf`/`.prj`/`.cpg` セット |
-| `.gpkg`, `sqlite://...?table=...` (gpkg_contents あり) | gpkg | |
+| `.gpkg`, `gpkg://` | gpkg | GPKG / SpatiaLite は URI scheme で完全に分離（同一 SQLite ファイルでも内容で自動振り分けはしない） |
 | `.parquet` | parquet | GeoParquet 準拠 |
 | `.fgb` | flatgeobuf | |
 | `.geojson` | geojson | FeatureCollection |
@@ -157,7 +157,7 @@ shpx convert roads.shp roads.geojson        # 通常 GeoJSON FeatureCollection
 | `.csv`, `.tsv` | csv | WKT 列名は `--geom-col` で指定 |
 | `pg://`, `postgres://`, `postgresql://` | postgis | |
 | `mssql://`, `sqlserver://` | sqlserver | |
-| `sqlite://...?mod_spatialite=true` | spatialite | |
+| `.sqlite`, `.db`, `.spatialite`, `sqlite://`, `db://`, `spatialite://` | spatialite | v0.5 で `sqlite` scheme を SpatiaLite が専有。`?mod_spatialite=true` フラグ運用は採用しない。content-sniffing による自動振り分けは v1.0 以降の検討事項 |
 
 ## プラグイン機構
 

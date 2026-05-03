@@ -130,10 +130,10 @@ cargo build --release
 
 ## RDB driver を追加する場合
 
-PostGIS / SQL Server の 2 driver で重複していたヘルパーは `shpx-rdb-common` crate
+PostGIS / SQL Server / SpatiaLite の 3 driver で重複していたヘルパーは `shpx-rdb-common` crate
 に集約してある。新しい RDB driver (例: MySQL) を追加するときは `shpx-driver-postgis` /
-`shpx-driver-sqlserver` の `options.rs` / `util.rs` / `writer.rs` を参考にしつつ、
-以下を `shpx-rdb-common` から再利用する:
+`shpx-driver-sqlserver` / `shpx-driver-spatialite` の `options.rs` / `util.rs` /
+`writer.rs` を参考にしつつ、以下を `shpx-rdb-common` から再利用する:
 
 | 機能 | API |
 |---|---|
@@ -150,6 +150,13 @@ PostGIS / SQL Server の 2 driver で重複していたヘルパーは `shpx-rdb
 driver 固有のまま残すもの: SQL 識別子クオート (`quote_ident`)、文字列リテラル
 (`quote_literal`)、catalog クエリ (`describe_columns` 相当)、`build_create_table_sql` /
 `build_insert_sql`、tracing target、ジオメトリ型判定 (`is_geometry_typname` 相当)。
+
+ファイルベースの SQLite driver (GPKG / SpatiaLite) を新規に追加する場合の差分:
+
+- SQLite には schema 概念が無いため `split_qualified` / `resolve_table_name` (schema 修飾の解決) は呼ばない。テーブル名は単一識別子として扱う
+- 接続先はネットワーク URL ではなくファイルパスのため、`?table=` のクエリ部分を URI から切り出す `strip_to_filepath` 相当のヘルパーが必要 (PostGIS / SQL Server には不要)
+- `validate_overwrite_compat` / `apply_on_loss` / `merge_crs` / `resolve_epsg_srid` / `primitive` は他 RDB driver と同じく再利用する
+- `inventory::submit!` で登録する `supported_schemes` は複数挙げてよい (例: SpatiaLite は `["sqlite", "db", "spatialite"]`)。`*.gpkg` 等の他 driver と排他になる文字列は重ねない
 
 `apply_on_loss` の `warn_fn` には driver 固有 tracing target を含めたクロージャを渡す:
 

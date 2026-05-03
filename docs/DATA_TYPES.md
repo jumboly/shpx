@@ -4,23 +4,25 @@ shpx の中間表現は Apache Arrow。文字列は UTF-8 を中間表現とし�
 
 ## 全体マッピング表
 
-| Arrow 内部 | PostGIS | SQL Server | SQLite/GPKG | Parquet | FlatGeobuf | GeoJSON(L) | CSV | SHP/DBF |
-|---|---|---|---|---|---|---|---|---|
-| `Boolean` | `boolean` | `bit` | `INTEGER` (0/1) | BOOLEAN | Bool | bool | bool | `L` |
-| `Int8` / `Int16` / `Int32` | `smallint`/`integer` | `smallint`/`int` | `INTEGER` | INT8/16/32 | Byte/Short/Int | number | int | `N`（桁自動） |
-| `Int64` | `bigint` | `bigint` | `INTEGER` | INT64 | Long | number | int | `N` (>18桁警告) |
-| `Float32` / `Float64` | `real` / `double precision` | `real` / `float` | `REAL` | FLOAT/DOUBLE | Float/Double | number | float | `F` |
-| `Decimal128(p,s)` | `numeric(p,s)` | `decimal(p,s)` | `TEXT` 保全 | DECIMAL(p,s) | なし→Double / String | string | string | `N` (`p>18` で警告/エラー) |
-| `Decimal256(p,s)` | `numeric(p,s)` | `numeric(38,s)` 上限注意 | `TEXT` 保全 | DECIMAL(p,s) | なし→String | string | string | `N` (損失リスク大) |
-| `Date32` | `date` | `date` | `TEXT` ISO | DATE | なし→String | string ISO | ISO | `D` (YYYYMMDD) |
-| `Time64(µs)` | `time` | `time` | `TEXT` ISO | TIME(µs) | なし→String | string | ISO | 非対応→error |
-| `Timestamp(µs, None)` | `timestamp` | `datetime2` | `TEXT` ISO | TIMESTAMP(µs) | なし→String | string ISO | ISO | 非対応→error |
-| `Timestamp(µs, UTC)` | `timestamptz` | `datetimeoffset` | `TEXT` ISO8601 +Z | TIMESTAMP(µs, UTC) | なし→String | string ISO+Z | ISO+Z | 非対応→error |
-| `Utf8` / `LargeUtf8` | `text` | `nvarchar(max)` | `TEXT` | STRING | String | string | quoted | `C` (cpg) |
-| `Binary` / `LargeBinary` | `bytea` | `varbinary(max)` | `BLOB` | BINARY | なし→String(b64) | 非対応→error | 非対応→error | 非対応→error |
-| `List<T>` | `T[]` | 非対応→JSON 文字列 or error | `TEXT` JSON | LIST<T> | なし→String JSON | array | JSON文字列 | 非対応→error |
-| `Struct<...>` | `jsonb` | `nvarchar(max)` JSON | `TEXT` JSON | GROUP | なし→String JSON | object | JSON文字列 | 非対応→error |
-| `Geometry (Binary + meta)` | `geometry(...,srid)` / `geography(...,srid)` | `geometry` / `geography` | GPKG binary / SpatiaLite blob | WKB (GeoParquet) | FlatGeobuf geom | GeoJSON geometry | WKT列 | SHP shape record |
+| Arrow 内部 | PostGIS | SQL Server | GPKG | SpatiaLite | Parquet | FlatGeobuf | GeoJSON(L) | CSV | SHP/DBF |
+|---|---|---|---|---|---|---|---|---|---|
+| `Boolean` | `boolean` | `bit` | `BOOLEAN` (0/1) | `BOOLEAN` (0/1) | BOOLEAN | Bool | bool | bool | `L` |
+| `Int8` / `Int16` / `Int32` | `smallint`/`integer` | `smallint`/`int` | `INTEGER` | `TINYINT`/`SMALLINT`/`MEDIUMINT` | INT8/16/32 | Byte/Short/Int | number | int | `N`（桁自動） |
+| `Int64` | `bigint` | `bigint` | `INTEGER` | `INTEGER` | INT64 | Long | number | int | `N` (>18桁警告) |
+| `Float32` / `Float64` | `real` / `double precision` | `real` / `float` | `REAL` | `FLOAT` / `DOUBLE` | FLOAT/DOUBLE | Float/Double | number | float | `F` |
+| `Decimal128(p,s)` | `numeric(p,s)` | `decimal(p,s)` | `TEXT` 保全 | `TEXT` 降格（無損失なし） | DECIMAL(p,s) | なし→Double / String | string | string | `N` (`p>18` で警告/エラー) |
+| `Decimal256(p,s)` | `numeric(p,s)` | `numeric(38,s)` 上限注意 | `TEXT` 保全 | `TEXT` 降格 | DECIMAL(p,s) | なし→String | string | string | `N` (損失リスク大) |
+| `Date32` | `date` | `date` | `TEXT` ISO | `DATE` (ISO8601 文字列) | DATE | なし→String | string ISO | ISO | `D` (YYYYMMDD) |
+| `Time64(µs)` | `time` | `time` | `TEXT` ISO | `TEXT` ISO | TIME(µs) | なし→String | string | ISO | 非対応→error |
+| `Timestamp(µs, None)` | `timestamp` | `datetime2` | `TEXT` ISO | `DATETIME` (ISO8601 文字列) | TIMESTAMP(µs) | なし→String | string ISO | ISO | 非対応→error |
+| `Timestamp(µs, UTC)` | `timestamptz` | `datetimeoffset` | `TEXT` ISO8601 +Z | `DATETIME` (ISO8601 +Z) | TIMESTAMP(µs, UTC) | なし→String | string ISO+Z | ISO+Z | 非対応→error |
+| `Utf8` / `LargeUtf8` | `text` | `nvarchar(max)` | `TEXT` | `TEXT` | STRING | String | string | quoted | `C` (cpg) |
+| `Binary` / `LargeBinary` | `bytea` | `varbinary(max)` | `BLOB` | `BLOB` | BINARY | なし→String(b64) | 非対応→error | 非対応→error | 非対応→error |
+| `List<T>` | `T[]` | 非対応→JSON 文字列 or error | `TEXT` JSON | `TEXT` JSON | LIST<T> | なし→String JSON | array | JSON文字列 | 非対応→error |
+| `Struct<...>` | `jsonb` | `nvarchar(max)` JSON | `TEXT` JSON | `TEXT` JSON | GROUP | なし→String JSON | object | JSON文字列 | 非対応→error |
+| `Geometry (Binary + meta)` | `geometry(...,srid)` / `geography(...,srid)` | `geometry` / `geography` | `BLOB` (GPKG binary header + WKB) | `BLOB` (SpatiaLite blob、XY のみ) | WKB (GeoParquet) | FlatGeobuf geom | GeoJSON geometry | WKT列 | SHP shape record |
+
+GPKG / SpatiaLite はいずれも SQLite 上に乗るが、メタテーブル (`gpkg_*` vs `geometry_columns` / `spatial_ref_sys`) と geometry blob format が異なるため、shpx では URI scheme で完全に分離する（`*.gpkg` → GPKG driver、`*.sqlite` / `*.db` / `*.spatialite` / `sqlite://` → SpatiaLite driver）。
 
 ## 属性順序保存
 

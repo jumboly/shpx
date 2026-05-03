@@ -292,11 +292,27 @@ fn apply_create_table_strategy(
         (CreateTable::Never | CreateTable::IfNotExists, true) => Ok(false),
         (CreateTable::Always, true) => {
             drop_existing_geo_table(conn, table)?;
-            create_table_with_geom(conn, schema, attr_indices, table, geom_column, geom_type, srid)?;
+            create_table_with_geom(
+                conn,
+                schema,
+                attr_indices,
+                table,
+                geom_column,
+                geom_type,
+                srid,
+            )?;
             Ok(true)
         }
         (CreateTable::IfNotExists | CreateTable::Always, false) => {
-            create_table_with_geom(conn, schema, attr_indices, table, geom_column, geom_type, srid)?;
+            create_table_with_geom(
+                conn,
+                schema,
+                attr_indices,
+                table,
+                geom_column,
+                geom_type,
+                srid,
+            )?;
             Ok(true)
         }
     }
@@ -341,11 +357,8 @@ fn drop_existing_geo_table(conn: &Connection, table: &str) -> Result<()> {
             |_| Ok(()),
         );
     }
-    conn.execute(
-        &format!("DROP TABLE IF EXISTS {}", quote_ident(table)),
-        [],
-    )
-    .map_err(|e| driver_err(&e))?;
+    conn.execute(&format!("DROP TABLE IF EXISTS {}", quote_ident(table)), [])
+        .map_err(|e| driver_err(&e))?;
     Ok(())
 }
 

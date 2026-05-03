@@ -37,9 +37,9 @@ pub struct Crs {
 | **GeoParquet** | PROJJSON（fallback: WKT2） | `geo` metadata の `columns.<geom>.crs` に格納 |
 | **GeoPackage** | WKT1 + WKT2 | `gpkg_spatial_ref_sys` の `definition` (WKT1) + `definition_12_063` (WKT2) |
 | **Shapefile `.prj`** | WKT1 | 互換性優先。PROJ で WKT2 → WKT1 変換 |
-| **PostGIS** | SRID（EPSG 整数） | 未登録 EPSG なら `spatial_ref_sys` へ自動 INSERT を試行（`--on-loss` 設定に従う） |
+| **PostGIS** | SRID（EPSG 整数） | 未登録 EPSG なら `spatial_ref_sys` へ自動 INSERT を試行（`Crs.wkt` → `epsg_to_wkt1(code)` の順、ベストエフォート） |
 | **SQL Server** | SRID（EPSG 整数） | `geometry::STGeomFromWKB(@wkb, @srid)` で投入 |
-| **SpatiaLite** | WKT1 + proj-string | `spatial_ref_sys` テーブルに両方格納（SpatiaLite 慣習） |
+| **SpatiaLite** | SRID（EPSG 整数）+ WKT1 | `geometry_columns.srid` を読み出し / 書き出し時の主索引とし、未登録 EPSG は `spatial_ref_sys` に `INSERT OR IGNORE` で best-effort 登録（PostGIS と同パターン、`Crs.wkt` → `epsg_to_wkt1(code)` の順で `srtext` を解決） |
 | **FlatGeobuf** | WKT2（header の `crs.wkt`） + EPSG code（`crs.code`） | 仕様で両方サポート |
 | **GeoJSON / GeoJSONL** | （RFC 7946 準拠なら出力なし、WGS84 強制 reproject） | `--geojson-crs-extension` 指定時のみ非標準 `crs` メンバを書き出し |
 | **CSV** | サイドカー `.prj` ファイル（WKT1）または `--crs` で明示 | CSV 自体には CRS 情報を持たない |
