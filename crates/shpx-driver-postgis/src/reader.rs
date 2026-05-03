@@ -1,21 +1,22 @@
 //! PostGIS の `LayerReader` 実装。
 //!
-//! v0.8 cycle 4 で eager-load (`Vec<RecordBatch>`) を撤廃し、background OS thread +
-//! `std::sync::mpsc::sync_channel(2)` で `tokio_postgres::RowStream` を逐次消費する
-//! 真のストリーミングに置き換えた。
+//! ストリーミング戦略: background OS thread + `std::sync::mpsc::sync_channel(2)` で
+//! `tokio_postgres::RowStream` を逐次消費する async-to-sync mpsc bridge。
 //!
-//! - probe 系 (geometry_columns view、ST_SRID/ST_GeometryType の 1 行 LIMIT) は従来通り
-//!   `conn::query_opt` を使い、`open()` 内で同期的に解決する。
+//! - probe 系 (geometry_columns view、ST_SRID/ST_GeometryType の 1 行 LIMIT) は
+//!   `conn::query_opt` を使って `open()` 内で同期的に解決する。
 //! - 本番 SELECT は **新しい client を 1 本別途 connect** して background thread に move し、
 //!   `query_raw` で得た `RowStream` を `try_next()` ループで pull、`READ_BATCH_SIZE`
-//!   行ごとに `RecordBatch` 化して channel へ送る。channel 容量 2 で receiver が drop
-//!   されると next `tx.send` が Err になり worker が自然終了する。
+//!   行ごとに `RecordBatch` 化して channel へ送る。reader 用 client を別建てるのは、
+//!   probe client と worker thread の寿命を切り離して所有関係を単純化するため。
+//!   channel 容量 2 で receiver が drop されると次 `tx.send` が Err になり worker が
+//!   自然終了する (`tests/reader_cancel.rs` で検証)。
 //!
 //! geometry 列は `ST_AsEWKB(<col>)` で取得し、`shpx_geom::ewkb::strip_srid` で
 //! 標準 WKB と SRID に分離する。SRID は `geometry_columns` view → 先頭 non-NULL 行の
 //! `ST_SRID()` の順に解決して `Crs` に反映する。
 //!
-//! cycle 3a 以降は 2 つのモードを持つ:
+//! 2 つの読み出しモードを持つ:
 //! - **table モード** (`--query` 未指定): `pg_attribute` を引いて列メタを取り、
 //!   `--where` / `--select` を SQL に埋め込む。geometry 列は必須。
 //! - **query モード** (`--query 'SELECT ...'`): ユーザ SQL を `LIMIT 0` でサブクエリ化

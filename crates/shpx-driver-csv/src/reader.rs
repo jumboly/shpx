@@ -4,14 +4,11 @@
 //! geometry 列は WKT を `shpx-geom::wkt::decode` でパースし、`shpx-geom::wkb::encode`
 //! で WKB に詰め直して `Binary` 列に格納する。
 //!
-//! # v0.8 cycle 1 — ストリーミング化
+//! # ストリーミング戦略
 //!
-//! eager-load (`body: Option<String>` で全行を文字列に展開) を廃止し、
-//! `csv::Reader<Box<dyn Read + Send>>` を field に保持して逐次読みに置き換えた。
-//! 巨大 CSV (10M 行) でも reader 開時のピーク RSS が batch サイズで頭打ちになる。
-//!
+//! `csv::Reader<Box<dyn Read + Send>>` を struct field に保持して逐次読みする。
 //! geometry 型 sniff (最初の non-empty WKT 1 件から判定) はファイルを **2 回開く**
-//! 2-pass 方式で実装する。1 pass 目で header + 最初の non-empty geometry セルを取り、
+//! 2-pass 方式で行う。1 pass 目で header + 最初の non-empty geometry セルを取り、
 //! 2 pass 目で本番の streaming csv::Reader を構築する。CSV は通常そこまで巨大ではなく、
 //! 2 度 open する I/O オーバーヘッドは streaming 化の利点 (一定 RSS) に対して許容範囲。
 //!

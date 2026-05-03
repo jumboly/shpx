@@ -1,15 +1,13 @@
 //! SQL Server の `LayerReader` 実装。
 //!
-//! v0.8 cycle 5 で eager-load (`Vec<RecordBatch>`) を撤廃し、PostGIS と同じ
-//! background OS thread + `std::sync::mpsc::sync_channel(2)` パターンで
-//! `tiberius::QueryStream` を逐次消費する真のストリーミングに置き換えた。
-//!
-//! 引き続き v0.4 の制約上 table モード固定 (`--where` / `--select` / `--query` は
-//! 将来拡張)。
+//! ストリーミング戦略: PostGIS と同じ background OS thread +
+//! `std::sync::mpsc::sync_channel(2)` パターンで `tiberius::QueryStream` を逐次消費
+//! する async-to-sync mpsc bridge。table モード固定 (`--where` / `--select` /
+//! `--query` は将来拡張)。
 //!
 //! geometry 列は `[col].STAsBinary() AS [col]` で OGC 標準 WKB を取得し、`STSrid` を
 //! 併走列として取り出す。SRID は probe `SELECT TOP 1 ... STSrid, STGeometryType()` で
-//! 解決する (cycle 5 で従来の SELECT 結果先頭行 fallback を削除し、probe 一本に集約)。
+//! 解決する。probe で取れない (テーブル空) 場合は crs = None で確定。
 
 use std::collections::HashMap;
 use std::sync::mpsc::{sync_channel, Receiver};

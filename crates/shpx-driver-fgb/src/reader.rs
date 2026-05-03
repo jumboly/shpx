@@ -4,10 +4,9 @@
 //! - 各 feature の geometry は geozero `WkbWriter` で WKB バイト列に変換
 //! - 属性は `PropertyProcessor` で 1 列ずつ受け取り、Arrow `ArrayBuilder` に蓄積
 //!
-//! v0.8 cycle 1 で eager-load (`VecDeque<Row>`) をやめ、`FeatureIter<BufReader<File>,
-//! NotSeekable>` を field に保持する真のストリーミング化を行った。`FallibleStreamingIterator`
-//! の特性上、`feature_iter.next()?` は 1 feature ずつ進むので READ_BATCH_SIZE 件回せば
-//! 1 batch 完成。
+//! ストリーミング戦略: `FeatureIter<BufReader<File>, NotSeekable>` を struct field に
+//! 保持し、`FallibleStreamingIterator::next()` を `READ_BATCH_SIZE` 回呼んで 1 batch を
+//! 組む。`FeatureIter` は file reader を所有するため self-referential を回避できる。
 //!
 //! DateTime → Date32 の refine 推定は streaming と相性が悪い (全行を見ないと型が確定
 //! しない) ため、**最初の SAMPLE_LIMIT 件 (= 1 batch ぶん) を open() で先読みして

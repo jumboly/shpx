@@ -14,8 +14,8 @@ workspace = true
 shpx-core    = { path = "../shpx-core" }
 arrow-array  = { workspace = true }
 tracing      = { workspace = true }
-# v0.8 cycle 2 で SQLite 系 driver (GPKG / SpatiaLite) の rowid keyset pagination
-# iterator を提供するため。`bundled` を有効化しないと shpx-rdb-common 単体で
-# `cargo test -p shpx-rdb-common` が libsqlite3 不在環境で失敗するため bundled に倒す
+# SQLite 系 driver (GPKG / SpatiaLite) と共有する rowid keyset pagination iterator
+# (`streaming.rs::KeysetRowsIter`) のため。`bundled` を有効化しないと
+# `cargo test -p shpx-rdb-common` 単体実行が libsqlite3 不在環境で失敗する
 # (driver crate も同 feature を使うため feature unification で重複ビルドにならない)。
 rusqlite     = { workspace = true, features = ["bundled"] }

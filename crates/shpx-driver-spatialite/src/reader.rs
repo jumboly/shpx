@@ -1,7 +1,7 @@
 //! SpatiaLite の `LayerReader` 実装。
 //!
-//! v0.8 cycle 2 で eager-load (`Vec<Row>`) をやめ、`shpx_rdb_common::streaming::{KeysetRowsIter,
-//! OffsetRowsIter}` 経由の真のストリーミング読みに置き換えた。
+//! ストリーミング戦略: `shpx_rdb_common::streaming::{KeysetRowsIter, OffsetRowsIter}`
+//! 経由の真のストリーミング読みで、モードによって 2 種類の iterator を使い分ける。
 //!
 //! - **table モード** (`?table=...` / `--where` / `--select`): rowid keyset pagination
 //!   (`SELECT ..., rowid FROM <table> WHERE rowid > ? ORDER BY rowid LIMIT ?`)。

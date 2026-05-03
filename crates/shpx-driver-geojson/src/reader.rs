@@ -1,13 +1,13 @@
 //! GeoJSON / GeoJSONL を Arrow `RecordBatch` ストリームとして読み出す。
 //!
-//! v0.8 cycle 3 で eager-load (`Vec<Feature>`) を撤廃した。`open()` ではファイル head を
-//! 軽量プローブして `crs` メンバ抽出と先頭 N=1024 feature の型推論サンプリングを行い、
-//! その後ファイルを開き直して features 配列を真にストリーミングで列挙する。
+//! `open()` は 3-pass 構成: (1) ファイル head を軽量プローブして `crs` メンバを抽出、
+//! (2) 先頭 N=1024 feature をサンプリングして型推論、(3) ファイルを開き直して
+//! features 配列を真にストリーミングで列挙する。
 //!
-//! - FeatureCollection: `geojson::FeatureReader::from_reader(R).features()` を使う
-//!   (`crates/shpx-driver-geojson/src/stream.rs::open_feature_collection`)。
+//! - FeatureCollection: `crates/shpx-driver-geojson/src/stream.rs::FcFeatureStream`
+//!   (自前 JSON state machine、`[` までシーク → `,` 区切りで 1 feature ずつ pull)。
 //! - NDJSON: `BufRead::lines()` ベースで空行 / `#` コメント行をスキップしつつ
-//!   1 行 1 Feature をパース (`stream.rs::open_ndjson`)。
+//!   1 行 1 Feature をパース (`stream.rs::NdjsonStream`)。
 //!
 //! 属性 (properties) の Arrow 型はサンプル N 件だけスニフして決める。ファイルがそれを
 //! 超える行を含む場合、本番ストリームで型不一致が見つかったら以下のように振る:
