@@ -612,6 +612,8 @@ fn parse_timestamp_micros(s: &str, field: &str) -> Result<i64> {
     // - "YYYY-MM-DDTHH:MM:SSZ"
     // - "YYYY-MM-DDTHH:MM:SS.fracZ"
     // - "YYYY-MM-DDTHH:MM:SS+HH:MM"
+    // - "YYYY-MM-DD" (writer は Date32 を date-only で出すため、refine が効かなかった
+    //   大規模ファイルで Timestamp に丸めて受ける fallback が必要)
     let trimmed = s.trim();
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(trimmed) {
         let micros = dt.timestamp() * 1_000_000 + i64::from(dt.timestamp_subsec_micros());
@@ -626,7 +628,30 @@ fn parse_timestamp_micros(s: &str, field: &str) -> Result<i64> {
     if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(no_z, "%Y-%m-%dT%H:%M:%S") {
         return Ok(naive.and_utc().timestamp() * 1_000_000);
     }
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+        return Ok(date.and_hms_opt(0, 0, 0).expect("midnight").and_utc().timestamp() * 1_000_000);
+    }
     Err(driver_msg(format!(
         "invalid DateTime `{s}` in field `{field}`"
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_timestamp_micros;
+
+    #[test]
+    fn parses_date_only_as_midnight_utc() {
+        // refine が効かない 65536 行超の DateTime 列で writer 出力 `YYYY-MM-DD` を
+        // Timestamp(us) として受けられること (10M 行 bench で実際に踏んだケース)。
+        let micros = parse_timestamp_micros("2025-01-12", "created").unwrap();
+        let expected = chrono::NaiveDate::from_ymd_opt(2025, 1, 12)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp()
+            * 1_000_000;
+        assert_eq!(micros, expected);
+    }
 }
