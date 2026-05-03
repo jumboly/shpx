@@ -1,8 +1,7 @@
 //! GeoJSON / GeoJSONL の真のストリーミング読み出しヘルパ。
 //!
-//! v0.8 cycle 3 で eager-load (`Vec<Feature>`) を撤廃するために新設。`reader.rs` から
-//! 「ファイル全体の Feature 列挙」と「FeatureCollection 先頭の `crs` メンバ抽出」を
-//! このモジュールに分離する。
+//! `reader.rs` から「ファイル全体の Feature 列挙」と「FeatureCollection 先頭の
+//! `crs` メンバ抽出」をこのモジュールに分離する。
 //!
 //! # FeatureCollection は自前の `FcFeatureStream`
 //!

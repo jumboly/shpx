@@ -1,7 +1,5 @@
 //! Shapefile を Arrow `RecordBatch` ストリームとして読み出す。
 //!
-//! v0.8 cycle 1 で eager-load (`VecDeque<(Shape, Record)>`) を真のストリーミングに置き換えた。
-//!
 //! # 実装メモ — なぜ worker thread + sync_channel か
 //!
 //! `shapefile::Reader::iter_shapes_and_records()` は内部で `ShapeIterator` を

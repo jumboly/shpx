@@ -1,10 +1,10 @@
 //! GeoPackage の `LayerReader` 実装。
 //!
-//! v0.8 cycle 2 で eager-load (`Vec<Row>`) をやめ、`shpx_rdb_common::streaming::KeysetRowsIter`
-//! 経由の rowid keyset pagination で真のストリーミング読みに置き換えた。`open()` では
-//! schema と CRS の確定 + `SELECT COUNT(*)` による row_count_hint だけを行い、行データは
-//! `batches()` で 65536 行ずつ取り出す。`Statement` / `Rows` の lifetime は
-//! `KeysetRowsIter::next_batch()` のスコープ内に閉じ、self-referential を回避する。
+//! ストリーミング戦略: `shpx_rdb_common::streaming::KeysetRowsIter` 経由の rowid keyset
+//! pagination で行データを `batches()` から 65536 行ずつ取り出す。`open()` 時点で
+//! schema と CRS を確定し、`SELECT COUNT(*)` で row_count_hint を 1 度だけ算出する。
+//! `Statement` / `Rows` の lifetime は `KeysetRowsIter::next_batch()` のスコープ内に
+//! 閉じることで self-referential を回避している。
 
 use std::collections::HashMap;
 use std::path::PathBuf;

@@ -1,4 +1,4 @@
-//! v0.8 cycle 4 の Reader streaming 動作確認テスト。
+//! Streaming reader の Drop 動作テスト。
 //!
 //! 目的:
 //! - 中途で Reader を drop した時、background OS thread が clean に終了することを
