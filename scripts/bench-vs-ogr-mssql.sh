@@ -1,9 +1,8 @@
 #!/bin/bash
-# SQL Server staging bulk write の shpx vs ogr2ogr 比較ハーネス。完了基準は
-# ROADMAP の「shpx が ogr2ogr の 60% 以上の速度」(shpx_secs <= 1.667 * ogr_secs)。
-# PostGIS の 50% より緩いのは、tiberius 制約により案 B (staging テーブル経由) が
-# 必須でラウンドトリップが 1 段余分に挟まるため。詳細は docs/SQLSERVER.md の
-# Benchmark 節を参照。
+# shpx vs ogr2ogr の SQL Server staging bulk write 比較ハーネス。
+# CI 計測は .github/workflows/bench-smoke-mssql.yml に移行済みで、
+# 本スクリプトは ogr2ogr との挙動差をローカルで確認したい開発者向け。
+# 詳細は docs/SQLSERVER.md の Benchmark 節を参照。
 #
 # 必要コマンド: cargo / ogr2ogr (GDAL の MSSQLSpatial driver 同梱) / sqlcmd
 #
