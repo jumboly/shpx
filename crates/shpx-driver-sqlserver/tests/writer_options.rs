@@ -11,7 +11,11 @@ use arrow_schema::{DataType, Field};
 use shpx_core::{
     schema::GeometryType, CreateIndex, CreateTable, Crs, Driver, OnLoss, ReadOpts, Uri, WriteOpts,
 };
-use shpx_driver_sqlserver::{conn::{self, simple_query}, runtime::runtime, SqlServerDriver};
+use shpx_driver_sqlserver::{
+    conn::{self, simple_query},
+    runtime::runtime,
+    SqlServerDriver,
+};
 use shpx_geom::wkb::{self, Geom};
 use tiberius::Row;
 
@@ -100,10 +104,7 @@ fn if_not_exists_creates_when_absent_and_appends_when_present() {
         w.finish().unwrap();
     }
     let mut r = driver.open_read(&uri, &ReadOpts::default()).unwrap();
-    let total: usize = r
-        .batches()
-        .map(|b| b.unwrap().num_rows())
-        .sum();
+    let total: usize = r.batches().map(|b| b.unwrap().num_rows()).sum();
     assert_eq!(total, 2);
     drop(r);
     cleanup(&url, &table);

@@ -2,13 +2,20 @@
 //!
 //! テーブル名は URI クエリ `?table=schema.name` または `?table=name`、
 //! あるいは環境変数 `SHPX_PG_TABLE` で指定する。schema 省略時は `public`。
+//!
+//! 本モジュールには PostGIS driver 固有の関心事のみを置く。汎用 URI / opts 解決は
+//! `shpx_rdb_common` を参照。
 
 use shpx_core::{CreateIndex, CreateTable, ReadOpts, Result, Uri, WriteOpts};
+use shpx_rdb_common::{query_get, resolve_table_name, split_qualified, validate_overwrite_compat};
 
 use crate::util::{driver_msg, DRIVER_NAME};
 
 /// 環境変数: 入出力対象のテーブル名（`<schema>.<name>` 可）。URI クエリより優先度低。
 pub const ENV_TABLE: &str = "SHPX_PG_TABLE";
+
+/// PostGIS の既定スキーマ。`?table=` で schema を省略した場合に補う。
+const DEFAULT_SCHEMA: &str = "public";
 
 /// 解決済みの読み出しオプション（table モード向け）。
 ///
@@ -29,7 +36,7 @@ pub struct ResolvedReadOpts {
 impl ResolvedReadOpts {
     pub fn resolve(uri: &Uri, opts: &ReadOpts) -> Result<Self> {
         let qualified = resolve_table(uri)?;
-        let (schema, table) = split_qualified(&qualified);
+        let (schema, table) = split_qualified(&qualified, DEFAULT_SCHEMA);
         Ok(Self {
             url: uri.path().to_string(),
             schema,
@@ -72,15 +79,9 @@ pub struct ResolvedWriteOpts {
 
 impl ResolvedWriteOpts {
     pub fn resolve(uri: &Uri, opts: &WriteOpts) -> Result<Self> {
-        // `--overwrite` は DROP→CREATE を要求するため `Never` (CREATE 発行禁止) と矛盾する。
-        // CLI 段階で気付かせるため早期に reject する。
-        if opts.overwrite && matches!(opts.create_table, CreateTable::Never) {
-            return Err(driver_msg(format!(
-                "{DRIVER_NAME}: --overwrite と --create-table=never は同時に指定できない"
-            )));
-        }
+        validate_overwrite_compat(opts, DRIVER_NAME)?;
         let qualified = resolve_table(uri)?;
-        let (schema, table) = split_qualified(&qualified);
+        let (schema, table) = split_qualified(&qualified, DEFAULT_SCHEMA);
         Ok(Self {
             url: uri.path().to_string(),
             schema,
@@ -98,81 +99,8 @@ impl ResolvedWriteOpts {
 /// 優先順位: URI クエリ `?table=...` > 環境変数 `SHPX_PG_TABLE`。
 /// どちらも無い場合はエラー（PostGIS は `--query` (cycle 3) 以外でテーブル名必須）。
 fn resolve_table(uri: &Uri) -> Result<String> {
-    if let Some(t) = parse_query_table(&uri.raw)? {
-        return Ok(t);
-    }
-    match std::env::var(ENV_TABLE) {
-        Ok(v) if !v.is_empty() => Ok(v),
-        _ => Err(driver_msg(format!(
-            "{DRIVER_NAME}: ?table=... query parameter is required (or set {ENV_TABLE})"
-        ))),
-    }
-}
-
-/// `schema.name` を `(schema, name)` に分割。schema 省略時は `public`。
-fn split_qualified(s: &str) -> (String, String) {
-    if let Some((schema, name)) = s.split_once('.') {
-        (schema.to_string(), name.to_string())
-    } else {
-        ("public".to_string(), s.to_string())
-    }
-}
-
-fn parse_query_table(raw: &str) -> Result<Option<String>> {
-    let Some((_, query)) = raw.split_once('?') else {
-        return Ok(None);
-    };
-    for pair in query.split('&') {
-        let Some((k, v)) = pair.split_once('=') else {
-            continue;
-        };
-        if k.eq_ignore_ascii_case("table") {
-            if v.is_empty() {
-                return Err(driver_msg(format!(
-                    "{DRIVER_NAME}: empty `?table=` in URI query"
-                )));
-            }
-            return Ok(Some(percent_decode(v)));
-        }
-    }
-    Ok(None)
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b'%' if i + 2 < bytes.len() => {
-                if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                    out.push((h << 4) | l);
-                    i += 3;
-                } else {
-                    out.push(bytes[i]);
-                    i += 1;
-                }
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
+    let q_table = query_get(&uri.raw, "table");
+    resolve_table_name(q_table.as_deref(), ENV_TABLE, DRIVER_NAME)
 }
 
 #[cfg(test)]
@@ -180,48 +108,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_query_extracts_simple_table() {
-        let v = parse_query_table("pg://h/db?table=cities").unwrap();
-        assert_eq!(v.as_deref(), Some("cities"));
+    fn resolve_read_extracts_table_from_query() {
+        let uri = Uri::from_path("pg://h/db?table=cities");
+        let r = ResolvedReadOpts::resolve(&uri, &ReadOpts::default()).unwrap();
+        assert_eq!(r.schema, "public");
+        assert_eq!(r.table, "cities");
     }
 
     #[test]
-    fn parse_query_extracts_qualified_table() {
-        let v = parse_query_table("pg://h/db?table=public.cities").unwrap();
-        assert_eq!(v.as_deref(), Some("public.cities"));
+    fn resolve_read_extracts_qualified_table() {
+        let uri = Uri::from_path("pg://h/db?table=foo.bar");
+        let r = ResolvedReadOpts::resolve(&uri, &ReadOpts::default()).unwrap();
+        assert_eq!(r.schema, "foo");
+        assert_eq!(r.table, "bar");
     }
 
     #[test]
-    fn parse_query_decodes_percent_encoded() {
-        let v = parse_query_table("pg://h/db?table=my%20schema.name").unwrap();
-        assert_eq!(v.as_deref(), Some("my schema.name"));
+    fn resolve_read_decodes_percent_encoded_schema() {
+        let uri = Uri::from_path("pg://h/db?table=my%20schema.name");
+        let r = ResolvedReadOpts::resolve(&uri, &ReadOpts::default()).unwrap();
+        assert_eq!(r.schema, "my schema");
+        assert_eq!(r.table, "name");
     }
 
     #[test]
-    fn parse_query_empty_value_errors() {
-        assert!(parse_query_table("pg://h/db?table=").is_err());
-    }
-
-    #[test]
-    fn split_qualified_defaults_to_public() {
-        assert_eq!(
-            split_qualified("cities"),
-            ("public".to_string(), "cities".to_string())
-        );
-        assert_eq!(
-            split_qualified("foo.bar"),
-            ("foo".to_string(), "bar".to_string())
-        );
-    }
-
-    #[test]
-    fn resolve_table_falls_back_to_env() {
-        // 環境変数のテストはプロセス共有ステートを汚染するため別途 integration test で検証する。
-        // 単体では URI クエリだけを確認する。
-        let uri = Uri::from_path("pg://h/db?table=t");
-        let resolved = ResolvedReadOpts::resolve(&uri, &ReadOpts::default()).unwrap();
-        assert_eq!(resolved.schema, "public");
-        assert_eq!(resolved.table, "t");
+    fn resolve_read_rejects_empty_table() {
+        let uri = Uri::from_path("pg://h/db?table=");
+        assert!(ResolvedReadOpts::resolve(&uri, &ReadOpts::default()).is_err());
     }
 
     #[test]
@@ -241,15 +154,14 @@ mod tests {
     #[test]
     fn resolve_write_default_keeps_if_not_exists() {
         let uri = Uri::from_path("pg://h/db?table=t");
-        let resolved = ResolvedWriteOpts::resolve(&uri, &WriteOpts::default()).unwrap();
-        assert_eq!(resolved.create_table, CreateTable::IfNotExists);
-        assert_eq!(resolved.create_index, CreateIndex::Auto);
+        let r = ResolvedWriteOpts::resolve(&uri, &WriteOpts::default()).unwrap();
+        assert_eq!(r.create_table, CreateTable::IfNotExists);
+        assert_eq!(r.create_index, CreateIndex::Auto);
     }
 
     #[test]
     fn resolve_table_missing_errors() {
-        // 環境変数が未設定でクエリも無ければエラー。テスト内で env var を unset するのは
-        // プロセス共有ステートの問題があるため、env が設定済みの環境では skip する。
+        // 環境変数が他テストや shell から設定済みの環境では skip する。
         if std::env::var(ENV_TABLE).is_ok() {
             return;
         }

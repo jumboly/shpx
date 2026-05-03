@@ -1,0 +1,16 @@
+[package]
+name = "shpx-rdb-common"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "shpx の RDB driver (PostGIS / SQL Server / 将来 MySQL 等) で共有するヘルパー"
+
+[lints]
+workspace = true
+
+[dependencies]
+shpx-core    = { path = "../shpx-core" }
+arrow-array  = { workspace = true }
+tracing      = { workspace = true }

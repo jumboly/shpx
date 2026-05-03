@@ -128,6 +128,40 @@ cargo build --release
 > Note: v0.2 時点では feature flag による driver 取捨選択は採用していない。
 > リリースバイナリのサイズが問題になった段階で `[features]` 化を検討する。
 
+## RDB driver を追加する場合
+
+PostGIS / SQL Server の 2 driver で重複していたヘルパーは `shpx-rdb-common` crate
+に集約してある。新しい RDB driver (例: MySQL) を追加するときは `shpx-driver-postgis` /
+`shpx-driver-sqlserver` の `options.rs` / `util.rs` / `writer.rs` を参考にしつつ、
+以下を `shpx-rdb-common` から再利用する:
+
+| 機能 | API |
+|---|---|
+| `?key=value` の percent decode | `shpx_rdb_common::percent_decode` / `query_pairs` / `query_get` |
+| `schema.name` 分割 | `shpx_rdb_common::split_qualified(s, default_schema)` |
+| `?table=` / 環境変数 fallback | `shpx_rdb_common::resolve_table_name(query_table, env_var, driver_name)` |
+| `--overwrite + create_table=Never` reject | `shpx_rdb_common::validate_overwrite_compat(opts, driver_name)` |
+| `OnLoss` ポリシー適用 | `shpx_rdb_common::apply_on_loss(kind, field, on_loss, warn_fn)` |
+| `--src-crs` / schema CRS マージ | `shpx_rdb_common::merge_crs(crs_arg, geom_meta)` |
+| EPSG → i32 SRID | `shpx_rdb_common::resolve_epsg_srid(crs)` |
+| `Error::Driver` 構築 | `shpx_rdb_common::driver_err(name, e)` / `driver_msg(name, msg)` |
+| Arrow primitive 取り出し | `shpx_rdb_common::primitive::<T>(array, row)` |
+
+driver 固有のまま残すもの: SQL 識別子クオート (`quote_ident`)、文字列リテラル
+(`quote_literal`)、catalog クエリ (`describe_columns` 相当)、`build_create_table_sql` /
+`build_insert_sql`、tracing target、ジオメトリ型判定 (`is_geometry_typname` 相当)。
+
+`apply_on_loss` の `warn_fn` には driver 固有 tracing target を含めたクロージャを渡す:
+
+```rust
+shpx_rdb_common::apply_on_loss(kind, field, on_loss, || {
+    tracing::warn!(target: "shpx::myrdb", kind, field, "lossy conversion");
+})?;
+```
+
+`tracing::warn!(target: ...)` の target はマクロ展開時の const 要求があるため、
+クロージャごと driver 側に置く設計にしている。
+
 ## ジオメトリの扱い
 
 中間表現は **WKB**（Well-Known Binary）。`shpx-geom` の `wkb::encode` / `wkb::decode` を使う。

@@ -149,6 +149,7 @@
 ## v1.x 以降（候補）
 
 - MS-SSCLRT UDT エンコーダで SQL Server 真の bulk
+- 追加 RDB driver（MySQL / MariaDB / Oracle 等）— 既存 PostGIS / SQL Server で共通化済みの `shpx-rdb-common` を利用して URI/CRS/`OnLoss` 周りの boilerplate を共有する想定
 - 対話的 REPL モード（`shpx repl`）
 - 動的プラグイン（dylib / WASM）
 - 追加フォーマット: FileGDB、DXF、KML、GML、TopoJSON、ラスター（GeoTIFF）

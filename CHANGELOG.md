@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Internal
+
+- **shpx-rdb-common 新設**: PostGIS / SQL Server の 2 driver で `options.rs` / `util.rs` / `writer.rs` に重複していた純粋ヘルパー（`percent_decode` / `query_pairs` / `split_qualified` / `resolve_table_name` / `validate_overwrite_compat` / `apply_on_loss` / `merge_crs` / `resolve_epsg_srid` / `driver_err` / `driver_msg` / `primitive`）を共通 crate `crates/shpx-rdb-common/` に抽出した。各 driver の API 公開面・エラーメッセージ・tracing target は変更なしで、CLI ユーザー視点の挙動には影響しない。次の RDB driver (MySQL 等) を追加する際の boilerplate 削減と、既存 2 driver の挙動を 1 箇所で揃える目的。`tracing::warn!(target: ...)` の target は const 要求のため、driver 側に `tracing::warn!` 呼び出しごとクロージャで残し、`shpx_rdb_common::apply_on_loss(kind, field, on_loss, warn_fn)` がそれを警告経路でだけ呼び出す設計とした。詳細は `docs/CONTRIBUTING.md` の「RDB driver を追加する場合」節と `docs/DESIGN.md` のリポジトリ構成図を参照。
+
 ## [0.4.0] - 2026-05-03
 
 v0.4 マイルストーン「SQL Server」のリリース。`shpx-driver-sqlserver` で Microsoft SQL Server / Azure SQL の read/write を提供し、staging テーブル経由 bulk writer (案 B、`docs/DESIGN.md` L.219-)、`--create-table` 3 種、`--create-index=Always` での SPATIAL INDEX 生成、`?geom_type=geometry|geography` 切替、CI で docker mssql 経由統合テストまでを含む。**1000万行ベンチの完了基準値は Linux x86_64 環境で実測予定**（Apple Silicon の Rosetta/QEMU emulation 経由は参考値止まりのため）。詳細は `docs/SQLSERVER.md`。

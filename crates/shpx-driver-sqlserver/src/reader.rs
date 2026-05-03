@@ -81,18 +81,14 @@ impl SqlServerReader {
     ) -> Result<Self> {
         let qualified = quote_qualified(&resolved.schema, &resolved.table);
         let columns = describe_columns(client, &resolved.schema, &resolved.table)?;
-        let geom_idx = columns
-            .iter()
-            .position(|c| c.is_geometry)
-            .ok_or_else(|| {
-                driver_msg(format!(
-                    "table {qualified} does not contain a geometry/geography column"
-                ))
-            })?;
+        let geom_idx = columns.iter().position(|c| c.is_geometry).ok_or_else(|| {
+            driver_msg(format!(
+                "table {qualified} does not contain a geometry/geography column"
+            ))
+        })?;
 
         let geom_col_name = columns[geom_idx].name.clone();
-        let (probe_srid, geom_type) =
-            probe_geometry_metadata(client, &qualified, &geom_col_name)?;
+        let (probe_srid, geom_type) = probe_geometry_metadata(client, &qualified, &geom_col_name)?;
 
         let crs: Option<Crs> = opts
             .src_crs
@@ -106,9 +102,8 @@ impl SqlServerReader {
 
         // probe で SRID が取れなかった (テーブルが空だった) 場合のみ、SELECT 結果から
         // 最初の non-NULL 行で SRID を補う。`or_else` の短絡により crs が既に Some なら走らない。
-        let final_crs = crs.or_else(|| {
-            extract_srid_from_first_row(&rows, geom_idx).and_then(epsg_to_crs)
-        });
+        let final_crs =
+            crs.or_else(|| extract_srid_from_first_row(&rows, geom_idx).and_then(epsg_to_crs));
 
         let batch = rows_to_record_batch(&schema, &columns, geom_idx, &rows)?;
         let row_count = batch.num_rows();
@@ -177,10 +172,7 @@ fn describe_columns(client: &mut SqlClient, schema: &str, table: &str) -> Result
             .query(sql, &[&schema, &table])
             .await
             .map_err(|e| driver_err(&e))?;
-        stream
-            .into_first_result()
-            .await
-            .map_err(|e| driver_err(&e))
+        stream.into_first_result().await.map_err(|e| driver_err(&e))
     })?;
 
     if rows.is_empty() {
@@ -240,14 +232,8 @@ fn probe_geometry_metadata(
     );
     let rt = runtime()?;
     let rows: Vec<Row> = rt.block_on(async {
-        let stream = client
-            .simple_query(sql)
-            .await
-            .map_err(|e| driver_err(&e))?;
-        stream
-            .into_first_result()
-            .await
-            .map_err(|e| driver_err(&e))
+        let stream = client.simple_query(sql).await.map_err(|e| driver_err(&e))?;
+        stream.into_first_result().await.map_err(|e| driver_err(&e))
     })?;
 
     if let Some(row) = rows.into_iter().next() {
@@ -313,10 +299,7 @@ fn exec_select(client: &mut SqlClient, sql: &str) -> Result<Vec<Row>> {
     let rt = runtime()?;
     rt.block_on(async {
         let stream = client.simple_query(sql).await.map_err(|e| driver_err(&e))?;
-        stream
-            .into_first_result()
-            .await
-            .map_err(|e| driver_err(&e))
+        stream.into_first_result().await.map_err(|e| driver_err(&e))
     })
 }
 
@@ -566,8 +549,8 @@ fn decimal_to_i128(d: Decimal, target_scale: i8, col: &str) -> Result<i128> {
     match delta.cmp(&0) {
         std::cmp::Ordering::Equal => Ok(mantissa),
         std::cmp::Ordering::Greater => {
-            let factor = i128::checked_pow(10, u32::try_from(delta).expect("delta>0"))
-                .ok_or_else(|| {
+            let factor =
+                i128::checked_pow(10, u32::try_from(delta).expect("delta>0")).ok_or_else(|| {
                     driver_msg(format!("column `{col}`: decimal scale upshift overflow"))
                 })?;
             mantissa.checked_mul(factor).ok_or_else(|| {
@@ -579,9 +562,7 @@ fn decimal_to_i128(d: Decimal, target_scale: i8, col: &str) -> Result<i128> {
         std::cmp::Ordering::Less => {
             let factor = i128::checked_pow(10, u32::try_from(-delta).expect("delta<0"))
                 .ok_or_else(|| {
-                    driver_msg(format!(
-                        "column `{col}`: decimal scale downshift overflow"
-                    ))
+                    driver_msg(format!("column `{col}`: decimal scale downshift overflow"))
                 })?;
             // Arrow Decimal128 は固定 scale なので、scale 縮小で精度落ちする場合は除算で丸める。
             // SQL Server 側で precision/scale が schema 通りに格納されている場合 delta は 0 になる
@@ -653,14 +634,14 @@ mod tests {
     #[test]
     fn decimal_to_i128_scale_up() {
         let d = Decimal::new(123, 0); // 123 (scale 0)
-        // target_scale=3 → 123_000 (123.000)
+                                      // target_scale=3 → 123_000 (123.000)
         assert_eq!(decimal_to_i128(d, 3, "x").unwrap(), 123_000);
     }
 
     #[test]
     fn decimal_to_i128_scale_down() {
         let d = Decimal::new(12_345, 4); // 1.2345 (scale 4)
-        // target_scale=2 → 123 (truncate to 1.23)
+                                         // target_scale=2 → 123 (truncate to 1.23)
         assert_eq!(decimal_to_i128(d, 2, "x").unwrap(), 123);
     }
 

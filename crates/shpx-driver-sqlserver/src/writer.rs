@@ -50,12 +50,7 @@ pub struct SqlServerWriter {
 }
 
 impl SqlServerWriter {
-    pub fn open(
-        uri: &Uri,
-        schema: SchemaRef,
-        crs: Option<&Crs>,
-        opts: &WriteOpts,
-    ) -> Result<Self> {
+    pub fn open(uri: &Uri, schema: SchemaRef, crs: Option<&Crs>, opts: &WriteOpts) -> Result<Self> {
         let resolved = ResolvedWriteOpts::resolve(uri, opts)?;
         let qualified = quote_qualified(&resolved.schema, &resolved.table);
 
@@ -257,10 +252,7 @@ impl LayerWriter for SqlServerWriter {
 }
 
 impl BulkLoadWriter for SqlServerWriter {
-    fn bulk_write(
-        &mut self,
-        batches: &mut dyn Iterator<Item = Result<RecordBatch>>,
-    ) -> Result<()> {
+    fn bulk_write(&mut self, batches: &mut dyn Iterator<Item = Result<RecordBatch>>) -> Result<()> {
         let Self {
             client,
             schema,
@@ -309,23 +301,14 @@ fn resolve_srid(
     geom_kind: GeomKind,
     on_loss: OnLoss,
 ) -> Result<i32> {
-    let crs: Option<Crs> = crs_arg.cloned().or_else(|| geom_meta.crs.clone());
-    if let Some(c) = crs.as_ref() {
-        if let Some(epsg) = c.epsg_code() {
-            return i32::try_from(epsg).map_err(|_| {
-                driver_msg(format!("EPSG code out of i32 range: {epsg}"))
-            });
-        }
+    let crs = shpx_rdb_common::merge_crs(crs_arg, geom_meta);
+    if let Some(srid) = shpx_rdb_common::resolve_epsg_srid(crs.as_ref())? {
+        return Ok(srid);
     }
-    let cont = apply_on_loss(loss_kind::MISSING_CRS_ON_SQLSERVER, "geometry", on_loss)?;
-    if !cont {
-        // skip ポリシー: SRID 0 で書き続ける（geometry のみ）。geography で skip されると
-        // SRID 0 では `geography::STGeomFromWKB` が失敗するため fallback 4326 を返す。
-        return Ok(match geom_kind {
-            GeomKind::Geometry => 0,
-            GeomKind::Geography => 4326,
-        });
-    }
+    // CRS 不在の警告は `apply_on_loss` で error/warn/skip を切り替える。
+    // warn / skip いずれの場合も geography は 4326 にフォールバックする
+    // (SRID 0 では `geography::STGeomFromWKB` が失敗するため)。
+    let _ = apply_on_loss(loss_kind::MISSING_CRS_ON_SQLSERVER, "geometry", on_loss)?;
     Ok(match geom_kind {
         GeomKind::Geometry => 0,
         GeomKind::Geography => 4326,
@@ -376,8 +359,7 @@ fn build_insert_sql(
 
     // T-SQL parameter は @P1 から始まり、attr 数 + 2 (WKB + SRID) まで使う。
     let attr_count = attr_indices.len();
-    let attr_placeholders: Vec<String> =
-        (1..=attr_count).map(|i| format!("@P{i}")).collect();
+    let attr_placeholders: Vec<String> = (1..=attr_count).map(|i| format!("@P{i}")).collect();
     let wkb_param = format!("@P{}", attr_count + 1);
     let srid_param = format!("@P{}", attr_count + 2);
     let geom_expr = format!(
@@ -406,10 +388,7 @@ fn table_exists(client: &mut SqlClient, schema: &str, table: &str) -> Result<boo
             )
             .await
             .map_err(|e| driver_err(&e))?;
-        stream
-            .into_first_result()
-            .await
-            .map_err(|e| driver_err(&e))
+        stream.into_first_result().await.map_err(|e| driver_err(&e))
     })?;
     let row = rows
         .into_iter()
@@ -437,7 +416,13 @@ fn build_row_params(
         let field = schema.field(col);
         let array: &dyn Array = batch.column(col).as_ref();
         let is_null = array.is_null(row);
-        out.push(arrow_to_boxed(field.data_type(), array, row, is_null, field.name())?);
+        out.push(arrow_to_boxed(
+            field.data_type(),
+            array,
+            row,
+            is_null,
+            field.name(),
+        )?);
     }
     // geometry: WKB と SRID をその順で詰める（INSERT 文の `@P{n+1}` / `@P{n+2}` に対応）。
     let geom_array = batch.column(geom_index);
@@ -462,27 +447,51 @@ fn arrow_to_boxed(
 ) -> Result<BoxedToSql> {
     Ok(match dt {
         DataType::Boolean => {
-            let v: Option<bool> = if is_null { None } else { Some(array.as_boolean().value(row)) };
+            let v: Option<bool> = if is_null {
+                None
+            } else {
+                Some(array.as_boolean().value(row))
+            };
             Box::new(v)
         }
         DataType::Int16 => {
-            let v: Option<i16> = if is_null { None } else { Some(primitive::<Int16Type>(array, row)) };
+            let v: Option<i16> = if is_null {
+                None
+            } else {
+                Some(primitive::<Int16Type>(array, row))
+            };
             Box::new(v)
         }
         DataType::Int32 => {
-            let v: Option<i32> = if is_null { None } else { Some(primitive::<Int32Type>(array, row)) };
+            let v: Option<i32> = if is_null {
+                None
+            } else {
+                Some(primitive::<Int32Type>(array, row))
+            };
             Box::new(v)
         }
         DataType::Int64 => {
-            let v: Option<i64> = if is_null { None } else { Some(primitive::<Int64Type>(array, row)) };
+            let v: Option<i64> = if is_null {
+                None
+            } else {
+                Some(primitive::<Int64Type>(array, row))
+            };
             Box::new(v)
         }
         DataType::Float32 => {
-            let v: Option<f32> = if is_null { None } else { Some(primitive::<Float32Type>(array, row)) };
+            let v: Option<f32> = if is_null {
+                None
+            } else {
+                Some(primitive::<Float32Type>(array, row))
+            };
             Box::new(v)
         }
         DataType::Float64 => {
-            let v: Option<f64> = if is_null { None } else { Some(primitive::<Float64Type>(array, row)) };
+            let v: Option<f64> = if is_null {
+                None
+            } else {
+                Some(primitive::<Float64Type>(array, row))
+            };
             Box::new(v)
         }
         DataType::Utf8 => {
@@ -538,8 +547,9 @@ fn arrow_to_boxed(
                 let nanos = timestamp_to_nanos(*unit, array, row, name)?;
                 let secs = nanos.div_euclid(1_000_000_000);
                 let nanos_part = nanos.rem_euclid(1_000_000_000);
-                let nanos_u = u32::try_from(nanos_part)
-                    .map_err(|_| driver_msg(format!("column `{name}`: timestamp nanos overflow")))?;
+                let nanos_u = u32::try_from(nanos_part).map_err(|_| {
+                    driver_msg(format!("column `{name}`: timestamp nanos overflow"))
+                })?;
                 let dt = DateTime::<Utc>::from_timestamp(secs, nanos_u)
                     .ok_or_else(|| driver_msg(format!("column `{name}`: timestamp overflow")))?;
                 Some(dt.naive_utc())
@@ -547,20 +557,20 @@ fn arrow_to_boxed(
             Box::new(v)
         }
         DataType::Timestamp(unit, Some(_)) => {
-            let v: Option<DateTime<Utc>> = if is_null {
-                None
-            } else {
-                let nanos = timestamp_to_nanos(*unit, array, row, name)?;
-                let secs = nanos.div_euclid(1_000_000_000);
-                let nanos_part = nanos.rem_euclid(1_000_000_000);
-                let nanos_u = u32::try_from(nanos_part)
-                    .map_err(|_| driver_msg(format!("column `{name}`: timestamp nanos overflow")))?;
-                Some(
-                    Utc.timestamp_opt(secs, nanos_u)
-                        .single()
-                        .ok_or_else(|| driver_msg(format!("column `{name}`: timestamp overflow")))?,
-                )
-            };
+            let v: Option<DateTime<Utc>> =
+                if is_null {
+                    None
+                } else {
+                    let nanos = timestamp_to_nanos(*unit, array, row, name)?;
+                    let secs = nanos.div_euclid(1_000_000_000);
+                    let nanos_part = nanos.rem_euclid(1_000_000_000);
+                    let nanos_u = u32::try_from(nanos_part).map_err(|_| {
+                        driver_msg(format!("column `{name}`: timestamp nanos overflow"))
+                    })?;
+                    Some(Utc.timestamp_opt(secs, nanos_u).single().ok_or_else(|| {
+                        driver_msg(format!("column `{name}`: timestamp overflow"))
+                    })?)
+                };
             Box::new(v)
         }
         DataType::Decimal128(_p, s) => {
@@ -595,10 +605,8 @@ mod tests {
 
     fn sample_schema() -> SchemaRef {
         let mut geom = Field::new("geom", DataType::Binary, true);
-        let meta = shpx_core::schema::GeometryMeta::wkb(
-            shpx_core::schema::GeometryType::Point,
-            None,
-        );
+        let meta =
+            shpx_core::schema::GeometryMeta::wkb(shpx_core::schema::GeometryType::Point, None);
         let mut m = std::collections::HashMap::new();
         m.insert(
             shpx_core::schema::GEOMETRY_META_KEY.to_string(),
@@ -615,14 +623,8 @@ mod tests {
     #[test]
     fn build_create_table_sql_geometry() {
         let schema = sample_schema();
-        let sql = build_create_table_sql(
-            &schema,
-            &[0, 1],
-            2,
-            "[dbo].[t]",
-            GeomKind::Geometry,
-        )
-        .unwrap();
+        let sql =
+            build_create_table_sql(&schema, &[0, 1], 2, "[dbo].[t]", GeomKind::Geometry).unwrap();
         assert_eq!(
             sql,
             "CREATE TABLE [dbo].[t] ([id] int NOT NULL, [name] nvarchar(max) NULL, [geom] geometry NULL)"
@@ -632,14 +634,8 @@ mod tests {
     #[test]
     fn build_create_table_sql_geography() {
         let schema = sample_schema();
-        let sql = build_create_table_sql(
-            &schema,
-            &[0, 1],
-            2,
-            "[dbo].[t]",
-            GeomKind::Geography,
-        )
-        .unwrap();
+        let sql =
+            build_create_table_sql(&schema, &[0, 1], 2, "[dbo].[t]", GeomKind::Geography).unwrap();
         assert!(sql.contains("[geom] geography NULL"));
     }
 
@@ -679,8 +675,7 @@ mod tests {
     #[test]
     fn resolve_srid_falls_back_to_geography_4326_on_warn() {
         let geom_meta = GeometryMeta::wkb(shpx_core::schema::GeometryType::Point, None);
-        let srid =
-            resolve_srid(None, &geom_meta, GeomKind::Geography, OnLoss::Warn).unwrap();
+        let srid = resolve_srid(None, &geom_meta, GeomKind::Geography, OnLoss::Warn).unwrap();
         assert_eq!(srid, 4326);
     }
 
@@ -693,7 +688,8 @@ mod tests {
 
     #[test]
     fn spatial_index_sql_geometry_4326() {
-        let sql = build_spatial_index_sql("[dbo].[t]", "t", "geom", GeomKind::Geometry, 4326).unwrap();
+        let sql =
+            build_spatial_index_sql("[dbo].[t]", "t", "geom", GeomKind::Geometry, 4326).unwrap();
         assert_eq!(
             sql,
             "CREATE SPATIAL INDEX [idx_t_geom] ON [dbo].[t] ([geom]) \
@@ -712,8 +708,8 @@ mod tests {
 
     #[test]
     fn spatial_index_sql_geography_no_bounding_box() {
-        let sql = build_spatial_index_sql("[dbo].[t]", "t", "geom", GeomKind::Geography, 4326)
-            .unwrap();
+        let sql =
+            build_spatial_index_sql("[dbo].[t]", "t", "geom", GeomKind::Geography, 4326).unwrap();
         assert_eq!(
             sql,
             "CREATE SPATIAL INDEX [idx_t_geom] ON [dbo].[t] ([geom])"

@@ -1,7 +1,14 @@
-//! ドライバ共通ユーティリティ。GPKG/FGB driver の `util.rs` と同形パターン。
+//! ドライバ共通ユーティリティ。
+//!
+//! URI/CRS/エラー/Arrow 取り出しの共通ロジックは `shpx_rdb_common` 側に移管済み。
+//! ここには PostgreSQL 方言（識別子クオート、文字列リテラル、PostGIS の typname 判定）
+//! や PostGIS driver 固有の定数 (DRIVER_NAME, loss_kind) など driver 特有のコードのみ残す。
 
-use arrow_array::{Array, ArrowPrimitiveType, PrimitiveArray};
 use shpx_core::{Error, OnLoss, Result};
+
+// driver 内では `crate::util::primitive` で揃え、Arrow 取り出しが driver 内ヘルパーの一部
+// として読めるように re-export する。
+pub use shpx_rdb_common::primitive;
 
 /// このドライバの識別名（`Driver::name` 戻り値、`Error::Driver.name`、tracing target に使う）。
 pub const DRIVER_NAME: &str = "postgis";
@@ -30,24 +37,15 @@ pub fn is_geometry_typname(typname: &str) -> bool {
     typname == "geometry" || typname == "geography"
 }
 
-/// 損失検出時の挙動を 1 箇所で適用する。
+/// 損失検出時の挙動を 1 箇所で適用する。`shpx_rdb_common::apply_on_loss` の薄いラッパで、
+/// `Warn` 経路の tracing target をこの driver 用 (`shpx::postgis`) に固定する。
 ///
-/// 戻り値:
-/// - `Ok(true)`  — 続行（`Warn` 経路）
-/// - `Ok(false)` — その要素 (列・値) をスキップ
-/// - `Err(_)`    — `OnLoss::Error` での中断
+/// `tracing::warn!` の `target:` フィールドはマクロ展開時に const を要求するため、
+/// クロージャ経由で driver 側に target 文字列リテラルを残す設計にしている。
 pub fn apply_on_loss(kind: &'static str, field: &str, on_loss: OnLoss) -> Result<bool> {
-    match on_loss {
-        OnLoss::Error => Err(Error::OnLoss {
-            kind: kind.to_string(),
-            field: field.to_string(),
-        }),
-        OnLoss::Warn => {
-            tracing::warn!(target: "shpx::postgis", kind, field, "lossy conversion");
-            Ok(true)
-        }
-        OnLoss::Skip => Ok(false),
-    }
+    shpx_rdb_common::apply_on_loss(kind, field, on_loss, || {
+        tracing::warn!(target: "shpx::postgis", kind, field, "lossy conversion");
+    })
 }
 
 /// SQL 識別子（テーブル名・列名）を `"..."` でクオートする。
@@ -74,16 +72,6 @@ pub fn quote_qualified(schema: &str, table: &str) -> String {
 pub fn quote_literal(s: &str) -> String {
     let escaped = s.replace('\'', "''");
     format!("'{escaped}'")
-}
-
-/// Arrow primitive 配列の指定行から native 値を取り出す。downcast 失敗は schema mismatch で
-/// プログラムバグなので panic（呼び出し側で `DataType` を確認済みである前提）。
-pub fn primitive<T: ArrowPrimitiveType>(array: &dyn Array, row: usize) -> T::Native {
-    array
-        .as_any()
-        .downcast_ref::<PrimitiveArray<T>>()
-        .expect("primitive downcast")
-        .value(row)
 }
 
 #[cfg(test)]

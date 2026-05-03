@@ -1,14 +1,23 @@
-//! ドライバ共通ユーティリティ。PostGIS driver の `util.rs` と同形パターン。
+//! ドライバ共通ユーティリティ。
+//!
+//! URI/CRS/エラー/Arrow 取り出しの共通ロジックは `shpx_rdb_common` 側に移管済み。
+//! ここには T-SQL 方言（識別子・文字列リテラル）、SQL Server 固有の SPATIAL INDEX
+//! BOUNDING_BOX マップ、tiberius `chrono` 経路に渡す nanosecond 時刻変換、driver 固有定数
+//! (DRIVER_NAME, loss_kind) など driver 特有のコードのみ残す。
 
 use arrow_array::{
     types::{
         TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
         TimestampSecondType,
     },
-    Array, ArrowPrimitiveType, PrimitiveArray,
+    Array,
 };
 use arrow_schema::TimeUnit;
 use shpx_core::{Error, OnLoss, Result};
+
+// driver 内では `crate::util::primitive` で揃え、Arrow 取り出しが driver 内ヘルパーの一部
+// として読めるように re-export する。
+pub use shpx_rdb_common::primitive;
 
 /// このドライバの識別名（`Driver::name` 戻り値、`Error::Driver.name`、tracing target に使う）。
 pub const DRIVER_NAME: &str = "sqlserver";
@@ -30,24 +39,15 @@ pub fn driver_msg(msg: impl Into<String>) -> Error {
     Error::driver_msg(DRIVER_NAME, msg)
 }
 
-/// 損失検出時の挙動を 1 箇所で適用する。
+/// 損失検出時の挙動を 1 箇所で適用する。`shpx_rdb_common::apply_on_loss` の薄いラッパで、
+/// `Warn` 経路の tracing target をこの driver 用 (`shpx::sqlserver`) に固定する。
 ///
-/// 戻り値:
-/// - `Ok(true)`  — 続行（`Warn` 経路）
-/// - `Ok(false)` — その要素 (列・値) をスキップ
-/// - `Err(_)`    — `OnLoss::Error` での中断
+/// `tracing::warn!` の `target:` フィールドはマクロ展開時に const を要求するため、
+/// クロージャ経由で driver 側に target 文字列リテラルを残す設計にしている。
 pub fn apply_on_loss(kind: &'static str, field: &str, on_loss: OnLoss) -> Result<bool> {
-    match on_loss {
-        OnLoss::Error => Err(Error::OnLoss {
-            kind: kind.to_string(),
-            field: field.to_string(),
-        }),
-        OnLoss::Warn => {
-            tracing::warn!(target: "shpx::sqlserver", kind, field, "lossy conversion");
-            Ok(true)
-        }
-        OnLoss::Skip => Ok(false),
-    }
+    shpx_rdb_common::apply_on_loss(kind, field, on_loss, || {
+        tracing::warn!(target: "shpx::sqlserver", kind, field, "lossy conversion");
+    })
 }
 
 /// T-SQL 識別子（テーブル名・列名）を `[...]` でクオートする。
@@ -98,7 +98,12 @@ pub fn bbox_for_epsg(code: u32) -> Option<(f64, f64, f64, f64)> {
 
 /// Arrow timestamp 配列から指定行の値をナノ秒 i64 で取り出す。
 /// batch / bulk の両経路で共有する。
-pub fn timestamp_to_nanos(unit: TimeUnit, array: &dyn Array, row: usize, name: &str) -> Result<i64> {
+pub fn timestamp_to_nanos(
+    unit: TimeUnit,
+    array: &dyn Array,
+    row: usize,
+    name: &str,
+) -> Result<i64> {
     match unit {
         TimeUnit::Nanosecond => Ok(primitive::<TimestampNanosecondType>(array, row)),
         TimeUnit::Microsecond => primitive::<TimestampMicrosecondType>(array, row)
@@ -111,16 +116,6 @@ pub fn timestamp_to_nanos(unit: TimeUnit, array: &dyn Array, row: usize, name: &
             .checked_mul(1_000_000_000)
             .ok_or_else(|| driver_msg(format!("column `{name}`: timestamp s→ns overflow"))),
     }
-}
-
-/// Arrow primitive 配列の指定行から native 値を取り出す。downcast 失敗は schema mismatch で
-/// プログラムバグなので panic（呼び出し側で `DataType` を確認済みである前提）。
-pub fn primitive<T: ArrowPrimitiveType>(array: &dyn Array, row: usize) -> T::Native {
-    array
-        .as_any()
-        .downcast_ref::<PrimitiveArray<T>>()
-        .expect("primitive downcast")
-        .value(row)
 }
 
 #[cfg(test)]

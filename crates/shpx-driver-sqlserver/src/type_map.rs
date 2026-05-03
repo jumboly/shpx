@@ -248,7 +248,10 @@ mod tests {
         assert_eq!(geom_type_from_sqlserver_name("Point"), GeometryType::Point);
         assert_eq!(geom_type_from_sqlserver_name("POINT"), GeometryType::Point);
         // PostGIS の ST_Point prefix もたまたま受け入れる（型変換の互換性のため）。
-        assert_eq!(geom_type_from_sqlserver_name("ST_Point"), GeometryType::Point);
+        assert_eq!(
+            geom_type_from_sqlserver_name("ST_Point"),
+            GeometryType::Point
+        );
         assert_eq!(
             geom_type_from_sqlserver_name("MULTIPOLYGON"),
             GeometryType::MultiPolygon

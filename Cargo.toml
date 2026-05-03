@@ -8,6 +8,7 @@ resolver = "2"
 members = [
     "crates/shpx-core",
     "crates/shpx-geom",
+    "crates/shpx-rdb-common",
     "crates/shpx-driver-shp",
     "crates/shpx-driver-parquet",
     "crates/shpx-driver-csv",

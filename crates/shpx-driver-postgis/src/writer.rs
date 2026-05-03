@@ -284,7 +284,7 @@ fn resolve_srid(
     geom_meta: &GeometryMeta,
     on_loss: OnLoss,
 ) -> Result<i32> {
-    let crs: Option<Crs> = crs_arg.cloned().or_else(|| geom_meta.crs.clone());
+    let crs = shpx_rdb_common::merge_crs(crs_arg, geom_meta);
     let srid = epsg_from_crs(crs.as_ref(), on_loss)?;
     if srid != 0 {
         if let Some(c) = crs.as_ref() {
@@ -297,13 +297,12 @@ fn resolve_srid(
 /// CRS から SRID 整数を取り出す純粋関数。`spatial_ref_sys` への副作用は分離して
 /// [`register_srs_if_missing`] で扱う（テスト容易性のため）。
 fn epsg_from_crs(crs: Option<&Crs>, on_loss: OnLoss) -> Result<i32> {
-    if let Some(code) = crs.and_then(Crs::epsg_code) {
-        i32::try_from(code).map_err(|_| Error::Crs(format!("EPSG code {code} exceeds i32 range")))
-    } else {
-        // CRS 不明 or EPSG 化できない場合は srid=0 にフォールバック。
-        let _ = apply_on_loss(loss_kind::MISSING_CRS_ON_POSTGIS, "<srs>", on_loss)?;
-        Ok(0)
+    if let Some(srid) = shpx_rdb_common::resolve_epsg_srid(crs)? {
+        return Ok(srid);
     }
+    // CRS 不明 or EPSG 化できない場合は srid=0 にフォールバック。
+    let _ = apply_on_loss(loss_kind::MISSING_CRS_ON_POSTGIS, "<srs>", on_loss)?;
+    Ok(0)
 }
 
 /// `spatial_ref_sys` に SRID 行が無ければ INSERT する。`ON CONFLICT (srid) DO NOTHING` で
@@ -320,8 +319,6 @@ fn register_srs_if_missing(client: &Client, srid: i32, crs: &Crs) -> Result<()> 
         // EPSG 以外の authority は spatial_ref_sys (auth_name='EPSG') への登録対象外。
         return Ok(());
     };
-    let auth_srid = i32::try_from(code)
-        .map_err(|_| Error::Crs(format!("EPSG code {code} exceeds i32 range")))?;
     let Some(srtext) = crs
         .wkt
         .clone()
@@ -335,11 +332,12 @@ fn register_srs_if_missing(client: &Client, srid: i32, crs: &Crs) -> Result<()> 
         );
         return Ok(());
     };
+    // PostGIS の `auth_srid` は EPSG 番号と同値、`srid` は upstream で `i32::try_from(code)` 済み。
     let inserted = conn::execute(
         client,
         "INSERT INTO spatial_ref_sys (srid, auth_name, auth_srid, srtext, proj4text) \
          VALUES ($1, 'EPSG', $2, $3, NULL) ON CONFLICT (srid) DO NOTHING",
-        &[&srid, &auth_srid, &srtext],
+        &[&srid, &srid, &srtext],
     )?;
     if inserted > 0 {
         tracing::info!(

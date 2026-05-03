@@ -8,8 +8,15 @@
 //!   `geography` に上書きする）。
 //! - `?trusted_connection=true` は CLI からの形だけ受理し、`conn::connect` で
 //!   未対応エラーにする（v0.5+ で Windows 認証を実装予定）。
+//!
+//! 本モジュールには SQL Server 固有の関心事 (`mssql://` 専用 URL parser、`geom_type` /
+//! `trusted_connection` の解釈、`dbo` 既定スキーマ) のみを置く。汎用 URI / opts 解決は
+//! `shpx_rdb_common` を参照。
 
 use shpx_core::{CreateIndex, CreateTable, ReadOpts, Result, Uri, WriteOpts};
+use shpx_rdb_common::{
+    percent_decode, resolve_table_name, split_qualified, validate_overwrite_compat,
+};
 
 use crate::util::{driver_msg, DRIVER_NAME};
 
@@ -22,6 +29,9 @@ pub const ENV_BULK_CHUNK: &str = "SHPX_MSSQL_BULK_CHUNK";
 /// staging bulk の既定 chunk size。Express edition / 低メモリ dev 環境で安全側。
 /// bench 時のみ env で 1,000,000 などに引き上げる運用。
 pub const DEFAULT_BULK_CHUNK: usize = 100_000;
+
+/// SQL Server の既定スキーマ。`?table=` で schema を省略した場合に補う。
+const DEFAULT_SCHEMA: &str = "dbo";
 
 /// SQL Server の geometry 列に使う UDT 種別。
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -108,27 +118,24 @@ impl ParsedUrl {
         if query.is_empty() {
             return Ok(());
         }
-        for pair in query.split('&') {
-            let Some((k, v)) = pair.split_once('=') else {
-                continue;
-            };
-            let key_lc = k.to_ascii_lowercase();
+        // shpx_rdb_common::query_pairs は key を lowercase 化 + value を percent_decode 済みで返す。
+        // SQL Server 固有のキー (table / geom_type / trusted_connection) のみ拾う。
+        for (key_lc, value) in shpx_rdb_common::query_pairs(query) {
             match key_lc.as_str() {
                 "table" => {
-                    if v.is_empty() {
+                    if value.is_empty() {
                         return Err(driver_msg(format!(
                             "{DRIVER_NAME}: empty `?table=` in URI query"
                         )));
                     }
-                    self.table = Some(percent_decode(v));
+                    self.table = Some(value);
                 }
                 "geom_type" => {
-                    let decoded = percent_decode(v).to_ascii_lowercase();
-                    self.geom_type = Some(parse_geom_type(&decoded)?);
+                    self.geom_type = Some(parse_geom_type(&value.to_ascii_lowercase())?);
                 }
                 "trusted_connection" => {
-                    let decoded = percent_decode(v).to_ascii_lowercase();
-                    self.trusted_connection = matches!(decoded.as_str(), "true" | "1" | "yes");
+                    self.trusted_connection =
+                        matches!(value.to_ascii_lowercase().as_str(), "true" | "1" | "yes");
                 }
                 _ => {
                     // 未知のクエリパラメタは無視する。tiberius 拡張用に将来枠を残す。
@@ -194,8 +201,8 @@ pub struct ResolvedReadOpts {
 impl ResolvedReadOpts {
     pub fn resolve(uri: &Uri, opts: &ReadOpts) -> Result<Self> {
         let parsed = ParsedUrl::parse(uri.path())?;
-        let qualified = resolve_table(parsed.table.as_deref())?;
-        let (schema, table) = split_qualified(&qualified);
+        let qualified = resolve_table_name(parsed.table.as_deref(), ENV_TABLE, DRIVER_NAME)?;
+        let (schema, table) = split_qualified(&qualified, DEFAULT_SCHEMA);
         Ok(Self {
             url: uri.path().to_string(),
             schema,
@@ -223,16 +230,10 @@ pub struct ResolvedWriteOpts {
 
 impl ResolvedWriteOpts {
     pub fn resolve(uri: &Uri, opts: &WriteOpts) -> Result<Self> {
-        // PostGIS と同じく `--overwrite` は DROP→CREATE を要求するため
-        // `Never` (CREATE 発行禁止) と矛盾する。CLI 段階で気付かせるため早期に reject。
-        if opts.overwrite && matches!(opts.create_table, CreateTable::Never) {
-            return Err(driver_msg(format!(
-                "{DRIVER_NAME}: --overwrite と --create-table=never は同時に指定できない"
-            )));
-        }
+        validate_overwrite_compat(opts, DRIVER_NAME)?;
         let parsed = ParsedUrl::parse(uri.path())?;
-        let qualified = resolve_table(parsed.table.as_deref())?;
-        let (schema, table) = split_qualified(&qualified);
+        let qualified = resolve_table_name(parsed.table.as_deref(), ENV_TABLE, DRIVER_NAME)?;
+        let (schema, table) = split_qualified(&qualified, DEFAULT_SCHEMA);
         Ok(Self {
             url: uri.path().to_string(),
             schema,
@@ -243,68 +244,6 @@ impl ResolvedWriteOpts {
             create_index: opts.create_index,
             geom_type: parsed.geom_type.unwrap_or_default(),
         })
-    }
-}
-
-/// テーブル名（`schema.name` または `name`）を解決する。
-///
-/// 優先順位: URL クエリ `?table=...` > 環境変数 `SHPX_MSSQL_TABLE`。
-/// どちらも無い場合はエラー（v0.4 reader/writer は table 名必須）。
-fn resolve_table(query_table: Option<&str>) -> Result<String> {
-    if let Some(t) = query_table {
-        return Ok(t.to_string());
-    }
-    match std::env::var(ENV_TABLE) {
-        Ok(v) if !v.is_empty() => Ok(v),
-        _ => Err(driver_msg(format!(
-            "{DRIVER_NAME}: ?table=... query parameter is required (or set {ENV_TABLE})"
-        ))),
-    }
-}
-
-/// `schema.name` を `(schema, name)` に分割。schema 省略時は `dbo`（SQL Server の既定）。
-fn split_qualified(s: &str) -> (String, String) {
-    if let Some((schema, name)) = s.split_once('.') {
-        (schema.to_string(), name.to_string())
-    } else {
-        ("dbo".to_string(), s.to_string())
-    }
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b'%' if i + 2 < bytes.len() => {
-                if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                    out.push((h << 4) | l);
-                    i += 3;
-                } else {
-                    out.push(bytes[i]);
-                    i += 1;
-                }
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
     }
 }
 
@@ -391,24 +330,20 @@ mod tests {
     }
 
     #[test]
-    fn split_qualified_defaults_to_dbo() {
-        assert_eq!(
-            split_qualified("cities"),
-            ("dbo".to_string(), "cities".to_string())
-        );
-        assert_eq!(
-            split_qualified("foo.bar"),
-            ("foo".to_string(), "bar".to_string())
-        );
-    }
-
-    #[test]
     fn resolve_read_default() {
         let uri = Uri::from_path("mssql://sa:pw@h/db?table=t");
         let resolved = ResolvedReadOpts::resolve(&uri, &ReadOpts::default()).unwrap();
         assert_eq!(resolved.schema, "dbo");
         assert_eq!(resolved.table, "t");
         assert_eq!(resolved.geom_type_hint, None);
+    }
+
+    #[test]
+    fn resolve_read_qualified_table() {
+        let uri = Uri::from_path("mssql://sa:pw@h/db?table=foo.bar");
+        let resolved = ResolvedReadOpts::resolve(&uri, &ReadOpts::default()).unwrap();
+        assert_eq!(resolved.schema, "foo");
+        assert_eq!(resolved.table, "bar");
     }
 
     #[test]
@@ -443,7 +378,7 @@ mod tests {
 
     #[test]
     fn resolve_table_missing_errors() {
-        // 環境変数が未設定で query にも無ければエラー。env が設定済みの環境では skip。
+        // 環境変数が他テストや shell から設定済みの環境では skip する。
         if std::env::var(ENV_TABLE).is_ok() {
             return;
         }

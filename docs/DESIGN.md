@@ -188,6 +188,7 @@ shpx/
 ├── crates/
 │   ├── shpx-core/            # Driver trait, 中間型, Arrow helpers
 │   ├── shpx-geom/            # WKB/WKT, CRS, reprojection
+│   ├── shpx-rdb-common/      # RDB driver 共通ヘルパー (URI, on_loss, CRS→SRID 等)
 │   ├── shpx-driver-shp/
 │   ├── shpx-driver-gpkg/
 │   ├── shpx-driver-spatialite/

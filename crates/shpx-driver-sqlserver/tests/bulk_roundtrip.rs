@@ -31,7 +31,9 @@ use common::{cleanup, mssql_url, schema_with_geom, unique_table, uri_with_table,
 
 fn make_uri_with_geom_type(base_url: &str, table: &str, geom_type: &str) -> Uri {
     let sep = if base_url.contains('?') { '&' } else { '?' };
-    Uri::from_path(format!("{base_url}{sep}table={table}&geom_type={geom_type}"))
+    Uri::from_path(format!(
+        "{base_url}{sep}table={table}&geom_type={geom_type}"
+    ))
 }
 
 #[test]
@@ -166,8 +168,16 @@ fn bulk_decimal_38_10_bit_identical() {
     let b = &batches[0];
 
     let amt_back = b.column(0).as_primitive::<Decimal128Type>();
-    assert_eq!(amt_back.value(0), val, "positive decimal must be bit-identical");
-    assert_eq!(amt_back.value(1), val_neg, "negative decimal must be bit-identical");
+    assert_eq!(
+        amt_back.value(0),
+        val,
+        "positive decimal must be bit-identical"
+    );
+    assert_eq!(
+        amt_back.value(1),
+        val_neg,
+        "negative decimal must be bit-identical"
+    );
     assert!(amt_back.is_null(2));
 
     drop(r);
@@ -321,7 +331,9 @@ fn all_types_schema() -> SchemaRef {
     let mut m = HashMap::new();
     m.insert(
         GEOMETRY_META_KEY.to_string(),
-        GeometryMeta::wkb(GeometryType::Point, crs).to_json().unwrap(),
+        GeometryMeta::wkb(GeometryType::Point, crs)
+            .to_json()
+            .unwrap(),
     );
     g.set_metadata(m);
     fields.push(g);
