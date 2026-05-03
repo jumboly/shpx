@@ -1,0 +1,158 @@
+shpx
+Copyright 2026 shpx contributors
+
+This product is dual-licensed under either of:
+
+  * MIT License (LICENSE-MIT)
+  * Apache License, Version 2.0 (LICENSE-APACHE)
+
+at your option.
+
+The shpx binary, when built from this workspace, links against the third-party
+software listed below. Each entry summarizes the upstream project, the license
+under which shpx redistributes (or links to) it, and where in shpx the
+dependency is used. License texts for crates pulled in by Cargo can be inspected
+with `cargo license` or in each crate's source tree under
+`~/.cargo/registry/src/`. The C / C++ libraries that shpx vendors via build
+scripts (libspatialite, libgeos, libproj) ship their own LICENSE / COPYING
+files inside the relevant `vendor/` directories.
+
+Driver-scope details for the libspatialite vendor tree (tarball provenance,
+removed paths, distribution implications under LGPL 2.1) live in
+`crates/shpx-driver-spatialite/NOTICE`.
+
+================================================================================
+C / C++ libraries linked when `bundled-spatialite` / `bundled-proj` features
+================================================================================
+
+## libspatialite 5.1.0
+
+  Upstream:   https://www.gaia-gis.it/gaia-sins/
+  License:    triple-licensed under MPL 1.1 / GPL 2.0 / LGPL 2.1
+              (see crates/shpx-driver-spatialite/vendor/libspatialite-5.1.0/COPYING)
+  Used by:    shpx-driver-spatialite (when `bundled-spatialite` feature is on)
+  Notes:      vendored in-tree under
+              crates/shpx-driver-spatialite/vendor/libspatialite-5.1.0/.
+              Statically linked via build.rs + cc.
+              See crates/shpx-driver-spatialite/NOTICE for distribution
+              implications under the LGPL 2.1 option.
+
+## libgeos (GEOS)
+
+  Upstream:   https://libgeos.org/
+  License:    LGPL 2.1
+  Used by:    shpx-driver-spatialite (transitively, via geos-src 0.2 when
+              `bundled-spatialite` feature is on)
+  Notes:      compiled from source by the `geos-src` build script (CMake +
+              C++ stdlib). Not vendored directly by shpx; the version is
+              determined by `geos-src 0.2`.
+
+## libproj (PROJ)
+
+  Upstream:   https://proj.org/
+  License:    X/MIT (BSD-style)
+  Used by:    shpx-geom (when `bundled-proj` feature is on; implied by
+              `bundled-spatialite` on the CLI)
+  Notes:      compiled from source by `proj-sys` (via the `proj` crate's
+              `bundled_proj` feature). License text ships inside the proj-sys
+              vendor tree.
+
+## SQLite
+
+  Upstream:   https://www.sqlite.org/
+  License:    Public Domain
+  Used by:    shpx-driver-gpkg, shpx-driver-spatialite (always; via the
+              `rusqlite/bundled` feature regardless of the spatialite bundle).
+  Notes:      compiled from source by the `libsqlite3-sys` crate.
+
+================================================================================
+Rust crates (selected direct dependencies)
+================================================================================
+
+The following crates are direct dependencies declared in `Cargo.toml` and form
+the public-facing data path of shpx (geometry I/O, RDBMS clients, format
+codecs). License values are the SPDX expressions declared by each crate's
+upstream `Cargo.toml`. Indirect / transitive dependencies are not enumerated
+here; consult `cargo tree` and `cargo license` for the full list.
+
+## Apache Arrow / Parquet
+
+  Crates:     arrow, arrow-array, arrow-schema, parquet (54.x)
+  License:    Apache-2.0
+  Used by:    every driver (shpx schema I/O), parquet driver (GeoParquet codec)
+
+## tokio / tokio-postgres / postgres-types
+
+  Crates:     tokio, tokio-postgres, postgres-types, tokio-util
+  License:    MIT
+  Used by:    shpx-driver-postgis (PostgreSQL/PostGIS client), shpx-driver-sqlserver
+
+## tiberius
+
+  Crates:     tiberius (0.12)
+  License:    MIT OR Apache-2.0
+  Used by:    shpx-driver-sqlserver (SQL Server / Azure SQL client)
+
+## flatgeobuf / geozero
+
+  Crates:     flatgeobuf (6.0), geozero (0.15)
+  License:    BSD-2-Clause (flatgeobuf) / MIT OR Apache-2.0 (geozero)
+  Used by:    shpx-driver-fgb (FlatGeobuf reader/writer)
+
+## shapefile
+
+  Crates:     shapefile (0.6)
+  License:    MIT
+  Used by:    shpx-driver-shp (Shapefile reader/writer)
+
+## geojson
+
+  Crates:     geojson (0.24)
+  License:    MIT OR Apache-2.0
+  Used by:    shpx-driver-geojson (FeatureCollection / NDJSON reader/writer)
+
+## proj
+
+  Crates:     proj (0.28), proj-sys
+  License:    MIT
+  Used by:    shpx-geom (Reprojector)
+
+## rusqlite
+
+  Crates:     rusqlite (0.31, with `bundled` SQLite)
+  License:    MIT
+  Used by:    shpx-driver-gpkg, shpx-driver-spatialite
+
+## Workspace-wide utility crates
+
+  Crates:     chrono, regex, encoding_rs, clap, thiserror, serde, serde_json,
+              inventory, bytes, futures-util, rust_decimal, uuid, tracing,
+              tracing-subscriber
+  License:    MIT OR Apache-2.0 (see upstream crate metadata)
+  Used by:    CLI / schema / error / logging / JSON / decimal glue.
+
+================================================================================
+Build-time only
+================================================================================
+
+## cc, geos-src, link-cplusplus, proj-sys
+
+  License:    MIT OR Apache-2.0
+  Used by:    `bundled-spatialite` / `bundled-proj` feature builds
+              (build.rs + native compilation glue). Not linked into the final
+              binary except as the C/C++ libraries they wrap (covered above).
+
+================================================================================
+Trademarks / disclaimers
+================================================================================
+
+  * "PostGIS" and "PostgreSQL" are trademarks of the PostgreSQL Global
+    Development Group / PostGIS contributors.
+  * "Microsoft", "SQL Server", and "Azure SQL" are trademarks of Microsoft
+    Corporation.
+  * "GeoPackage" is a trademark of the Open Geospatial Consortium.
+  * "FlatGeobuf" is a trademark of the FlatGeobuf project.
+
+shpx is not affiliated with or endorsed by any of the above projects or
+organizations. References to these names exist only to identify the file
+formats / wire protocols / database systems that shpx interoperates with.
