@@ -6,11 +6,12 @@
 //! - geometry / geography 切替は `?geom_type=geometry|geography`（既定 `geometry`、
 //!   未指定で schema metadata に `edges=spherical` がある場合のみ writer 側で
 //!   `geography` に上書きする）。
-//! - `?trusted_connection=true` は CLI からの形だけ受理し、`conn::connect` で
-//!   未対応エラーにする（v0.5+ で Windows 認証を実装予定）。
+//! - 認証は `?auth=sql|integrated|windows` で切り替える。既定 `sql` (user/pass)。
+//!   `?trusted_connection=true` は `?auth=integrated` のエイリアス (後方互換)。
+//!   `integrated` / `windows` は CLI feature `windows-auth` が有効な時のみ動作する。
 //!
 //! 本モジュールには SQL Server 固有の関心事 (`mssql://` 専用 URL parser、`geom_type` /
-//! `trusted_connection` の解釈、`dbo` 既定スキーマ) のみを置く。汎用 URI / opts 解決は
+//! 認証種別の解釈、`dbo` 既定スキーマ) のみを置く。汎用 URI / opts 解決は
 //! `shpx_rdb_common` を参照。
 
 use shpx_core::{CreateIndex, CreateTable, ReadOpts, Result, Uri, WriteOpts};
@@ -32,6 +33,20 @@ pub const DEFAULT_BULK_CHUNK: usize = 100_000;
 
 /// SQL Server の既定スキーマ。`?table=` で schema を省略した場合に補う。
 const DEFAULT_SCHEMA: &str = "dbo";
+
+/// SQL Server 認証方式。`?auth=` または `?trusted_connection=true` で切り替える。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum AuthKind {
+    /// SQL 認証 (`mssql://user:pass@host/db`)。既定。プラットフォーム非依存。
+    #[default]
+    Sql,
+    /// 現在ログイン中の OS ユーザーで認証。Windows: SSPI、Unix: Kerberos via libgssapi。
+    /// CLI feature `windows-auth` 有効時のみ動作。`?trusted_connection=true` の正式形。
+    Integrated,
+    /// 明示 user/password による NTLM 認証。Windows のみで動作。CLI feature
+    /// `windows-auth` 有効時のみ動作。user は `DOMAIN\user` 形式可。
+    Windows,
+}
 
 /// SQL Server の geometry 列に使う UDT 種別。
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -66,8 +81,9 @@ pub struct ParsedUrl {
     pub table: Option<String>,
     /// `?geom_type=geometry|geography`（未指定なら None、writer/reader 側で既定を補う）。
     pub geom_type: Option<GeomKind>,
-    /// `?trusted_connection=true`（v0.5+ 予約、cycle 1 は受け取って即 reject）。
-    pub trusted_connection: bool,
+    /// `?auth=sql|integrated|windows` または `?trusted_connection=true` 由来の認証種別。
+    /// 既定は `Sql` で `?trusted_connection=true` は `Integrated` のエイリアス。
+    pub auth: AuthKind,
 }
 
 impl ParsedUrl {
@@ -133,9 +149,18 @@ impl ParsedUrl {
                 "geom_type" => {
                     self.geom_type = Some(parse_geom_type(&value.to_ascii_lowercase())?);
                 }
+                "auth" => {
+                    self.auth = parse_auth_kind(&value.to_ascii_lowercase())?;
+                }
                 "trusted_connection" => {
-                    self.trusted_connection =
-                        matches!(value.to_ascii_lowercase().as_str(), "true" | "1" | "yes");
+                    // 後方互換: `?trusted_connection=true` は `?auth=integrated` の別名。
+                    // 明示 `?auth=` と併用された場合は `?auth=` の方を尊重する (key 走査
+                    // 順は HashMap でなく query 出現順なので、`auth` が先で
+                    // `trusted_connection=true` が後なら上書きされる仕様 — 利用者には
+                    // 「両方を併記しない」と docs で案内する)。
+                    if matches!(value.to_ascii_lowercase().as_str(), "true" | "1" | "yes") {
+                        self.auth = AuthKind::Integrated;
+                    }
                 }
                 _ => {
                     // 未知のクエリパラメタは無視する。tiberius 拡張用に将来枠を残す。
@@ -152,6 +177,17 @@ fn parse_geom_type(s: &str) -> Result<GeomKind> {
         "geography" => Ok(GeomKind::Geography),
         other => Err(driver_msg(format!(
             "{DRIVER_NAME}: unknown ?geom_type=`{other}` (must be `geometry` or `geography`)"
+        ))),
+    }
+}
+
+fn parse_auth_kind(s: &str) -> Result<AuthKind> {
+    match s {
+        "sql" => Ok(AuthKind::Sql),
+        "integrated" => Ok(AuthKind::Integrated),
+        "windows" => Ok(AuthKind::Windows),
+        other => Err(driver_msg(format!(
+            "{DRIVER_NAME}: unknown ?auth=`{other}` (must be `sql` / `integrated` / `windows`)"
         ))),
     }
 }
@@ -287,10 +323,31 @@ mod tests {
     }
 
     #[test]
-    fn parse_trusted_connection_is_received() {
-        // 値は受け取るだけ。connect 側で reject する。
+    fn parse_trusted_connection_aliases_integrated_auth() {
         let p = ParsedUrl::parse("mssql://sa:Pw@h/db?trusted_connection=true&table=t").unwrap();
-        assert!(p.trusted_connection);
+        assert_eq!(p.auth, AuthKind::Integrated);
+    }
+
+    #[test]
+    fn parse_auth_query_values() {
+        let p = ParsedUrl::parse("mssql://sa:Pw@h/db?auth=sql&table=t").unwrap();
+        assert_eq!(p.auth, AuthKind::Sql);
+        let p = ParsedUrl::parse("mssql://h/db?auth=integrated&table=t").unwrap();
+        assert_eq!(p.auth, AuthKind::Integrated);
+        let p = ParsedUrl::parse("mssql://u:p@h/db?auth=windows&table=t").unwrap();
+        assert_eq!(p.auth, AuthKind::Windows);
+    }
+
+    #[test]
+    fn parse_auth_unknown_value_errors() {
+        let err = ParsedUrl::parse("mssql://h/db?auth=ldap&table=t").unwrap_err();
+        assert!(format!("{err}").contains("unknown ?auth"));
+    }
+
+    #[test]
+    fn parse_default_auth_is_sql() {
+        let p = ParsedUrl::parse("mssql://sa:Pw@h/db?table=t").unwrap();
+        assert_eq!(p.auth, AuthKind::Sql);
     }
 
     #[test]

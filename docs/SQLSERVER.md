@@ -33,9 +33,63 @@ mssql://<user>:<password>@<host>[:<port>]/<database>?<key>=<value>&...
 |---|---|---|
 | `table` | (`SHPX_MSSQL_TABLE` env、無ければエラー) | `schema.name` または `name`。schema 省略時は `dbo` |
 | `geom_type` | `geometry` | `geometry` / `geography` を切替。`geography` は SRID 必須 |
-| `trusted_connection` | `false` | v0.4 では `true` 受理 → 未対応エラー（v0.5+ で Windows / Azure AD 認証を実装予定） |
+| `auth` | `sql` | `sql` (user/pass) / `integrated` / `windows`。下記「認証」節 |
+| `trusted_connection` | `false` | `true` は `?auth=integrated` のエイリアス (後方互換) |
 
 URL 内の特殊文字（パスワードの記号など）は `%xx` で percent encode する。userinfo の `@` を含むパスワードは「最後の `@` を userinfo/host の区切り」とみなす保守的なパースだが、確実を期すため `%40` 推奨。
+
+## 認証
+
+`?auth=` または `?trusted_connection=true` で認証方式を切り替える。`integrated` / `windows` は CLI feature `windows-auth` 有効時のみ動作する (既定は SQL 認証のみ)。
+
+| `?auth=` | URL 例 | 動作プラットフォーム | 必要 feature | 系外依存 |
+|---|---|---|---|---|
+| `sql` (既定) | `mssql://sa:Pw@host/db` | 全 OS | なし | なし |
+| `integrated` | `mssql://host/db?auth=integrated` | Windows / Linux / macOS | `windows-auth` | Unix のみ system `libgssapi-krb5` |
+| `windows` | `mssql://DOMAIN%5Cuser:Pw@host/db?auth=windows` | Windows のみ | `windows-auth` | なし (pure Rust SSPI) |
+
+- **`sql`**: SQL Server 認証 (一般 user / sa)。プラットフォーム非依存、追加 install 不要。
+- **`integrated`**: 現在ログイン中の OS ユーザーで認証。
+  - Windows: pure Rust の SSPI (`tiberius/winauth`)。追加 install 不要。
+  - Linux / macOS: Kerberos via `libgssapi-krb5`。**システムに `libkrb5` が必要** (`apt install libkrb5-dev`、`brew install krb5`)。配布バイナリでは bundled しないため、利用時に install してもらう前提。Active Directory 統合済み環境を想定 (`kinit` 等で TGT が発行されている状態)。
+- **`windows`**: 明示 user/password による NTLM 認証。Windows でのみ動作。`DOMAIN\user` 形式の `\` は URL 上 `%5C` に percent-encode する。
+
+### feature の有効化
+
+```bash
+# driver crate を直接使う場合
+cargo build -p shpx-driver-sqlserver --features windows-auth
+
+# CLI バイナリ
+cargo build -p shpx-cli --features windows-auth
+```
+
+feature 無効時に `?auth=integrated` / `?auth=windows` を指定するとビルド時ではなく接続時に明示エラー (`?auth=integrated requires the windows-auth feature ...`) を返す。
+
+### 配布バイナリでの状況
+
+`cargo-dist` の Release artifact では (v1.0 段階での想定):
+
+| OS | `windows-auth` | 備考 |
+|---|---|---|
+| Windows x64 / arm64 | 有効化 | 追加 install 不要 |
+| Linux x64 / arm64 | 無効化 (既定) | `libkrb5` 同梱の影響評価が済むまで opt-in。利用したいユーザーは `cargo install --features windows-auth` で local build |
+| macOS x64 / arm64 | 無効化 (既定) | macOS 標準 Kerberos.framework は使えるが、tiberius は `libgssapi-krb5` 経由で見るため Homebrew `krb5` が必要 |
+
+将来 (v1.x) tiberius が `sspi-rs` へ移行すれば pure Rust の Linux/macOS NTLM 認証が可能になり、配布段階で全 OS 有効化を再検討する見込み。
+
+## URI 例
+
+```bash
+# SQL 認証 (既定)
+shpx convert in.shp 'mssql://sa:Pw@localhost/dev?table=t&geom_type=geometry'
+
+# AD 統合認証 (Windows / Linux Kerberos)
+shpx convert in.shp 'mssql://prod-sql.corp.example.com/data?auth=integrated&table=t'
+
+# Windows NTLM (明示 creds)
+shpx convert in.shp 'mssql://DOMAIN%5Calice:Pw@host/db?auth=windows&table=t'
+```
 
 ## CRS と SRID
 
@@ -138,7 +192,7 @@ SHPX_MSSQL_BULK_CHUNK=1000000 \
 
 - **reader 拡張 (`--where` / `--select` / `--query`) は v0.5+**: v0.4 では指定すると明示エラー。tiberius 経由の動的 UDT 検出と `--query` のサブクエリ化は工数のため後回しにした。
 - **`--create-index=Always` は事前 PK 必須**: SQL Server の `CREATE SPATIAL INDEX` は仕様で **clustered primary key を要求** する。shpx writer は汎用 driver として `CREATE TABLE` 時に PK を勝手に付与しないため、`--create-index=Always` を使うには利用者が事前に PK 付きテーブルを CREATE しておき `--create-table=never` で append する運用になる。`--create-index=Auto` は no-op で何もしないので安全側。
-- **認証は SQL 認証のみ**: `?trusted_connection=true` は受理するが driver で reject。Windows 認証（SSPI）と Azure AD は v0.5+ 予定。
+- **Windows 認証は opt-in feature**: `?auth=integrated|windows` は CLI feature `windows-auth` を有効化したビルドでのみ動作する。配布バイナリ (cargo-dist) では Windows のみ既定有効化、Linux / macOS は libkrb5 system dep を避けるため既定無効。Azure AD 認証は v1.x 以降の検討。
 - **macOS の TLS**: tiberius を `rustls` feature で有効化済み（`native-tls` は SQL Server 2019+ で TLS handshake 失敗の既知問題があるため）。
 - **decimal の bit-identical**: `rust_decimal::Decimal` の内部 scale (0..=28) と Arrow `Decimal128` の scale (0..=38) が一致しない場合、reader 側で 10^delta スケーリングする。SQL Server 側の値が schema 通りに格納されている限り delta は 0 になる（schema を介さず生 Numeric 値を流すケースで可能性あり）。
 - **`#temp` テーブルのスコープ**: tiberius の `Client` 接続が切断されると `#shpx_stage_<uuid>` も消える。bulk 中に接続が切れた場合は途中までの行が target テーブルに既に COMMIT 済みである可能性があり、再実行時は `--create-table=always` または手動で target を DROP する。
