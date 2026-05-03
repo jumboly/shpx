@@ -1,13 +1,23 @@
 //! GeoJSON / GeoJSONL を Arrow `RecordBatch` ストリームとして読み出す。
 //!
-//! 全 Feature を一度メモリにロードしてから `batches()` で 4096 件ずつ流す
-//! （巨大ファイルの streaming 読みは `docs/GEOJSON.md` の Future work 参照）。
+//! v0.8 cycle 3 で eager-load (`Vec<Feature>`) を撤廃した。`open()` ではファイル head を
+//! 軽量プローブして `crs` メンバ抽出と先頭 N=1024 feature の型推論サンプリングを行い、
+//! その後ファイルを開き直して features 配列を真にストリーミングで列挙する。
 //!
-//! 属性 (properties) の Arrow 型は **全 Feature を 1 回スニフ** して決める。
-//! 昇格規則は `docs/GEOJSON.md` 「properties の型推論」章を参照。
+//! - FeatureCollection: `geojson::FeatureReader::from_reader(R).features()` を使う
+//!   (`crates/shpx-driver-geojson/src/stream.rs::open_feature_collection`)。
+//! - NDJSON: `BufRead::lines()` ベースで空行 / `#` コメント行をスキップしつつ
+//!   1 行 1 Feature をパース (`stream.rs::open_ndjson`)。
+//!
+//! 属性 (properties) の Arrow 型はサンプル N 件だけスニフして決める。ファイルがそれを
+//! 超える行を含む場合、本番ストリームで型不一致が見つかったら以下のように振る:
+//! - 数値 / Bool / null は append_value で値変換できるので問題なし。
+//! - String 列に Number / Bool / Object / Array が来た場合は `JsonValue::to_string()` で
+//!   文字列化して詰める (既存の Utf8 demote ロジックと同じ)。
+//! - 整数列に Float が来た場合のみ精度が落ちる。サンプル数を `SHPX_GEOJSON_INFER_SAMPLE`
+//!   env で増やして対処する想定。
 
 use std::collections::HashMap;
-use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -16,7 +26,7 @@ use arrow_array::{
     ArrayRef, RecordBatch,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use geojson::{Feature, GeoJson, Value as GjValue};
+use geojson::{Feature, Value as GjValue};
 use serde_json::Value as JsonValue;
 use shpx_core::{
     schema::{GeometryMeta, GeometryType, GEOMETRY_META_KEY},
@@ -26,22 +36,29 @@ use shpx_geom::wkb;
 
 use crate::geom_convert::geometry_to_geom;
 use crate::options::{OutputFormat, ResolvedReadOpts};
+use crate::stream::{self, FeatureStream};
 use crate::util::{driver_err, driver_msg};
 
 /// Geometry 列名（出力時固定。RFC 7946 Feature の `geometry` フィールドに対応）。
 pub const GEOM_COLUMN_NAME: &str = "geometry";
 
-/// 1 batch あたりの行数。FeatureCollection / GeoJSONL いずれでもメモリ上に
-/// `Vec<Feature>` を持つため、CSV と同等の 4096 にしておく。
+/// 1 batch あたりの行数。
 const READ_BATCH_SIZE: usize = 4096;
+
+/// 型推論用にサンプリングする feature 件数の既定値。
+const DEFAULT_INFER_SAMPLE: usize = 1024;
+
+/// 環境変数: 型推論サンプル数 override (`0` で無効化、未指定で `DEFAULT_INFER_SAMPLE`)。
+pub const ENV_INFER_SAMPLE: &str = "SHPX_GEOJSON_INFER_SAMPLE";
 
 /// GeoJSON / GeoJSONL の `LayerReader` 実装。
 pub struct GeoJsonReader {
     schema: SchemaRef,
     crs: Option<Crs>,
-    /// Properties 列の出力スキーマ順 + その Arrow 型。最終 column index は features.len()。
+    /// Properties 列の出力スキーマ順 + その Arrow 型。
     columns: Vec<ColumnPlan>,
-    features: Vec<Feature>,
+    /// 真のストリーミング iterator (FeatureCollection / NDJSON 共通)。
+    stream: Option<FeatureStream>,
 }
 
 #[derive(Debug, Clone)]
@@ -54,12 +71,15 @@ impl GeoJsonReader {
     pub fn open(uri: &Uri, opts: &ReadOpts) -> Result<Self> {
         let resolved = ResolvedReadOpts::resolve(uri, opts)?;
         let path = PathBuf::from(uri.path());
-        let body = read_text(&path)?;
 
-        let (features, crs_from_doc) = match resolved.format {
-            OutputFormat::FeatureCollection => parse_feature_collection(&body)?,
-            // GeoJSONL は 1 行 1 Feature の NDJSON。top-level に CRS の概念は無い。
-            OutputFormat::Lines => (parse_geojson_lines(&body)?, None),
+        // Pass 1: head を probe して top-level CRS を取り出す。
+        // GeoJSONL (NDJSON) は仕様上 root レベル CRS を持たない。
+        let crs_from_doc = match resolved.format {
+            OutputFormat::FeatureCollection => {
+                let v = stream::extract_top_level_crs_value(&path)?;
+                v.as_ref().map(parse_crs_member).transpose()?.flatten()
+            }
+            OutputFormat::Lines => None,
         };
 
         // ReadOpts.src_crs が指定されていればそれを優先する（CSV と同じ慣習）。
@@ -69,82 +89,59 @@ impl GeoJsonReader {
             .or(crs_from_doc)
             .or_else(|| Some(Crs::from_epsg(4326)));
 
-        let columns = infer_columns(&features);
-        let geom_type = unify_geometry_type(&features)?;
+        // Pass 2: 先頭 N feature をサンプリングして型推論。
+        let sample_limit = resolve_infer_sample()?;
+        let mut sample_iter = open_stream(resolved.format, &path)?;
+        let mut sample: Vec<Feature> = Vec::with_capacity(sample_limit.min(1024));
+        let mut sample_err: Option<Error> = None;
+        for _ in 0..sample_limit {
+            match sample_iter.next() {
+                Some(Ok(f)) => sample.push(f),
+                Some(Err(e)) => {
+                    sample_err = Some(e);
+                    break;
+                }
+                None => break,
+            }
+        }
+        // sample_iter は drop して file を閉じる (Pass 3 で再 open する)。
+        drop(sample_iter);
+        if let Some(e) = sample_err {
+            return Err(e);
+        }
+
+        let columns = infer_columns(&sample);
+        let geom_type = unify_geometry_type(&sample)?;
         let schema = build_schema(&columns, geom_type, crs.as_ref())?;
+
+        // Pass 3: 本番ストリーム。サンプル取得分も含めて先頭から再列挙する。
+        let stream = open_stream(resolved.format, &path)?;
 
         Ok(Self {
             schema,
             crs,
             columns,
-            features,
+            stream: Some(stream),
         })
     }
 }
 
-/// ファイルを UTF-8 で読み、先頭 BOM を寛容に剥がす。
-fn read_text(path: &PathBuf) -> Result<String> {
-    let raw = fs::read_to_string(path).map_err(Error::from)?;
-    if let Some(stripped) = raw.strip_prefix('\u{feff}') {
-        Ok(stripped.to_string())
-    } else {
-        Ok(raw)
+fn open_stream(format: OutputFormat, path: &std::path::Path) -> Result<FeatureStream> {
+    match format {
+        OutputFormat::FeatureCollection => stream::open_feature_collection(path),
+        OutputFormat::Lines => stream::open_ndjson(path),
     }
 }
 
-/// FeatureCollection 全体を `Vec<Feature>` と top-level CRS にパースする。
-/// 単発 `Feature` も許容（1 件入りの Vec として返す）。
-fn parse_feature_collection(body: &str) -> Result<(Vec<Feature>, Option<Crs>)> {
-    let gj: GeoJson = body.parse().map_err(|e| driver_err(&e))?;
-    match gj {
-        GeoJson::FeatureCollection(fc) => {
-            let crs = fc
-                .foreign_members
-                .as_ref()
-                .and_then(|m| m.get("crs"))
-                .map(parse_crs_member)
-                .transpose()?
-                .flatten();
-            Ok((fc.features, crs))
-        }
-        GeoJson::Feature(f) => {
-            let crs = f
-                .foreign_members
-                .as_ref()
-                .and_then(|m| m.get("crs"))
-                .map(parse_crs_member)
-                .transpose()?
-                .flatten();
-            Ok((vec![f], crs))
-        }
-        GeoJson::Geometry(_) => Err(driver_msg(
-            "top-level Geometry is not supported (expected FeatureCollection or Feature)",
-        )),
-    }
-}
-
-/// GeoJSON Lines (NDJSON) を `Vec<Feature>` にパースする。
-///
-/// - 空行 (whitespace のみ) は skip
-/// - `#` で始まる行は skip（NDJSON 規格上は不要だが、コメント行を入れる実装が現実に存在するため寛容に）
-/// - 1 行 = 1 Feature を要求する。`FeatureCollection` 行を含むのは仕様外として拒否する
-fn parse_geojson_lines(body: &str) -> Result<Vec<Feature>> {
-    let mut features = Vec::new();
-    for (lineno, raw) in body.lines().enumerate() {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let f: Feature = serde_json::from_str(trimmed).map_err(|e| {
+fn resolve_infer_sample() -> Result<usize> {
+    match std::env::var(ENV_INFER_SAMPLE) {
+        Ok(raw) => raw.parse::<usize>().map_err(|_| {
             driver_msg(format!(
-                "GeoJSONL line {}: {e}",
-                // 0-indexed → 人間向けに 1-indexed
-                lineno + 1
+                "{ENV_INFER_SAMPLE}: invalid value `{raw}` (expected non-negative integer)"
             ))
-        })?;
-        features.push(f);
+        }),
+        Err(_) => Ok(DEFAULT_INFER_SAMPLE),
     }
-    Ok(features)
 }
 
 /// 旧仕様の top-level `crs` メンバを `Crs` に解釈する。
@@ -212,7 +209,7 @@ fn parse_crs_name(name: &str) -> Result<Crs> {
     )))
 }
 
-/// 全 Feature の properties をスニフして列計画を作る。
+/// サンプル feature の properties をスニフして列計画を作る。
 ///
 /// 列順は最初の出現順（後続 Feature で初登場するキーは末尾に append）。
 fn infer_columns(features: &[Feature]) -> Vec<ColumnPlan> {
@@ -317,7 +314,7 @@ fn merge(prev: Option<Inferred>, new: Inferred) -> Inferred {
     }
 }
 
-/// 全 Feature の geometry 型を集約する。
+/// サンプル feature の geometry 型を集約する。
 fn unify_geometry_type(features: &[Feature]) -> Result<GeometryType> {
     let mut found: Option<GeometryType> = None;
     for f in features {
@@ -374,15 +371,16 @@ impl LayerReader for GeoJsonReader {
     }
 
     fn row_count_hint(&self) -> Option<usize> {
-        Some(self.features.len())
+        // streaming のため事前に行数は分からない。
+        None
     }
 
     fn batches(&mut self) -> Box<dyn Iterator<Item = Result<RecordBatch>> + Send + '_> {
-        let features = std::mem::take(&mut self.features);
+        let stream = self.stream.take();
         Box::new(BatchIter {
             schema: self.schema.clone(),
             columns: self.columns.clone(),
-            features: features.into_iter(),
+            stream,
             done: false,
         })
     }
@@ -391,20 +389,26 @@ impl LayerReader for GeoJsonReader {
 struct BatchIter {
     schema: SchemaRef,
     columns: Vec<ColumnPlan>,
-    features: std::vec::IntoIter<Feature>,
+    stream: Option<FeatureStream>,
     done: bool,
 }
 
 impl BatchIter {
     fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+        let Some(stream) = self.stream.as_mut() else {
+            return Ok(None);
+        };
         let mut builders = ColumnBuilders::new(&self.columns);
         let mut row_count = 0usize;
 
-        for feature in self.features.by_ref() {
-            builders.append_row(&feature, &self.columns)?;
-            row_count += 1;
-            if row_count >= READ_BATCH_SIZE {
-                break;
+        for _ in 0..READ_BATCH_SIZE {
+            match stream.next() {
+                Some(Ok(feature)) => {
+                    builders.append_row(&feature, &self.columns)?;
+                    row_count += 1;
+                }
+                Some(Err(e)) => return Err(e),
+                None => break,
             }
         }
 

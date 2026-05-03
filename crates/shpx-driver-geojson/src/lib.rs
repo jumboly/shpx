@@ -18,6 +18,7 @@ use shpx_core::{
 pub mod geom_convert;
 pub mod options;
 pub mod reader;
+pub mod stream;
 pub mod util;
 pub mod writer;
 
