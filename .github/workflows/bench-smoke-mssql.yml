@@ -59,11 +59,15 @@ jobs:
           sudo apt-get update
           sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev mssql-tools18
 
-      - name: Install build deps and gdal-bin
+      - name: Install build deps and gdal-bin (with Parquet plugin)
         run: |
           set -euxo pipefail
-          # libgdal-arrow-parquet は Parquet driver が gdal-bin 本体ではなく別 plugin
-          # として配布されているため必須 (Ubuntu 24.04 / GDAL 3.8 以降)。
+          # Ubuntu 標準 apt の `gdal-bin` は Parquet driver 同梱無し
+          # (`libgdal-arrow-parquet` パッケージが noble に存在しない)。
+          # ubuntugis-unstable PPA で newer GDAL + arrow/parquet plugin を入れる。
+          sudo apt-get install -y software-properties-common
+          sudo add-apt-repository -y ppa:ubuntugis/ubuntugis-unstable
+          sudo apt-get update
           sudo apt-get install -y libproj-dev pkg-config gdal-bin libgdal-arrow-parquet
           # bench-vs-ogr-mssql.sh の sqlcmd 解決経路 (host PATH または `docker compose exec`) は
           # GitHub Actions services 上では後者が成立しないため、host PATH に出す必要がある。
