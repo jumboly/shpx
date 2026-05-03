@@ -1,7 +1,15 @@
 //! PostGIS の `LayerReader` 実装。
 //!
-//! テーブル全件 SELECT を 1 度だけ block_on で発行し、結果を Arrow `RecordBatch` に
-//! 詰めてオブジェクト内で保持する。`batches()` は固定 chunk サイズに分割して列挙する。
+//! v0.8 cycle 4 で eager-load (`Vec<RecordBatch>`) を撤廃し、background OS thread +
+//! `std::sync::mpsc::sync_channel(2)` で `tokio_postgres::RowStream` を逐次消費する
+//! 真のストリーミングに置き換えた。
+//!
+//! - probe 系 (geometry_columns view、ST_SRID/ST_GeometryType の 1 行 LIMIT) は従来通り
+//!   `conn::query_opt` を使い、`open()` 内で同期的に解決する。
+//! - 本番 SELECT は **新しい client を 1 本別途 connect** して background thread に move し、
+//!   `query_raw` で得た `RowStream` を `try_next()` ループで pull、`READ_BATCH_SIZE`
+//!   行ごとに `RecordBatch` 化して channel へ送る。channel 容量 2 で receiver が drop
+//!   されると next `tx.send` が Err になり worker が自然終了する。
 //!
 //! geometry 列は `ST_AsEWKB(<col>)` で取得し、`shpx_geom::ewkb::strip_srid` で
 //! 標準 WKB と SRID に分離する。SRID は `geometry_columns` view → 先頭 non-NULL 行の
@@ -14,7 +22,9 @@
 //!   して列メタを取り、本番 SQL では geometry 列を `ST_AsEWKB` で包んで再発行する。
 
 use std::collections::HashMap;
+use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::Arc;
+use std::thread;
 
 use arrow_array::{
     builder::{
@@ -26,6 +36,7 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+use futures_util::TryStreamExt;
 use shpx_core::{
     schema::{GeometryMeta, GeometryType, GEOMETRY_META_KEY},
     Crs, Error, LayerReader, ReadOpts, Result, Uri,
@@ -37,17 +48,23 @@ use crate::conn;
 use crate::copy_binary::PgNumeric;
 use crate::options::{validate_user_query, ResolvedReadOpts};
 use crate::type_map::{geom_type_from_st_name, pg_to_arrow};
-use crate::util::{driver_msg, is_geometry_typname, quote_ident, quote_qualified, DRIVER_NAME};
+use crate::util::{
+    driver_err, driver_msg, is_geometry_typname, quote_ident, quote_qualified, DRIVER_NAME,
+};
 
 /// 1 batch あたりの既定行数。`batch_size_hint` 未指定時に使う。
 const DEFAULT_BATCH_SIZE: usize = 65_536;
 
+/// background worker から send される 1 batch ぶん。
+/// `Err` の場合はその時点で worker が早期終了したことを意味する。
+type BatchChunk = std::result::Result<RecordBatch, shpx_core::Error>;
+
 pub struct PostgisReader {
     schema: SchemaRef,
     crs: Option<Crs>,
-    /// 全行を Arrow に詰めた中間表現。`batches()` で chunk サイズに分割して列挙する。
-    rows: Vec<RecordBatch>,
-    row_count: usize,
+    /// background worker thread からの batch 受信口。`batches()` で take する。
+    /// rx の drop が worker 側 tx.send Err を誘発し worker 自然終了に繋がる。
+    rx: Option<Receiver<BatchChunk>>,
 }
 
 impl PostgisReader {
@@ -62,11 +79,12 @@ impl PostgisReader {
             validate_user_query(q)?;
         }
         let client = conn::connect(uri.path())?;
+        let url = uri.path().to_string();
         if let Some(query) = opts.query.as_deref() {
-            Self::open_query_mode(&client, query, opts)
+            Self::open_query_mode(&client, query, opts, &url)
         } else {
             let resolved = ResolvedReadOpts::resolve(uri, opts)?;
-            Self::open_table_mode(&client, &resolved, opts)
+            Self::open_table_mode(&client, &resolved, opts, &url)
         }
     }
 
@@ -74,6 +92,7 @@ impl PostgisReader {
         client: &Client,
         resolved: &ResolvedReadOpts,
         opts: &ReadOpts,
+        url: &str,
     ) -> Result<Self> {
         let qualified = quote_qualified(&resolved.schema, &resolved.table);
         let all_columns = describe_columns(client, &resolved.schema, &resolved.table)?;
@@ -111,11 +130,15 @@ impl PostgisReader {
 
         let select_sql =
             build_select_sql_table(&columns, geom_idx, &qualified, opts.where_clause.as_deref());
-        let rows = conn::query(client, &select_sql, &[])?;
-        Self::finish(schema, crs, &columns, geom_idx, &rows)
+        Self::spawn_streaming(url, &select_sql, schema, crs, columns, geom_idx)
     }
 
-    fn open_query_mode(client: &Client, query: &str, opts: &ReadOpts) -> Result<Self> {
+    fn open_query_mode(
+        client: &Client,
+        query: &str,
+        opts: &ReadOpts,
+        url: &str,
+    ) -> Result<Self> {
         // ユーザ SQL を LIMIT 0 でサブクエリ化し、列メタだけ先取り。geometry 列は
         // PostGIS の動的 OID で発行されるが、tokio-postgres は pg_catalog から
         // typname を解決済みなので `Type::name()` で判定できる。
@@ -150,25 +173,98 @@ impl PostgisReader {
         let schema = build_arrow_schema(&columns, geom_idx, geom_type, crs.as_ref())?;
 
         let real_sql = build_select_sql_query(&columns, geom_idx, query);
-        let rows = conn::query(client, &real_sql, &[])?;
-        Self::finish(schema, crs, &columns, geom_idx, &rows)
+        Self::spawn_streaming(url, &real_sql, schema, crs, columns, geom_idx)
     }
 
-    fn finish(
+    /// background OS thread を起動し、reader 専用に新規 connect した client から
+    /// `query_raw` で `RowStream` を pull、`READ_BATCH_SIZE` 行ごとに `RecordBatch`
+    /// を組んで channel へ送る。
+    ///
+    /// 専用 client を別途 connect する理由: 呼び出し側 (probe で使った既存 client) を
+    /// move すると probe 後の client lifetime と worker thread 寿命が結びついてしまい、
+    /// `&Client` を閉じる順序が複雑化する。CLI scope では connect 1 回 (数 ms) の
+    /// オーバーヘッドは無視できるため、reader 用に都度 1 本立てる方針に倒す。
+    fn spawn_streaming(
+        url: &str,
+        sql: &str,
         schema: SchemaRef,
         crs: Option<Crs>,
-        columns: &[ColumnInfo],
+        columns: Vec<ColumnInfo>,
         geom_idx: usize,
-        rows: &[Row],
     ) -> Result<Self> {
-        let batch = rows_to_record_batch(&schema, columns, geom_idx, rows)?;
-        let row_count = batch.num_rows();
-        let chunks = chunk_batch(&batch, DEFAULT_BATCH_SIZE);
+        let bg_client = conn::connect(url)?;
+        let rt = crate::runtime::runtime()?;
+        let sql = sql.to_string();
+        let schema_for_worker = schema.clone();
+        let (tx, rx) = sync_channel::<BatchChunk>(2);
+
+        thread::spawn(move || {
+            rt.block_on(async move {
+                let stream = match bg_client
+                    .query_raw(&sql, std::iter::empty::<i32>())
+                    .await
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = tx.send(Err(driver_err(&e)));
+                        return;
+                    }
+                };
+                tokio::pin!(stream);
+
+                let mut buf: Vec<Row> = Vec::with_capacity(DEFAULT_BATCH_SIZE);
+                loop {
+                    match stream.try_next().await {
+                        Ok(Some(row)) => {
+                            buf.push(row);
+                            if buf.len() >= DEFAULT_BATCH_SIZE {
+                                let chunk = std::mem::replace(
+                                    &mut buf,
+                                    Vec::with_capacity(DEFAULT_BATCH_SIZE),
+                                );
+                                match rows_to_record_batch(
+                                    &schema_for_worker,
+                                    &columns,
+                                    geom_idx,
+                                    &chunk,
+                                ) {
+                                    Ok(batch) => {
+                                        if tx.send(Ok(batch)).is_err() {
+                                            return; // receiver dropped
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(Err(e));
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            let _ = tx.send(Err(driver_err(&e)));
+                            return;
+                        }
+                    }
+                }
+                if !buf.is_empty() {
+                    match rows_to_record_batch(&schema_for_worker, &columns, geom_idx, &buf) {
+                        Ok(batch) => {
+                            let _ = tx.send(Ok(batch));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Err(e));
+                        }
+                    }
+                }
+                // bg_client は async block 終端で drop され、Connection task も自然終了する。
+            });
+        });
+
         Ok(Self {
             schema,
             crs,
-            rows: chunks,
-            row_count,
+            rx: Some(rx),
         })
     }
 }
@@ -183,11 +279,40 @@ impl LayerReader for PostgisReader {
     }
 
     fn row_count_hint(&self) -> Option<usize> {
-        Some(self.row_count)
+        // streaming のため事前に行数は確定しない (`SELECT COUNT(*)` を別途叩くと
+        // ラウンドトリップが増えるため敢えてやらない)。
+        None
     }
 
     fn batches(&mut self) -> Box<dyn Iterator<Item = Result<RecordBatch>> + Send + '_> {
-        Box::new(self.rows.drain(..).map(Ok))
+        let rx = self.rx.take();
+        Box::new(BatchIter { rx })
+    }
+}
+
+/// `LayerReader::batches()` から返されるストリーム iterator。
+struct BatchIter {
+    rx: Option<Receiver<BatchChunk>>,
+}
+
+impl Iterator for BatchIter {
+    type Item = Result<RecordBatch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let rx = self.rx.as_ref()?;
+        match rx.recv() {
+            Ok(Ok(b)) => Some(Ok(b)),
+            Ok(Err(e)) => {
+                // worker からのエラー後はそれ以上読まない。
+                self.rx = None;
+                Some(Err(e))
+            }
+            Err(_) => {
+                // tx の drop = 全 batch 送信完了 (または worker 早期 return)。
+                self.rx = None;
+                None
+            }
+        }
     }
 }
 
@@ -721,21 +846,6 @@ fn append_value(
     Ok(())
 }
 
-/// `RecordBatch` を `chunk_size` 単位の連続スライスに分割する。
-fn chunk_batch(batch: &RecordBatch, chunk_size: usize) -> Vec<RecordBatch> {
-    if batch.num_rows() <= chunk_size {
-        return vec![batch.clone()];
-    }
-    let mut out = Vec::with_capacity(batch.num_rows().div_ceil(chunk_size));
-    let mut offset = 0;
-    while offset < batch.num_rows() {
-        let len = (batch.num_rows() - offset).min(chunk_size);
-        out.push(batch.slice(offset, len));
-        offset += len;
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -847,18 +957,4 @@ mod tests {
         assert_eq!(numeric_typmod_to_p_s(p5_s10 + 4), (38, 0));
     }
 
-    #[test]
-    fn chunk_batch_splits_uniformly() {
-        use arrow_array::Int32Array;
-        use arrow_schema::Schema as ASchema;
-
-        let schema = Arc::new(ASchema::new(vec![Field::new("v", DataType::Int32, true)]));
-        let arr = Int32Array::from(vec![Some(1), Some(2), Some(3), Some(4), Some(5)]);
-        let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
-        let chunks = chunk_batch(&batch, 2);
-        assert_eq!(chunks.len(), 3);
-        assert_eq!(chunks[0].num_rows(), 2);
-        assert_eq!(chunks[1].num_rows(), 2);
-        assert_eq!(chunks[2].num_rows(), 1);
-    }
 }
