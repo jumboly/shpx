@@ -92,7 +92,7 @@
 
 **完了基準**:
 - [x] geometry / geography 双方で staging 経由 bulk insert が動く（`tests/bulk_roundtrip.rs::bulk_geography_all_geom_types` ほか、env-gated）
-- [ ] chunk size 1M でも tempdb 溢れなし（chunk ごと commit）— 実 SQL Server に対する 10M 行ベンチで確認予定
+- [x] chunk size 1M でも tempdb 溢れなし（chunk ごと commit）— v1.0 cycle 1 の `bench-smoke-mssql` workflow で 10M 行 × 3 runs の完走を確認 (median 138.53s on ubuntu-latest)
 - [x] CI で `docker compose up mssql` テスト（`.github/workflows/ci.yml` の `services.mssql`）
 
 **確定済み設計判断**:

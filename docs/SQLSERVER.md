@@ -107,7 +107,7 @@ cargo test -p shpx-driver-sqlserver --locked
 
 ## Benchmark
 
-完了基準 (`docs/ROADMAP.md` v0.4): chunk size 1M でも tempdb 溢れずに 10M 行 staging bulk insert が完走する。CI で `.github/workflows/bench-smoke-mssql.yml` を `rows=10000000 runs=3` で `workflow_dispatch` し、`SHPX_MSSQL_BULK_CHUNK=1000000` 下で全 run が成功すれば判定 OK。
+完了基準 (`docs/ROADMAP.md` v0.4): chunk size 1M でも tempdb 溢れずに 10M 行 staging bulk insert が完走する。`.github/workflows/bench-smoke-mssql.yml` を `rows=10000000 runs=3 SHPX_MSSQL_BULK_CHUNK=1000000` で実行した結果、ubuntu-latest 上で 3 run 全完走、wall-clock は **139.01 / 138.23 / 138.53 s** (median 138.53s ≈ 72k rows/s)。v1.0 cycle 1 の workflow run [25275545973](https://github.com/jumboly/shpx/actions/runs/25275545973) で記録。
 
 bench 入力スキーマは tiberius 0.12 の bulk encode 既知不整合を避けるため、minimal 4 列 (Int64 / Utf8 / Float64 / Point) に絞っている。bit-identical な型網羅検証は別途 `tests/bulk_roundtrip.rs` の単独テストで cover。
 
