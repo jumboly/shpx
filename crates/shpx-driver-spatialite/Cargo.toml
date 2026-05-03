@@ -12,8 +12,9 @@ workspace = true
 
 [features]
 # `bundled-spatialite` を有効化すると、配布バイナリ (cargo-dist) 用に
-# libspatialite を C ソースから static link する。実装は v0.5 cycle 2 で行う。
-# 現状 (cycle 1) は宣言のみで、有効化してもシステム libspatialite を見る挙動と同じ。
+# libspatialite を C ソースから static link する。実装は v0.6 を予定。
+# 現状 (v0.5) は no-op で、有効化してもシステム libspatialite (apt の
+# libsqlite3-mod-spatialite 等) を `load_extension` 経由で使う挙動と同じ。
 bundled-spatialite = []
 
 [dependencies]

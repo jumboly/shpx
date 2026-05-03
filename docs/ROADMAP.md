@@ -122,7 +122,7 @@
 - reader: `?table=` / `SHPX_SPATIALITE_TABLE` 解決、`AsBinary(geom)` で WKB 取得、SRID は `geometry_columns.srid` 参照
 - writer: 1 トランザクション + 行単位 prepared `INSERT ... GeomFromWKB(?, srid)`、`--create-table=if-not-exists|always|never`、`--create-index=auto|always|never` (Always で `SELECT CreateSpatialIndex(...)` の R*Tree)
 - 接続: `sqlite://path?table=...` / `*.sqlite` / `*.db` / `*.spatialite` ファイル拡張子
-- `bundled-spatialite` feature で配布バイナリでも mod_spatialite 同梱（cargo-dist 単一バイナリ向け）
+- `bundled-spatialite` feature の本実装は v0.6 に繰り延べ。v0.5 はシステム libspatialite (CI / 開発機の apt 等) 前提で出荷し、feature 宣言は v0.6 予約として no-op で残す
 
 **完了基準**:
 - [ ] SpatiaLite ↔ GPKG / Shapefile の往復
@@ -136,13 +136,35 @@
 - **SpatiaLite blob の対応範囲**: v0.5 では XY のみ。Z/M / EMPTY / GeometryCollection は `Error::Geometry` で拒否（v1.0 以降で拡張）。MBR は WKB から走査して算出する。
 - **SRID 解決順序**: `--src-crs` > schema field metadata > `apply_on_loss` フォールバック (PostGIS / SQL Server と同型)。fallback は SRID 0 (SpatiaLite 慣習で unknown)。
 - **`spatial_ref_sys` への登録**: PostGIS と同パターンで `Crs.wkt` または `epsg_to_wkt1(code)` から組み立て、`INSERT OR IGNORE INTO spatial_ref_sys (...)` で best-effort 登録。
-- **`bundled-spatialite` の build 戦略**: libspatialite C ソースを vendor して `cc` で static link。GEOS は `geos-src` crate 経由、PROJ は workspace の `proj/bundled_proj` を流用。cycle 2 で詰まった場合は v0.6 に縮退して v0.5 はシステム libspatialite + CI apt のみで出荷する選択肢を残す。
+- **`bundled-spatialite` は v0.6 で実装**: workspace に `build.rs` ファイルが一つも無く bundled C ビルドの足場がゼロであること、libspatialite が GEOS / PROJ にも依存し vendor 範囲が cycle 1 つに収まらないことから、v0.5 はシステム libspatialite + CI apt 経由のみで出荷する。`bundled-spatialite` feature 宣言は driver / CLI の Cargo.toml に v0.6 予約として残し、有効化しても no-op (システム libspatialite を `load_extension` で見る挙動と同じ)。本実装の build 戦略 (libspatialite を `cc` で vendor、GEOS / PROJ の調達方針) は v0.6 セクションで詳細化する。
 
 **サブ cycle 構成** (v0.3 / v0.4 と同じく cycle ごとに `/clear` して clean に再開する):
 
 - **cycle 1 — 基盤と最小往復**: workspace に `crates/shpx-driver-spatialite` 追加、`shpx-geom::spatialite_blob` モジュール (encode/decode + ユニットテスト)、`SpatialiteDriver` 雛形 (`supported_schemes = &["sqlite", "db", "spatialite"]`、`Capabilities { read, write, !bulk_load }`)、`conn.rs` で `load_extension` + `InitSpatialMetadata(1)`、reader (`AsBinary` + SRID 解決)、writer (`--overwrite` のみ、行単位 prepared INSERT)、`shpx-cli/src/registry.rs` 登録、`bundled-spatialite` feature の宣言のみ。`.github/workflows/ci.yml` (Linux) に `apt-get install libsqlite3-mod-spatialite` + env。env-gated 統合テスト 1-2 件 (`SHPX_TEST_SPATIALITE`)。
-- **cycle 2 — writer 拡張 + bundled-spatialite + R*Tree**: `--create-table` 3 種 (PostGIS と同形)、`--create-index` 3 種 (`Always` で `SELECT CreateSpatialIndex(?, ?)` の R*Tree、`Auto` は `create_table != Never` のときのみ生成)、SRID 解決順序の統一、`spatial_ref_sys` への best-effort INSERT、`--overwrite && create_table=Never` 整合性エラー。`bundled-spatialite` feature を `build.rs` + `cc` で実装、`shpx-cli/Cargo.toml` の features へ伝播。env-gated 統合テスト `tests/writer_options.rs` 7-9 件。CI に `bundled-spatialite` smoke job 追加。
+- **cycle 2 — writer 拡張 + R*Tree**: `--create-table` 3 種 (PostGIS と同形)、`--create-index` 3 種 (`Always` で `SELECT CreateSpatialIndex(?, ?)` の R*Tree、`Auto` は `create_table != Never` のときのみ生成)、SRID 解決順序の統一 (`--src-crs` > schema metadata > `apply_on_loss` フォールバック / SRID 0)、`spatial_ref_sys` への best-effort INSERT (`INSERT OR IGNORE`)、`--overwrite && create_table=Never` 整合性エラー (`shpx_rdb_common::validate_overwrite_compat`)、env-gated 統合テスト `tests/writer_options.rs` 9 件。`bundled-spatialite` 本実装と CI smoke job は v0.6 に繰り延べ (上記「確定済み設計判断」参照)。
 - **cycle 3 — docs + 完了基準 + 0.5.0 release**: `docs/SPATIALITE.md` 新設 (POSTGIS.md / SQLSERVER.md と同型構造)、`docs/DATA_TYPES.md` の SpatiaLite 列確定、`docs/DESIGN.md` L.149-160 訂正、`docs/CRS.md` / `docs/CONTRIBUTING.md` / `README.md` 更新、`CHANGELOG.md` v0.5.0 セクション、workspace `Cargo.toml` を `0.5.0` へ bump、release commit。完了基準テスト (SpatiaLite ↔ GPKG / SpatiaLite ↔ Shapefile の e2e 往復、CI Linux env-gated)。
+
+---
+
+## v0.6 — bundled-spatialite + 配布バイナリ準備
+
+**スコープ**:
+- `crates/shpx-driver-spatialite/build.rs` を新規作成し、libspatialite C ソースを vendor して `cc` で static link
+- `shpx-cli/Cargo.toml` の `bundled-spatialite` feature 伝播は v0.5 で枠組み済みのため、本実装の中身を埋めるのみ
+- CI に `bundled-spatialite` smoke job を追加 (Linux ubuntu-latest、システム libspatialite 不在状態でビルドが通ることを確認)
+- v1.0 の `cargo-dist` リリースに向けた前提整備 (Linux/macOS/Windows での bundled ビルド検証)
+
+**完了基準**:
+- [ ] `cargo build -p shpx-cli --features bundled-spatialite` がシステム libspatialite 不在環境で成功
+- [ ] CI に `bundled-spatialite` smoke job (Linux) が追加され、緑
+
+**確定済み設計判断**:
+- **GEOS / PROJ 調達方針**: GEOS は `geos-src` crate 経由 (無ければ自前 vendor)、PROJ は既存 `shpx-geom/bundled-proj` (外部 `proj` crate の `bundled_proj` feature) を再利用。libsqlite3 は `rusqlite` の `bundled` feature で既に vendor 済み (v0.5 cycle 1)。
+- **build.rs の段階的実装**: (1) libspatialite C ソース vendor + `cc` 静的コンパイル → (2) GEOS リンク → (3) PROJ リンク → (4) `mod_spatialite` の静的初期化 (`extern "C" fn spatialite_init()` を `load_extension` の代わりに直接呼ぶ)。
+- **macOS / Windows の優先度**: cycle 当初は Linux のみ smoke job、macOS / Windows は v1.0 の `cargo-dist` 配信時に追加対応。
+- **詰まった場合の縮退**: それでも v0.6 内で詰まった場合は v0.7 に再縮退する (v0.5 と同じ判断パターン)。
+
+**サブ cycle 構成**: 本実装段階で詳細化する。現時点では「単一 cycle 想定」とだけ記載。
 
 ---
 

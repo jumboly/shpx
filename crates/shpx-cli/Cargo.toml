@@ -15,8 +15,8 @@ workspace = true
 [features]
 default       = []
 bundled-proj  = ["shpx-geom/bundled-proj"]
-# v0.5 で SpatiaLite driver の bundled-spatialite feature を CLI から伝播させる。
-# 実装は v0.5 cycle 2 (現状は枠組みのみで、有効化してもシステム libspatialite を見る挙動)。
+# SpatiaLite driver の bundled-spatialite feature を CLI から伝播させる枠組み。
+# 実装本体は v0.6 を予定 (現状 v0.5 は no-op で、有効化してもシステム libspatialite を見る挙動)。
 bundled-spatialite = ["shpx-driver-spatialite/bundled-spatialite"]
 
 # CLI バイナリ名は `shpx`。crate 名と分けることでパッケージ名衝突を避ける。
