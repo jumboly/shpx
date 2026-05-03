@@ -1,6 +1,10 @@
 //! `shpx convert <src> <dst>` の実装。
 
+use std::io::IsTerminal;
+use std::time::Duration;
+
 use arrow_schema::SchemaRef;
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use shpx_core::{
     schema::find_geometry_column, Crs, Driver, Error, LayerReader, LayerWriter, ReadOpts, Result,
     Uri, WriteOpts,
@@ -79,6 +83,34 @@ struct PipelineCtx<'a> {
     reader: &'a mut dyn LayerReader,
     reprojector: Option<&'a Reprojector>,
     geom_idx: Option<usize>,
+    bar: &'a ProgressBar,
+}
+
+/// `--quiet` または stderr が非 TTY (CI / pipe) のとき `ProgressBar::hidden()` を返す。
+/// 行数が確定 (`Some(n)`) なら ProgressBar、未確定 (`None`、CSV 等の streaming) なら
+/// Spinner を返す。出力先は stderr 固定 (stdout は将来の `--format=json` 出力等のため
+/// 温存)。再描画レートは 10 Hz に絞り、CI ログのバッファ flush への悪影響を抑える。
+fn build_progress(total: Option<usize>, quiet: bool) -> ProgressBar {
+    if quiet || !std::io::stderr().is_terminal() {
+        return ProgressBar::hidden();
+    }
+    let bar = if let Some(n) = total {
+        let style = ProgressStyle::with_template(
+            "{percent:>3}% [{bar:40}] {human_pos}/{human_len} rows {per_sec} ETA {eta}",
+        )
+        .unwrap_or_else(|_| ProgressStyle::default_bar());
+        ProgressBar::new(n as u64).with_style(style)
+    } else {
+        let style = ProgressStyle::with_template("{spinner} {human_pos} rows {per_sec}")
+            .unwrap_or_else(|_| ProgressStyle::default_spinner());
+        let spinner = ProgressBar::new_spinner().with_style(style);
+        // batch 1 つが長い (CSV など行数未知の streaming 経路) ときに spinner が
+        // 固まって見えないよう、独立 tick で 250ms 毎に再描画する。
+        spinner.enable_steady_tick(Duration::from_millis(250));
+        spinner
+    };
+    bar.set_draw_target(ProgressDrawTarget::stderr_with_hz(10));
+    bar
 }
 
 fn run_bulk(ctx: PipelineCtx<'_>, counters: &mut BatchCounters) -> Result<()> {
@@ -91,6 +123,7 @@ fn run_bulk(ctx: PipelineCtx<'_>, counters: &mut BatchCounters) -> Result<()> {
         reader,
         reprojector,
         geom_idx,
+        bar,
     } = ctx;
     let mut bulk = dst_driver
         .open_bulk_write(dst_uri, writer_schema, writer_crs, write_opts)?
@@ -100,6 +133,7 @@ fn run_bulk(ctx: PipelineCtx<'_>, counters: &mut BatchCounters) -> Result<()> {
                 "driver advertised bulk_load but open_bulk_write returned None",
             )
         })?;
+    // `bulk_write` は内部で iterator を消費するため、map クロージャが唯一の進捗 hook。
     let mut iter = reader.batches().map(|batch_res| {
         let batch = batch_res?;
         let batch = if let (Some(r), Some(gi)) = (reprojector, geom_idx) {
@@ -109,6 +143,7 @@ fn run_bulk(ctx: PipelineCtx<'_>, counters: &mut BatchCounters) -> Result<()> {
         };
         counters.rows += batch.num_rows() as u64;
         counters.batches += 1;
+        bar.inc(batch.num_rows() as u64);
         Result::Ok(batch)
     });
     bulk.bulk_write(&mut iter)?;
@@ -125,6 +160,7 @@ fn run_batch(ctx: PipelineCtx<'_>, counters: &mut BatchCounters) -> Result<()> {
         reader,
         reprojector,
         geom_idx,
+        bar,
     } = ctx;
     let mut writer = dst_driver.open_write(dst_uri, writer_schema, writer_crs, write_opts)?;
     for batch in reader.batches() {
@@ -137,11 +173,12 @@ fn run_batch(ctx: PipelineCtx<'_>, counters: &mut BatchCounters) -> Result<()> {
         counters.rows += batch.num_rows() as u64;
         counters.batches += 1;
         writer.write_batch(&batch)?;
+        bar.inc(batch.num_rows() as u64);
     }
     LayerWriter::finish(writer)
 }
 
-pub fn run(args: &ConvertArgs) -> Result<()> {
+pub fn run(args: &ConvertArgs, quiet: bool) -> Result<()> {
     let src_uri = Uri::from_path(args.src.clone());
     let dst_uri = Uri::from_path(args.dst.clone());
 
@@ -195,6 +232,8 @@ pub fn run(args: &ConvertArgs) -> Result<()> {
 
     let geom_idx = find_geometry_column(&reader_schema)?.map(|(i, _, _)| i);
 
+    let bar = build_progress(reader.row_count_hint(), quiet);
+
     // 出力 driver が bulk 経路を持つかを capabilities で確認し、`--insert-mode` と組み合わせて分岐する。
     let bulk_supported = dst_driver.capabilities().bulk_load;
     let use_bulk = match args.insert_mode {
@@ -224,12 +263,14 @@ pub fn run(args: &ConvertArgs) -> Result<()> {
         reader: reader.as_mut(),
         reprojector: reprojector.as_ref(),
         geom_idx,
+        bar: &bar,
     };
     if use_bulk {
         run_bulk(ctx, &mut counters)?;
     } else {
         run_batch(ctx, &mut counters)?;
     }
+    bar.finish_and_clear();
 
     tracing::info!(
         target: "shpx::cli",

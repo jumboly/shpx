@@ -119,6 +119,11 @@ uuid           = { version = "1", features = ["v4"] }
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# CLI 進捗バー (`shpx convert`)。`default-features = false` で `unicode-width` の
+# locale 検出依存を避け、ASCII / spinner / human_pos の最小機能のみ使う。stderr が
+# TTY でない場合 (CI ログ / pipe) は indicatif 側の `is_hidden()` で自動抑止される。
+indicatif         = "0.17"
+
 # テスト用
 tempfile      = "3"
 assert_cmd    = "2"

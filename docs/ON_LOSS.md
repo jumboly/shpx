@@ -28,10 +28,11 @@ CLI からは `shpx convert <src> <dst> --on-loss=warn` のように指定する
 | shp | `prj-write-unsupported-epsg` | EPSG コード不明な CRS を `.prj` に書こうとした | `.prj` ファイルを書かない |
 | shp | `timestamp-truncate-on-dbf` | Arrow `Timestamp` 列 | 日付部分のみ DBF Date 列へ書く (時刻情報を捨てる) |
 | shp | `timestamp-tz-on-dbf` | Arrow `Timestamp` で tz 付き | UTC 換算後に日付部分のみ書く |
-| shp | `z-on-shp` | Z 座標を含むジオメトリ (将来用、現状の中間表現が XY のみのため未発火) | Z を捨てる |
-| shp | `m-on-shp` | M 座標を含むジオメトリ (同上) | M を捨てる |
+| shp | `z-on-shp` | reader が `PointZ` / `PolylineZ` / `PolygonZ` / `MultipointZ` shape を読むとき発火する (`crates/shpx-driver-shp/src/geometry.rs:76-85`)。writer 側は中間表現 (`shpx_geom::wkb::Geom`) が XY のみのため到達しない | Z を捨てて XY にする |
+| shp | `m-on-shp` | reader が `*M` shape を読むとき発火する (`crates/shpx-driver-shp/src/geometry.rs:64-73`)。writer 側は同上の理由で未発火 | M を捨てて XY にする |
 | csv | `binary-on-csv` | Arrow `Binary` / `LargeBinary` 列 | warn 経路は base64 等を実装していないため列ごと除外 |
 | csv | `structured-on-csv` | Arrow `List` / `Struct` / `Map` 列 | JSON 文字列化が未実装のため warn でも書き出し時に拒否、skip のみ列ごと除外 |
+| csv | `encoding-unmappable` | (定義のみ、現状未発火) `crates/shpx-driver-csv/src/util.rs:21` の定数のみ存在し、writer 側で UTF-8 → cpg encoding 変換時に発火させる将来用 hook | encoder の代替文字 (通常 `?`) で書く想定 |
 | geojson | `binary-on-geojson` | Arrow `Binary` / `LargeBinary` 列 | warn 経路は base64 等を実装していないため列ごと除外 |
 | geojson | `structured-on-geojson` | Arrow `List` / `Struct` / `Map` 列 | JSON 構造化が未実装のため warn でも書き出し時に拒否、skip のみ列ごと除外 |
 | geojson | `decimal-on-geojson` | Arrow `Decimal128(p, s)` 列 | RFC 7946 で `number` への昇格に精度損失が起きうるため列ごと除外 (warn / skip 共通) |
@@ -41,18 +42,38 @@ CLI からは `shpx convert <src> <dst> --on-loss=warn` のように指定する
 | gpkg | `decimal-on-gpkg` | Arrow `Decimal128(p, s)` 列 | SQLite 宣言型に Decimal が無いため `TEXT` に文字列化して格納 |
 | gpkg | `uint64-overflow-on-gpkg` | `UInt64` 値が `i64::MAX` を超える | warn は `i64::MAX` で飽和、skip は `NULL` |
 | gpkg | `missing-crs-on-gpkg` | CRS 解決不能 (EPSG 化できない / `Crs` が無い) | `srs_id=0` (Undefined geographic) で書き出し |
-| spatialite | `decimal-on-spatialite` | Arrow `Decimal128` / `Decimal256` 列 | `TEXT` に文字列化して格納 |
-| spatialite | `uint64-overflow-on-spatialite` | `UInt64` 値が `i64::MAX` を超える | warn は `i64::MAX` で飽和、skip は `NULL` |
-| spatialite | `missing-crs-on-spatialite` | CRS 解決不能 | `srid=0` (SpatiaLite 慣習で unknown) で書き出し |
+| spatialite | `decimal-on-spatialite` | Arrow `Decimal128` / `Decimal256` 列 (`crates/shpx-driver-spatialite/src/writer.rs:502`) | `TEXT` に文字列化して格納 |
+| spatialite | `uint64-overflow-on-spatialite` | `UInt64` 値が `i64::MAX` を超える (`crates/shpx-driver-spatialite/src/writer.rs:485`) | warn は `i64::MAX` で飽和、skip は `NULL` |
+| spatialite | `missing-crs-on-spatialite` | CRS 解決不能 (`crates/shpx-driver-spatialite/src/writer.rs:237`) | `srid=0` (SpatiaLite 慣習で unknown) で書き出し |
 | fgb | `decimal-on-fgb` | Arrow `Decimal128` / `Decimal256` 列 | FGB の ColumnType に Decimal が無いため文字列降格 |
 | fgb | `uint64-overflow-on-fgb` | `UInt64` 値が `i64::MAX` を超える | warn でも roundtrip しないため値を記録した上で警告のみ |
 | fgb | `missing-crs-on-fgb` | CRS 解決不能 | header の `crs` field を未設定で書き出し |
-| postgis | `missing-crs-on-postgis` | CRS 解決不能 | `srid=0` で書き出し (PostGIS は SRID 0 を unknown として許容) |
-| sqlserver | `missing-crs-on-sqlserver` | CRS 解決不能 | `geometry` 列は `srid=0`、`geography` 列は SRID 必須のため `4326` フォールバック |
+| postgis | `missing-crs-on-postgis` | CRS 解決不能 (`crates/shpx-driver-postgis/src/writer.rs:304`) | `srid=0` で書き出し (PostGIS は SRID 0 を unknown として許容) |
+| sqlserver | `missing-crs-on-sqlserver` | CRS 解決不能 (`crates/shpx-driver-sqlserver/src/writer.rs:311`) | `geometry` 列は `srid=0`、`geography` 列は SRID 必須のため `4326` フォールバック |
 
 **Parquet driver (`shpx-driver-parquet`)** は v0.7 時点で `loss_kind` module を空のまま整備している。現状の writer は `coerce_types=false` 固定で `Timestamp(Nanosecond)` / `Decimal128(<= 38)` を完全保持し、shpx 中間表現 (`shpx_geom::wkb::Geom`) も XY のみのため Z/M も到達しない。`--parquet-coerce-types` 等のフラグや Z/M 対応を入れた段階で `precision-on-parquet` / `nanosecond-truncation-on-parquet` / `z-on-parquet` / `m-on-parquet` を順次追加する想定 (`crates/shpx-driver-parquet/src/util.rs` のヘルパは既に整備済み)。
 
+**kind 命名規約**: 同種の損失 (timestamp ns 切り捨てなど) が複数 driver で起きる場合、`<phenomenon>-on-<driver>` 形式で driver suffix のみを変えて命名し、`<phenomenon>-on-` の prefix を共通にする。例: 将来 Parquet writer に `--parquet-coerce-types=true` を入れた場合は FGB の `timestamp-precision-on-fgb` (現状未定義、v0.8+ 追加予定) と prefix を揃え、`timestamp-precision-on-parquet` を採用する。`tracing` の filter (`RUST_LOG=...`) や grep でクロス driver に同種 loss を絞り込めるようにするための運用方針。
+
 **`--on-loss` 制御外の固定 warn**: 一部 driver は `--on-loss` 経由ではなく無条件に `tracing::warn!` を出して列を skip する経路を持つ。代表例: `unsupported-type-on-dbf` (SHP driver、DBF にマップできない Arrow 型)。これらは「データ損失ではなく明確な未対応」のため `--on-loss=error` でも停止しない。
+
+## `row_count_hint` と進捗バー
+
+`shpx convert` は `LayerReader::row_count_hint() -> Option<usize>` を読んで `indicatif::ProgressBar` の振る舞いを決める。`Some(n)` ならパーセント / ETA 付き ProgressBar、`None` (streaming で行数未知) なら Spinner に倒す。`--quiet` 指定または stderr が非 TTY の場合は `ProgressBar::hidden()` で no-op になる (CI ログ / pipe を ANSI escape で汚さないため)。
+
+| driver | `row_count_hint` | 取得元 | 進捗バーモード |
+|---|---|---|---|
+| shp | `Option<usize>` | DBF header の record count (`shapefile::Reader::shape_count()`) | ProgressBar (header 読込成功時) |
+| parquet | `Option<usize>` | `FileMetaData::num_rows()` | ProgressBar |
+| gpkg | `Some(usize)` | reader open 時に全行を eager-load して `.len()` | ProgressBar |
+| fgb | `Some(usize)` | reader open 時に全 feature を eager-load して `.len()` | ProgressBar |
+| geojson | `Some(usize)` | reader open 時に全 feature を eager-load して `.len()` | ProgressBar |
+| csv | `None` | streaming 読み込みで行数未知 | Spinner (ETA なし) |
+| postgis | `Some(usize)` | reader open 時に全行 SELECT して `RecordBatch::num_rows()` | ProgressBar |
+| sqlserver | `Some(usize)` | reader open 時に全行 SELECT して `RecordBatch::num_rows()` | ProgressBar |
+| spatialite | `Some(usize)` | reader open 時に全行 SELECT して `.len()` | ProgressBar |
+
+bar の更新粒度は **行 (rows)**。batch 経路では `LayerWriter::write_batch` 完了直後に `bar.inc(batch.num_rows() as u64)`、bulk 経路では `BulkLoadWriter::bulk_write` に渡す iterator の `.map()` クロージャ内で同じ inc を発火させる (`crates/shpx-cli/src/commands/convert.rs::run_batch` / `run_bulk`)。`run` 完了時に `bar.finish_and_clear()` で行末を消し、後続の `tracing::info!(target: "shpx::cli", ..., "convert ok")` の表示を干渉させない。
 
 ## driver 別の詳細
 
