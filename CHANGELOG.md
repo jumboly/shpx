@@ -10,7 +10,7 @@
 
 ### Build
 
-- **`.github/workflows/bench-smoke-mssql.yml` 新設**: SQL Server bench を Linux x86_64 (ubuntu-latest) で実行する `workflow_dispatch` 専用 workflow。`services.mssql` + Microsoft apt repo (`msodbcsql18` / `unixodbc-dev` / `mssql-tools18`) + `gdal-bin` を導入し、`scripts/bench-vs-ogr-mssql.sh` の shpx vs ogr2ogr 比較を CI で回す。`rows` / `runs` を input で受け、bench 出力を `actions/upload-artifact@v4` で 30 日保持する。Apple Silicon の SQL Server image は emulation 経由で参考値しか取れないため、v0.4 完了基準 (`shpx_secs <= 1.667 * ogr_secs`) は本 workflow での 10M 行 × 3-run median で判定する。
+- **`.github/workflows/bench-smoke-mssql.yml` 新設**: SQL Server bench を Linux x86_64 (ubuntu-latest) で実行する `workflow_dispatch` 専用 workflow。`services.mssql` 上で 10M 行の Parquet を `shpx convert --insert-mode=bulk --create-table=always` に流し、`SHPX_MSSQL_BULK_CHUNK=1000000` でも完走する (= tempdb 溢れなし) ことを確認する。`rows` / `runs` input、`actions/upload-artifact@v4` で 30 日保持。v0.4 完了基準 (`docs/ROADMAP.md`) はこれで判定する。`docs/SQLSERVER.md` に書かれていた `ogr2ogr -f MSSQLSpatial` との比較は GDAL Parquet plugin (`libgdal-arrow-parquet`) の CI 整備コスト (ubuntugis PPA / launchpad API 不安定) に見合わないため smoke 工程からは外し、ローカル比較したい開発者向けに `scripts/bench-vs-ogr-mssql.sh` だけは残す。
 
 ## [0.7.0] - 2026-05-03
 

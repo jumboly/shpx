@@ -107,11 +107,11 @@ cargo test -p shpx-driver-sqlserver --locked
 
 ## Benchmark
 
-完了基準: 1000万行 × Point の staging bulk insert が `ogr2ogr -f MSSQLSpatial` の wall-clock の **0.6 倍以下**（PostGIS の 0.5 より緩い目標。tiberius 制約により案 B が必須でラウンドトリップが 1 段余分のため）。
+完了基準 (`docs/ROADMAP.md` v0.4): chunk size 1M でも tempdb 溢れずに 10M 行 staging bulk insert が完走する。CI で `.github/workflows/bench-smoke-mssql.yml` を `rows=10000000 runs=3` で `workflow_dispatch` し、`SHPX_MSSQL_BULK_CHUNK=1000000` 下で全 run が成功すれば判定 OK。
 
 bench 入力スキーマは tiberius 0.12 の bulk encode 既知不整合を避けるため、minimal 4 列 (Int64 / Utf8 / Float64 / Point) に絞っている。bit-identical な型網羅検証は別途 `tests/bulk_roundtrip.rs` の単独テストで cover。
 
-実測手順:
+ローカル実測手順:
 
 ```bash
 # bench 入力 Parquet を生成（criterion harness 経由、初回のみ重い）
@@ -119,20 +119,22 @@ SHPX_BENCH_ROWS=10000000 \
   cargo bench -q -p shpx-driver-sqlserver --bench bulk_insert -- \
   --quick --warm-up-time 1 --measurement-time 1
 
-# shpx vs ogr2ogr の median wall-clock を比較
+# shpx 単独の wall-clock 計測 (上記 CI workflow と同じ流れ)
 SHPX_TEST_SQLSERVER_URL='mssql://sa:Shpx_test_pw1!@localhost:1433/shpx_test' \
-  bash scripts/bench-vs-ogr-mssql.sh --rows 10000000 --runs 3
+SHPX_MSSQL_BULK_CHUNK=1000000 \
+  /usr/bin/time -p target/release/shpx convert \
+    --insert-mode=bulk --create-table=always --create-index=auto \
+    target/bench-data/points_mssql_10000000.parquet \
+    "${SHPX_TEST_SQLSERVER_URL}?table=bench_shpx"
 ```
 
 ### Smoke (Apple Silicon, Rosetta/QEMU emulation 経由 SQL Server 2022)
 
 100k 行 1 run: shpx staging bulk **1.28s** (78k rows/s)。動作確認のみ。emulation 経由なので production 値ではなく、Linux x86_64 native では更に速くなる見込み。
 
-### 完了基準値
+### ogr2ogr 比較
 
-10M 行 × 3 runs median は **Linux x86_64 環境で実測予定**（macOS の Apple Silicon では SQL Server image が emulation 必須で参考値止まりのため、CI もしくは Linux ホストで本値を取る）。本値が取れたら本節と `docs/ROADMAP.md` v0.4 完了チェックを更新する運用。
-
-ogr2ogr 比較には GDAL の MSSQLSpatial driver が **Microsoft ODBC Driver for SQL Server (msodbcsql18)** を要求する。Linux ubuntu では `apt-get install -y msodbcsql18` で導入可能。macOS Homebrew では `brew install microsoft/mssql-release/msodbcsql18` だが Apple Silicon の制約上参考値にしかならない。
+`scripts/bench-vs-ogr-mssql.sh` が `ogr2ogr -f MSSQLSpatial` との median wall-clock 比較を行う (PostGIS の 0.6× 目標と同等の緩めの目標、staging のラウンドトリップ込み)。GDAL に Parquet driver と MSSQLSpatial driver の双方が要るため (`libgdal-arrow-parquet` は ubuntugis-unstable PPA、`msodbcsql18` は Microsoft apt repo) CI 標準環境では走らせず、開発者がローカルでセットアップした上で参考値を取る用途に絞る。CI smoke は shpx 単独計測のみ。
 
 ## 制限事項 / 既知の落とし穴
 
