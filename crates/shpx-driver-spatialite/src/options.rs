@@ -1,6 +1,6 @@
 //! SpatiaLite 固有オプション。`?table=` クエリと環境変数によるテーブル名指定。
 
-use shpx_core::{ReadOpts, Result, Uri, WriteOpts};
+use shpx_core::{CreateIndex, CreateTable, ReadOpts, Result, Uri, WriteOpts};
 
 use crate::util::{driver_msg, DRIVER_NAME};
 
@@ -28,10 +28,15 @@ pub struct ResolvedWriteOpts {
     pub table: Option<String>,
     pub on_loss: shpx_core::OnLoss,
     pub overwrite: bool,
+    pub create_table: CreateTable,
+    pub create_index: CreateIndex,
 }
 
 impl ResolvedWriteOpts {
     pub fn resolve(uri: &Uri, opts: &WriteOpts) -> Result<Self> {
+        // PostGIS / SQL Server と同じく、driver の入口で `--overwrite && create_table=Never`
+        // を弾く。DROP した直後に CREATE 禁止だと INSERT 先が無くなるため。
+        shpx_rdb_common::validate_overwrite_compat(opts, DRIVER_NAME)?;
         let table = match std::env::var(ENV_OUT_TABLE) {
             Ok(v) if !v.is_empty() => Some(v),
             _ => resolve_table(uri, ENV_TABLE)?,
@@ -40,6 +45,8 @@ impl ResolvedWriteOpts {
             table,
             on_loss: opts.on_loss,
             overwrite: opts.overwrite,
+            create_table: opts.create_table,
+            create_index: opts.create_index,
         })
     }
 }

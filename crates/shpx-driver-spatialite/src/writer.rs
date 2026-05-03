@@ -1,9 +1,16 @@
 //! SpatiaLite の `LayerWriter` 実装。
 //!
-//! - open() でファイル open → InitSpatialMetadata → CREATE TABLE → AddGeometryColumn。
-//! - write_batch() は 1 トランザクションで全行 INSERT。geometry 列は `GeomFromWKB(?, srid)`
-//!   で SpatiaLite に encode を委譲する（spatialite_blob::encode との実装ずれを回避）。
-//! - finish() でクローズ。bbox 反映や R*Tree 生成は v0.5 cycle 2 で `--create-index` 経路から行う。
+//! - `open()` で:
+//!   1. ファイル open（overwrite=true なら先に削除）→ `InitSpatialMetadata` を idempotent 発行。
+//!   2. `--src-crs` > schema metadata の優先で SRID を解決し、`spatial_ref_sys` に
+//!      best-effort INSERT する。
+//!   3. `--create-table` 戦略 (Never / IfNotExists / Always) に従って既存テーブルの
+//!      drop / 再作成 / append を分岐する。新規 CREATE 時は `AddGeometryColumn` で
+//!      geometry 列を `geometry_columns` に登録する。
+//! - `write_batch()` は 1 トランザクションで全行 INSERT。geometry 列は `GeomFromWKB(?, srid)`
+//!   で SpatiaLite に encode を委譲する（自前 spatialite_blob との実装ずれを回避）。
+//! - `finish()` で `--create-index` 戦略に従って `SELECT CreateSpatialIndex(?, ?)` の
+//!   R*Tree を発行（`Auto` は新規 CREATE TABLE 経路でのみ作成、PostGIS 同形）。
 
 use std::path::PathBuf;
 
@@ -21,8 +28,8 @@ use arrow_schema::{DataType, Field, SchemaRef, TimeUnit};
 use chrono::{DateTime, Duration, FixedOffset, NaiveDate, TimeZone, Utc};
 use rusqlite::{params_from_iter, types::Value as SqlValue, Connection};
 use shpx_core::{
-    schema::{find_geometry_column, GeometryMeta},
-    Crs, Error, LayerWriter, OnLoss, Result, Uri, WriteOpts,
+    schema::{find_geometry_column, GeometryMeta, GeometryType},
+    CreateIndex, CreateTable, Crs, Error, LayerWriter, OnLoss, Result, Uri, WriteOpts,
 };
 
 use crate::conn;
@@ -40,6 +47,15 @@ pub struct SpatialiteWriter {
     attr_indices: Vec<usize>,
     insert_sql: String,
     on_loss: OnLoss,
+    /// `finish()` で R*Tree を発行する判定に使う（PostGIS と同形）。
+    create_index: CreateIndex,
+    /// この writer 呼び出しで CREATE TABLE が走ったかどうか。`CreateIndex::Auto` の
+    /// 判定で使う（既存テーブルへの append では index を勝手に作らない契約）。
+    table_was_created: bool,
+    /// テーブル名（quote 前）。`CreateSpatialIndex` 引数に使う。
+    table: String,
+    /// geometry 列の名前。`CreateSpatialIndex` 引数に使う。
+    geom_column: String,
 }
 
 impl SpatialiteWriter {
@@ -57,13 +73,10 @@ impl SpatialiteWriter {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "features".to_string());
 
-        if path.exists() {
-            if !resolved.overwrite {
-                return Err(Error::Format(format!(
-                    "output already exists: {} (use --overwrite)",
-                    path.display()
-                )));
-            }
+        // `--overwrite` 指定時のみファイル丸ごと削除。それ以外は既存ファイルへ追記する。
+        // PostGIS / SQL Server と方針を揃え、create_table=IfNotExists/Never で既存
+        // SpatiaLite ファイルへ append できる経路を許可する。
+        if resolved.overwrite && path.exists() {
             std::fs::remove_file(&path).map_err(Error::from)?;
             for sfx in ["-wal", "-shm", "-journal"] {
                 let p = path.with_file_name(format!(
@@ -80,31 +93,22 @@ impl SpatialiteWriter {
         let (geom_index, _, geom_meta) = find_geometry_column(&schema)?
             .ok_or_else(|| Error::Schema("no geometry column for SpatiaLite writer".to_string()))?;
         let geom_column = schema.field(geom_index).name().clone();
-        let srid = register_srs(&conn, &geom_meta, crs, opts.on_loss)?;
+        let srid = resolve_srid(&conn, &geom_meta, crs, opts.on_loss)?;
 
         let attr_indices: Vec<usize> = (0..schema.fields().len())
             .filter(|i| *i != geom_index)
             .collect();
 
-        // CREATE TABLE は属性列のみ。geometry 列は AddGeometryColumn で追加する
-        // (geometry_columns への登録と列宣言を一括で行うため)。
-        let create_sql = build_create_table_sql(&schema, &attr_indices, &table)?;
-        conn.execute(&create_sql, []).map_err(|e| driver_err(&e))?;
-
-        // AddGeometryColumn(table, column, srid, type_name, dimension)。
-        // SpatiaLite 4.x で大文字の型名 ('POINT', 'LINESTRING' など) を要求する。
-        // dimension = 'XY' は coord_dimension=2。
-        let geom_type_name = meta::geom_type_to_name(geom_meta.geometry_type);
-        conn.query_row(
-            "SELECT AddGeometryColumn(?1, ?2, ?3, ?4, 'XY')",
-            rusqlite::params![table, geom_column, srid, geom_type_name],
-            |_| Ok(()),
-        )
-        .map_err(|e| {
-            driver_msg(format!(
-                "AddGeometryColumn(table={table}, col={geom_column}, srid={srid}, type={geom_type_name}) failed: {e}"
-            ))
-        })?;
+        let table_was_created = apply_create_table_strategy(
+            &conn,
+            &schema,
+            &attr_indices,
+            &table,
+            &geom_column,
+            geom_meta.geometry_type,
+            srid,
+            resolved.create_table,
+        )?;
 
         let insert_sql = build_insert_sql(&schema, &attr_indices, geom_index, &table, srid);
 
@@ -115,7 +119,42 @@ impl SpatialiteWriter {
             attr_indices,
             insert_sql,
             on_loss: opts.on_loss,
+            create_index: resolved.create_index,
+            table_was_created,
+            table,
+            geom_column,
         })
+    }
+
+    /// `--create-index` 戦略に従って R*Tree を発行する。`finish()` から 1 度だけ呼ぶ
+    /// 想定（`Box<Self>` 消費なので二重呼び出しは型レベルで起きない）。
+    fn maybe_create_spatial_index(&mut self) -> Result<()> {
+        let do_create = match self.create_index {
+            CreateIndex::Never => false,
+            CreateIndex::Always => true,
+            CreateIndex::Auto => self.table_was_created,
+        };
+        if !do_create {
+            return Ok(());
+        }
+        let conn = self
+            .conn
+            .as_ref()
+            .ok_or_else(|| driver_msg("maybe_create_spatial_index called after finish"))?;
+        // CreateSpatialIndex は成功時 1 を返す。既に R*Tree がある場合は SpatiaLite が
+        // エラーを返すため透過的にエラー化する（冪等化は v0.6 以降）。
+        conn.query_row(
+            "SELECT CreateSpatialIndex(?1, ?2)",
+            rusqlite::params![&self.table, &self.geom_column],
+            |_| Ok(()),
+        )
+        .map_err(|e| {
+            driver_msg(format!(
+                "CreateSpatialIndex(table={}, col={}) failed: {e}",
+                self.table, self.geom_column
+            ))
+        })?;
+        Ok(())
     }
 }
 
@@ -156,6 +195,9 @@ impl LayerWriter for SpatialiteWriter {
     }
 
     fn finish(mut self: Box<Self>) -> Result<()> {
+        // R*Tree は全データ INSERT 完了後に作る。事前に index があると INSERT が
+        // 1 桁遅くなるため、PostGIS の GIST index と同じ順序に統一している。
+        self.maybe_create_spatial_index()?;
         let conn = self
             .conn
             .take()
@@ -176,49 +218,164 @@ impl Drop for SpatialiteWriter {
 
 /// `Crs` から SRID を確定し、必要なら `spatial_ref_sys` に best-effort INSERT する。
 ///
-/// v0.5 cycle 1 では:
-/// - EPSG コードがあれば、そのコードを SRID として返す（FastInit シードに含まれる WGS84 系
-///   なら spatial_ref_sys に既に存在、それ以外は cycle 2 の自動 INSERT で対応）。
-/// - EPSG なし → on_loss を発火して SRID 0 (unknown)。
-fn register_srs(
+/// 優先順位（PostGIS / SQL Server と同形）:
+/// 1. `--src-crs` (CLI) の明示 CRS
+/// 2. schema field metadata の CRS
+/// 3. なし、または EPSG 以外の authority → `apply_on_loss(missing-crs-on-spatialite)`
+///    で `error` なら停止、`warn`/`skip` なら srid=0
+///
+/// SRID 決定後、`spatial_ref_sys` に該当行が無ければ best-effort で INSERT する
+/// （`register_srs_if_missing` 参照）。
+fn resolve_srid(
     conn: &Connection,
     geom_meta: &GeometryMeta,
     crs_arg: Option<&Crs>,
     on_loss: OnLoss,
 ) -> Result<i32> {
-    let crs: Option<Crs> = crs_arg.cloned().or_else(|| geom_meta.crs.clone());
+    let merged = shpx_rdb_common::merge_crs(crs_arg, geom_meta);
+    let Some(srid) = shpx_rdb_common::resolve_epsg_srid(merged.as_ref())? else {
+        let _ = apply_on_loss(loss_kind::MISSING_CRS_ON_SPATIALITE, "<srs>", on_loss)?;
+        return Ok(0);
+    };
+    if let Some(c) = merged.as_ref() {
+        register_srs_if_missing(conn, srid, c)?;
+    }
+    Ok(srid)
+}
 
-    match crs {
-        None => {
-            let _ = apply_on_loss(loss_kind::MISSING_CRS_ON_SPATIALITE, "<srs>", on_loss)?;
-            Ok(0)
+/// `spatial_ref_sys` に SRID 行が無ければ INSERT する。`INSERT OR IGNORE` で race も
+/// 既登録も同時に安全側に倒す。PostGIS の同名関数 (`register_srs_if_missing`) と
+/// 戻り値・error 伝播ポリシーを揃えており、rusqlite の transport / disk error は
+/// `Error::Driver` として呼び出し側に上げる。
+///
+/// srtext は `Crs.wkt` (元データ由来) を最優先で使い、無ければ `shpx_geom::epsg_to_wkt1`
+/// の同梱マップにフォールバックする。どちらも取れなければ空文字で INSERT する
+/// （SpatiaLite の geometry 列は spatial_ref_sys 行が無くても動作するため、`srtext`
+/// 不在は致命的ではない）。
+fn register_srs_if_missing(conn: &Connection, srid: i32, crs: &Crs) -> Result<()> {
+    let Some(code) = crs.epsg_code() else {
+        return Ok(());
+    };
+    let definition_wkt = crs
+        .wkt
+        .clone()
+        .or_else(|| shpx_geom::epsg_to_wkt1(code).map(str::to_string))
+        .unwrap_or_default();
+    let proj4 = String::new();
+    let srs_name = format!("EPSG:{code}");
+    conn.execute(
+        meta::SQL_INSERT_SRS,
+        rusqlite::params![srid, "EPSG", srid, srs_name, proj4, definition_wkt],
+    )
+    .map_err(|e| driver_err(&e))?;
+    Ok(())
+}
+
+/// `--create-table` 戦略に従って既存テーブルの drop / 再作成 / append を分岐する。
+/// 戻り値は「この呼び出しで CREATE TABLE が走ったかどうか」（`CreateIndex::Auto` 判定用）。
+#[allow(clippy::too_many_arguments)]
+fn apply_create_table_strategy(
+    conn: &Connection,
+    schema: &SchemaRef,
+    attr_indices: &[usize],
+    table: &str,
+    geom_column: &str,
+    geom_type: GeometryType,
+    srid: i32,
+    create_table: CreateTable,
+) -> Result<bool> {
+    let exists = table_exists(conn, table)?;
+    match (create_table, exists) {
+        (CreateTable::Never, false) => Err(driver_msg(format!(
+            "--create-table=never: テーブル `{table}` が存在しない"
+        ))),
+        (CreateTable::Never | CreateTable::IfNotExists, true) => Ok(false),
+        (CreateTable::Always, true) => {
+            drop_existing_geo_table(conn, table)?;
+            create_table_with_geom(conn, schema, attr_indices, table, geom_column, geom_type, srid)?;
+            Ok(true)
         }
-        Some(c) => {
-            if let Some(code) = c.epsg_code() {
-                let code_i32 = i32::try_from(code)
-                    .map_err(|_| Error::Crs(format!("EPSG code {code} exceeds i32 range")))?;
-                // EPSG 行が無ければ best-effort で INSERT (FastInit に含まれない CRS 用)。
-                // 失敗しても geometry 列は valid なまま動くので無視する。
-                let definition_wkt = c
-                    .wkt
-                    .clone()
-                    .or_else(|| shpx_geom::epsg_to_wkt1(code).map(str::to_string))
-                    .unwrap_or_default();
-                let proj4 = String::new();
-                let srs_name = format!("EPSG:{code}");
-                let _ = conn.execute(
-                    meta::SQL_INSERT_SRS,
-                    rusqlite::params![code_i32, "EPSG", code_i32, srs_name, proj4, definition_wkt],
-                );
-                Ok(code_i32)
-            } else {
-                // EPSG なし: WKT のみ CRS は cycle 2 で `spatial_ref_sys` への shpx 採番 INSERT
-                // で対応する。cycle 1 では fallback として on_loss を発火。
-                let _ = apply_on_loss(loss_kind::MISSING_CRS_ON_SPATIALITE, "<srs>", on_loss)?;
-                Ok(0)
-            }
+        (CreateTable::IfNotExists | CreateTable::Always, false) => {
+            create_table_with_geom(conn, schema, attr_indices, table, geom_column, geom_type, srid)?;
+            Ok(true)
         }
     }
+}
+
+/// `sqlite_master` から指定テーブルの存在を probe する（大文字小文字を無視）。
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND lower(name) = lower(?1)",
+            rusqlite::params![table],
+            |row| row.get(0),
+        )
+        .map_err(|e| driver_err(&e))?;
+    Ok(n > 0)
+}
+
+/// 既存の geometry 付きテーブルを破棄する。`geometry_columns` から行を抜き、
+/// 関連する R*Tree shadow virtual table も明示的に DROP する（DiscardGeometryColumn は
+/// 内部 reference を消すだけで shadow を残すため）。
+fn drop_existing_geo_table(conn: &Connection, table: &str) -> Result<()> {
+    // 既存 geometry 列名を取得（同名の geometry 付きテーブルが登録されている場合）。
+    let geom_col: Option<String> = conn
+        .query_row(
+            "SELECT f_geometry_column FROM geometry_columns WHERE lower(f_table_name) = lower(?1)",
+            rusqlite::params![table],
+            |row| row.get::<_, String>(0),
+        )
+        .ok();
+    if let Some(col) = geom_col {
+        // R*Tree が無いケースでも `DisableSpatialIndex` は 0 を返すだけで error にしない。
+        let _ = conn.query_row(
+            "SELECT DisableSpatialIndex(?1, ?2)",
+            rusqlite::params![table, &col],
+            |_| Ok(()),
+        );
+        let idx_name = format!("idx_{table}_{col}");
+        let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS {}", quote_ident(&idx_name)));
+        let _ = conn.query_row(
+            "SELECT DiscardGeometryColumn(?1, ?2)",
+            rusqlite::params![table, col],
+            |_| Ok(()),
+        );
+    }
+    conn.execute(
+        &format!("DROP TABLE IF EXISTS {}", quote_ident(table)),
+        [],
+    )
+    .map_err(|e| driver_err(&e))?;
+    Ok(())
+}
+
+/// 属性列のみの CREATE TABLE を発行し、geometry 列を AddGeometryColumn で登録する。
+fn create_table_with_geom(
+    conn: &Connection,
+    schema: &SchemaRef,
+    attr_indices: &[usize],
+    table: &str,
+    geom_column: &str,
+    geom_type: GeometryType,
+    srid: i32,
+) -> Result<()> {
+    let create_sql = build_create_table_sql(schema, attr_indices, table)?;
+    conn.execute(&create_sql, []).map_err(|e| driver_err(&e))?;
+    // AddGeometryColumn(table, column, srid, type_name, dimension)。
+    // SpatiaLite 4.x で大文字の型名 ('POINT', 'LINESTRING' など) を要求する。
+    // dimension = 'XY' は coord_dimension=2。
+    let geom_type_name = meta::geom_type_to_name(geom_type);
+    conn.query_row(
+        "SELECT AddGeometryColumn(?1, ?2, ?3, ?4, 'XY')",
+        rusqlite::params![table, geom_column, srid, geom_type_name],
+        |_| Ok(()),
+    )
+    .map_err(|e| {
+        driver_msg(format!(
+            "AddGeometryColumn(table={table}, col={geom_column}, srid={srid}, type={geom_type_name}) failed: {e}"
+        ))
+    })?;
+    Ok(())
 }
 
 fn build_create_table_sql(

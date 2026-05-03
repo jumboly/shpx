@@ -26,19 +26,15 @@ pub fn driver_msg(msg: impl Into<String>) -> Error {
     Error::driver_msg(DRIVER_NAME, msg)
 }
 
-/// 損失検出時の挙動を 1 箇所で適用する。
+/// 損失検出時の挙動を 1 箇所で適用する。`shpx_rdb_common::apply_on_loss` の薄いラッパで、
+/// `Warn` 経路の tracing target をこの driver 用 (`shpx::spatialite`) に固定する。
+///
+/// `tracing::warn!` の `target:` フィールドはマクロ展開時に const を要求するため、
+/// クロージャ経由で driver 側に target 文字列リテラルを残す設計にしている。
 pub fn apply_on_loss(kind: &'static str, field: &str, on_loss: OnLoss) -> Result<bool> {
-    match on_loss {
-        OnLoss::Error => Err(Error::OnLoss {
-            kind: kind.to_string(),
-            field: field.to_string(),
-        }),
-        OnLoss::Warn => {
-            tracing::warn!(target: "shpx::spatialite", kind, field, "lossy conversion");
-            Ok(true)
-        }
-        OnLoss::Skip => Ok(false),
-    }
+    shpx_rdb_common::apply_on_loss(kind, field, on_loss, || {
+        tracing::warn!(target: "shpx::spatialite", kind, field, "lossy conversion");
+    })
 }
 
 /// SQL 識別子を `"..."` でクオートする。内部の `"` は二重化する。
