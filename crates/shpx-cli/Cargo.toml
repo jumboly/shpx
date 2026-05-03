@@ -23,6 +23,12 @@ bundled-spatialite = [
     "shpx-driver-spatialite/bundled-spatialite",
     "shpx-geom/bundled-proj",
 ]
+# SQL Server driver の Windows 認証 (integrated / NTLM) を CLI から伝播。
+# Windows: pure Rust の tiberius `winauth` 経路。Linux/macOS: tiberius
+# `integrated-auth-gssapi` 経路で system libgssapi-krb5 を要求するため、
+# CLI レベルでも opt-in 限定。`shpx convert mssql://...?auth=integrated`
+# で利用。
+windows-auth = ["shpx-driver-sqlserver/windows-auth"]
 
 # CLI バイナリ名は `shpx`。crate 名と分けることでパッケージ名衝突を避ける。
 [[bin]]

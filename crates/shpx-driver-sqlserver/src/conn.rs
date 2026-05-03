@@ -13,7 +13,7 @@ use tiberius::{AuthMethod, Client, Config};
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
-use crate::options::ParsedUrl;
+use crate::options::{AuthKind, ParsedUrl};
 use crate::runtime::runtime;
 use crate::util::{driver_err, driver_msg};
 
@@ -26,18 +26,12 @@ pub const DEFAULT_PORT: u16 = 1433;
 
 /// `mssql://...` URL を解析して `tiberius::Client` を返す。
 ///
-/// 認証は cycle 1 では SQL 認証 (`user:pass`) のみサポート。`?trusted_connection=true`
-/// は driver 段階で受け付けるが、未対応エラーを返す（v0.5+ で実装予定）。
+/// 認証は `?auth=sql|integrated|windows` で切り替える (既定 `sql`、`?trusted_connection=true`
+/// は `?auth=integrated` のエイリアス)。`integrated` / `windows` は CLI feature
+/// `windows-auth` 有効時のみ動作 (Windows: pure Rust SSPI、Unix: system libgssapi-krb5
+/// による Kerberos)。feature 無効時は明示エラーで案内する。
 pub fn connect(url: &str) -> shpx_core::Result<SqlClient> {
     let parsed = ParsedUrl::parse(url)?;
-
-    if parsed.trusted_connection {
-        return Err(driver_msg(
-            "?trusted_connection=true (Windows authentication) is not supported \
-             in v0.4. Use SQL authentication (`mssql://user:pass@host/db?...`)",
-        ));
-    }
-
     let cfg = build_config(&parsed)?;
     let rt = runtime()?;
 
@@ -65,14 +59,8 @@ pub(crate) fn build_config(parsed: &ParsedUrl) -> shpx_core::Result<Config> {
         cfg.database(db);
     }
 
-    let user = parsed.user.as_deref().ok_or_else(|| {
-        driver_msg(
-            "mssql:// URL requires a username for SQL authentication \
-             (e.g. mssql://sa:password@host/db)",
-        )
-    })?;
-    let password = parsed.password.as_deref().unwrap_or("");
-    cfg.authentication(AuthMethod::sql_server(user, password));
+    let auth = build_auth(parsed)?;
+    cfg.authentication(auth);
 
     // dev / docker compose 環境では SQL Server の TLS 証明書が self-signed で発行される
     // ため、`trust_cert` を有効化する。プロダクション接続では URL クエリで CA を渡す
@@ -80,6 +68,71 @@ pub(crate) fn build_config(parsed: &ParsedUrl) -> shpx_core::Result<Config> {
     cfg.trust_cert();
 
     Ok(cfg)
+}
+
+/// `ParsedUrl` から `AuthMethod` を構築する。`AuthKind` ごとに必須フィールドを検証し、
+/// feature 無効時は明示エラーで案内する。
+fn build_auth(parsed: &ParsedUrl) -> shpx_core::Result<AuthMethod> {
+    match parsed.auth {
+        AuthKind::Sql => {
+            let user = parsed.user.as_deref().ok_or_else(|| {
+                driver_msg(
+                    "mssql:// URL requires a username for SQL authentication \
+                     (e.g. mssql://sa:password@host/db). For integrated auth use \
+                     `?auth=integrated`.",
+                )
+            })?;
+            let password = parsed.password.as_deref().unwrap_or("");
+            Ok(AuthMethod::sql_server(user, password))
+        }
+        AuthKind::Integrated => build_integrated_auth(),
+        AuthKind::Windows => build_windows_auth(parsed),
+    }
+}
+
+// `Result` を返すのは feature 無効時の関数 (Err 必須) と signature を揃えるため。
+// feature 有効時は常に `Ok` だが、cfg 違いで return 型が変わると呼び出し側で
+// 分岐コードが必要になるので意図的に `Result` のままにする。
+#[allow(clippy::unnecessary_wraps)]
+#[cfg(any(
+    all(windows, feature = "windows-auth"),
+    all(unix, feature = "windows-auth"),
+))]
+fn build_integrated_auth() -> shpx_core::Result<AuthMethod> {
+    Ok(AuthMethod::Integrated)
+}
+
+#[cfg(not(any(
+    all(windows, feature = "windows-auth"),
+    all(unix, feature = "windows-auth"),
+)))]
+fn build_integrated_auth() -> shpx_core::Result<AuthMethod> {
+    Err(driver_msg(
+        "?auth=integrated requires the `windows-auth` feature \
+         (build with `cargo build --features windows-auth`). \
+         On Unix this also requires system libgssapi-krb5.",
+    ))
+}
+
+#[cfg(all(windows, feature = "windows-auth"))]
+fn build_windows_auth(parsed: &ParsedUrl) -> shpx_core::Result<AuthMethod> {
+    let user = parsed.user.as_deref().ok_or_else(|| {
+        driver_msg(
+            "?auth=windows requires a username (e.g. \
+             mssql://DOMAIN%5Cuser:password@host/db?auth=windows). \
+             `DOMAIN\\user` 形式の `\\` は URL では `%5C` に percent-encode する。",
+        )
+    })?;
+    let password = parsed.password.as_deref().unwrap_or("");
+    Ok(AuthMethod::windows(user, password))
+}
+
+#[cfg(not(all(windows, feature = "windows-auth")))]
+fn build_windows_auth(_parsed: &ParsedUrl) -> shpx_core::Result<AuthMethod> {
+    Err(driver_msg(
+        "?auth=windows (NTLM) is only supported on Windows targets with the \
+         `windows-auth` feature. On Unix, use `?auth=integrated` (Kerberos via libgssapi).",
+    ))
 }
 
 /// `tiberius::Client::simple_query` の同期ラッパ。schema probe など bind 不要な静的 SQL に使う。
@@ -127,12 +180,48 @@ mod tests {
         assert!(format!("{err}").contains("username"));
     }
 
+    #[cfg(not(feature = "windows-auth"))]
     #[test]
-    fn connect_rejects_trusted_connection_in_v04() {
-        // `?trusted_connection=true` は v0.4 では未対応。connect が早期に reject する。
-        let err = connect("mssql://sa:pw@localhost/shpx_test?trusted_connection=true").unwrap_err();
+    fn build_config_rejects_integrated_auth_without_feature() {
+        // feature 無効時は build_config 段階で明示エラー (TCP 接続には進まない)。
+        let parsed =
+            ParsedUrl::parse("mssql://localhost/shpx_test?auth=integrated").unwrap();
+        let err = build_config(&parsed).unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("trusted_connection"), "msg was: {msg}");
+        assert!(msg.contains("windows-auth"), "msg was: {msg}");
+    }
+
+    #[cfg(not(feature = "windows-auth"))]
+    #[test]
+    fn build_config_rejects_trusted_connection_alias_without_feature() {
+        // 後方互換 alias も同じく build_config 段階で reject。
+        let parsed =
+            ParsedUrl::parse("mssql://localhost/shpx_test?trusted_connection=true").unwrap();
+        let err = build_config(&parsed).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("windows-auth"), "msg was: {msg}");
+    }
+
+    #[cfg(all(unix, feature = "windows-auth"))]
+    #[test]
+    fn build_config_rejects_windows_auth_on_unix() {
+        // Unix では `?auth=windows` (NTLM) は使えない。`?auth=integrated` を案内する。
+        let parsed =
+            ParsedUrl::parse("mssql://u:p@h/db?auth=windows").unwrap();
+        let err = build_config(&parsed).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("only supported on Windows"), "msg was: {msg}");
+    }
+
+    #[cfg(all(unix, feature = "windows-auth"))]
+    #[test]
+    fn build_config_accepts_integrated_auth_on_unix_with_feature() {
+        // `?auth=integrated` は feature 有効な Unix で `AuthMethod::Integrated` を生成。
+        // 実際の Kerberos ticket 取得は libgssapi 任せで本テストでは検証しない。
+        let parsed =
+            ParsedUrl::parse("mssql://localhost/shpx_test?auth=integrated").unwrap();
+        let cfg = build_config(&parsed).unwrap();
+        assert_eq!(cfg.get_addr(), "localhost:1433");
     }
 
     /// `tiberius::Config::new()` の生成が壊れていないことだけ確認するスモークテスト

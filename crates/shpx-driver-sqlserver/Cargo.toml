@@ -10,6 +10,15 @@ description = "shpx 用 SQL Server (Microsoft SQL Server / Azure SQL) ドライ�
 [lints]
 workspace = true
 
+[features]
+# Windows 認証 (integrated / NTLM)。default off の理由:
+#   - Windows: tiberius `winauth` は pure Rust で系外依存なし (cost ほぼゼロ) だが
+#     Linux/macOS で同じ feature 名を有効にすると tiberius が `integrated-auth-gssapi`
+#     経由で **system libgssapi-krb5 を要求** する。shpx の "single binary + system
+#     dep zero" 哲学を保つため、利用者が自覚的に opt-in した時のみ有効化する。
+#   - tiberius の cfg は OS で自動分岐するので、ここでは有効化トグルを 1 個だけ持つ。
+windows-auth = ["tiberius/winauth", "tiberius/integrated-auth-gssapi"]
+
 [dependencies]
 shpx-core       = { path = "../shpx-core" }
 shpx-geom       = { path = "../shpx-geom" }
