@@ -1,0 +1,4 @@
+station_identifier,observed_temperature_celsius,description_long_text,wkt
+S001,18.4,Coastal monitoring station near the harbor,POINT(139.6917 35.6895)
+S002,22.1,Inland reference site for daily readings,POINT(-74.0060 40.7128)
+S003,11.7,High-altitude weather observation post,POINT(-0.1278 51.5074)

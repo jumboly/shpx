@@ -2,6 +2,57 @@
 
 GDAL 非依存・Rust 製の空間データ相互変換 CLI。Arrow RecordBatch を中間表現に、属性順序と厳密な型を保ちながら大容量データを streaming で扱う。
 
+## 5 分チュートリアル
+
+### 1. インストール
+
+ローカルビルド (libproj が host に必要):
+
+```bash
+git clone https://github.com/jumboly/shpx
+cd shpx
+cargo install --path crates/shpx-cli
+```
+
+`bundled-proj` feature で libproj / SQLite を同梱した単一バイナリをビルド可能 (cmake / clang が必要):
+
+```bash
+cargo install --path crates/shpx-cli --features bundled-proj
+```
+
+### 2. SHP → GeoParquet
+
+最初の変換は拡張子推論で完結する。サンプルデータは `examples/data/cities.shp` (5 都市 / WGS84):
+
+```bash
+shpx convert examples/data/cities.shp /tmp/cities.parquet
+shpx schema  /tmp/cities.parquet --format=text
+```
+
+詳細スクリプト: [examples/01-shp-to-parquet.sh](examples/01-shp-to-parquet.sh)
+
+### 3. ローカル PostGIS にバルクロード
+
+`docker compose up -d postgis` で接続先を起動した後、`pg://` URI で書き込み。`COPY BINARY` 経路で大容量も高速:
+
+```bash
+shpx convert examples/data/cities.shp \
+  'pg://shpx:shpx@localhost:5432/shpx_test?table=public.cities&create=if-not-exists'
+```
+
+詳細スクリプト: [examples/02-shp-to-postgis.sh](examples/02-shp-to-postgis.sh)
+
+### 4. 投影変換
+
+`--reproject` 1 つで EPSG 間を往復:
+
+```bash
+shpx convert examples/data/cities-3857.shp /tmp/cities-wgs84.parquet \
+  --reproject EPSG:4326
+```
+
+詳細スクリプト: [examples/04-reproject.sh](examples/04-reproject.sh)
+
 ## 対応フォーマット
 
 | フォーマット | Read | Write | Bulk |
@@ -31,9 +82,25 @@ shpx convert 'mssql://host/db?table=dbo.cities' cities.parquet
 
 # 情報表示
 shpx info parcels.gpkg
-shpx schema parcels.gpkg
-shpx drivers
+shpx schema parcels.gpkg --format=text   # 人間可読
+shpx schema parcels.gpkg --format=json   # 機械可読 (default)
+shpx drivers --format=json | jq '.[].name'  # CI / scripting 向け
 ```
+
+## examples
+
+[`examples/`](examples/) にシナリオ別の 1-shot スクリプト 6 本を同梱。`bash examples/01-shp-to-parquet.sh` のように単独実行できる。
+
+| #   | スクリプト                                                       | 内容                                          | DB 必要 |
+| --- | ---------------------------------------------------------------- | --------------------------------------------- | :----:  |
+| 01  | [01-shp-to-parquet.sh](examples/01-shp-to-parquet.sh)            | SHP → GeoParquet                              |    –    |
+| 02  | [02-shp-to-postgis.sh](examples/02-shp-to-postgis.sh)            | SHP → PostGIS (COPY バルク)                   |   ✓    |
+| 03  | [03-postgis-to-fgb.sh](examples/03-postgis-to-fgb.sh)            | PostGIS → FlatGeobuf                          |   ✓    |
+| 04  | [04-reproject.sh](examples/04-reproject.sh)                      | EPSG:3857 SHP → EPSG:4326 GeoParquet          |    –    |
+| 05  | [05-on-loss.sh](examples/05-on-loss.sh)                          | `--on-loss=error/warn/skip` の比較            |    –    |
+| 06  | [06-bulk-load.sh](examples/06-bulk-load.sh)                      | `--insert-mode=bulk` vs `batch` の経路比較    |   ✓    |
+
+詳細は [examples/README.md](examples/README.md) を参照。
 
 ## ビルド要件
 
@@ -50,6 +117,8 @@ shpx drivers
 - [docs/ROADMAP.md](docs/ROADMAP.md) — マイルストーン
 - [docs/DATA_TYPES.md](docs/DATA_TYPES.md) — フォーマット間の型マッピング
 - [docs/CRS.md](docs/CRS.md) — 座標参照系の扱い
+- [docs/ON_LOSS.md](docs/ON_LOSS.md) — 損失検出 (`--on-loss`) のドライバ × kind マトリクス
+- [docs/STREAMING.md](docs/STREAMING.md) — driver 別ストリーミング戦略とピーク RSS
 - [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — 新しいドライバの追加方法
 - [docs/CSV.md](docs/CSV.md) — CSV / TSV ドライバ仕様
 - [docs/GEOJSON.md](docs/GEOJSON.md) — GeoJSON / GeoJSON Lines ドライバ仕様
@@ -61,8 +130,8 @@ shpx drivers
 
 ## ステータス
 
-v0.5.0 リリース済み（2026-05-03）。`shpx-driver-spatialite` で SpatiaLite (`*.sqlite` / `*.db` / `*.spatialite` / `sqlite://`) read/write を提供。`mod_spatialite` 動的ロード + `InitSpatialMetadata(1)` の idempotent 発行、`AddGeometryColumn` 経由の `geometry_columns` 登録、`GeomFromWKB(?, srid)` での geometry I/O、`--create-table` 3 種、`--create-index=Always|Auto` での `SELECT CreateSpatialIndex(...)` R\*Tree 生成、未登録 EPSG の `spatial_ref_sys` への best-effort `INSERT OR IGNORE`、SpatiaLite ↔ GPKG / SpatiaLite ↔ Shapefile の cross-driver 往復テストまでを含む。`bundled-spatialite` feature の本実装は v0.6 へ繰り延べ（`build.rs` で libspatialite を `cc` で vendor して static link する予定）。次マイルストーンは v0.6 (bundled-spatialite + 配布バイナリ準備)。詳細は [docs/SPATIALITE.md](docs/SPATIALITE.md) と [docs/ROADMAP.md](docs/ROADMAP.md)、変更履歴は [CHANGELOG.md](CHANGELOG.md)。
+v0.8.0 リリース済み（2026-05-03）。reader 全 9 driver の真ストリーミング化 (eager-load 撲滅) を完了し、10M 行入力でもピーク RSS が `batch_size + 接続バッファ` に収まる。次マイルストーンは **v1.0 (仕上げと配布)** で、cargo-dist による単一バイナリ配布、進捗バー、examples / README 整備、`shpx schema` / `shpx drivers` の `--format=json` を順次取り込んでいる。詳細は [docs/ROADMAP.md](docs/ROADMAP.md) と [CHANGELOG.md](CHANGELOG.md)。
 
 ## ライセンス
 
-未定（v1.0 までに決定）。
+Apache-2.0 OR MIT のデュアルライセンス。詳細は [LICENSE-APACHE](LICENSE-APACHE) / [LICENSE-MIT](LICENSE-MIT) / [NOTICE](NOTICE) を参照。

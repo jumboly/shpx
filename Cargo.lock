@@ -2783,6 +2783,7 @@ dependencies = [
  "indicatif",
  "parquet",
  "predicates",
+ "serde",
  "serde_json",
  "shpx-core",
  "shpx-driver-csv",

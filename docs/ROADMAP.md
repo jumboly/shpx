@@ -273,9 +273,9 @@
 
 **完了基準**:
 - [ ] SQL Server 10M 行ベンチが Linux x86_64 で `shpx_secs <= 1.667 * ogr_secs` を満たし、`docs/SQLSERVER.md` の Benchmark 節と `CHANGELOG.md` 0.4.0 Known Issues を訂正
-- [ ] `LICENSE-MIT` / `LICENSE-APACHE` / `NOTICE` がリポジトリルートに存在
-- [ ] `shpx convert` で進捗バー (確定行数なら ProgressBar、不明なら Spinner) が表示され、`--quiet` で抑止できる
-- [ ] `examples/01-shp-to-parquet.sh` ほか 5+ シナリオが実機で緑
+- [x] `LICENSE-MIT` / `LICENSE-APACHE` / `NOTICE` がリポジトリルートに存在 (cycle 1)
+- [x] `shpx convert` で進捗バー (確定行数なら ProgressBar、不明なら Spinner) が表示され、`--quiet` で抑止できる (cycle 2)
+- [x] `examples/01-shp-to-parquet.sh` ほか 5+ シナリオが実機で緑 (cycle 3)
 - [ ] `cargo dist build --target=x86_64-unknown-linux-gnu` で tarball 生成、CI で macOS / Linux / Windows smoke job が緑 (Windows は best-effort 許容)
 - [ ] `v1.0.0` tag push → cargo-dist が 5 target の release artifact を GitHub Releases に publish
 
