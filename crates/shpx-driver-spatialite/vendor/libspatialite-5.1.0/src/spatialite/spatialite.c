@@ -2790,18 +2790,12 @@ fnct_InitSpatialMetaData (sqlite3_context * context, int argc,
     if (ret != SQLITE_OK)
 	goto error;
 
-/* shpx-patch: VirtualKNN2 module is wrapped in `#ifndef OMIT_GEOS` in
- * src/spatialite/virtualknn2.c, so an unguarded `CREATE VIRTUAL TABLE KNN2`
- * here would roll back the entire transaction (including spatial_ref_sys /
- * geometry_columns) when shpx builds with OMIT_GEOS. */
-#ifndef OMIT_GEOS
 /* creating the KNN2 VIRTUAL TABLE */
     strcpy (sql, "CREATE VIRTUAL TABLE KNN2 ");
     strcat (sql, "USING VirtualKNN2()");
     ret = sqlite3_exec (sqlite, sql, NULL, NULL, &errMsg);
     if (ret != SQLITE_OK)
 	goto error;
-#endif
 
     if (transaction)
       {
@@ -2895,15 +2889,12 @@ fnct_InitAdvancedMetaData (sqlite3_context * context, int argc,
     if (ret != SQLITE_OK)
 	goto error;
 
-/* shpx-patch: same OMIT_GEOS guard as the KNN2 CREATE above. */
-#ifndef OMIT_GEOS
 /* creating the KNN VIRTUAL TABLE */
     strcpy (sql, "CREATE VIRTUAL TABLE IF NOT EXISTS KNN2 ");
     strcat (sql, "USING VirtualKNN2()");
     ret = sqlite3_exec (sqlite, sql, NULL, NULL, &errMsg);
     if (ret != SQLITE_OK)
 	goto error;
-#endif
 
     if (transaction)
       {

@@ -4,6 +4,13 @@
 //! GPKG driver と同じファイルベース DB だが、blob format / メタテーブル / 必要 extension が異なる。
 //! 詳細は v0.5 cycle で追加される `docs/SPATIALITE.md` を参照。
 
+// `bundled-spatialite` 有効時に libgeos (C++) を static link する。`link-cplusplus`
+// crate の build.rs が C++ stdlib リンク指定を出すが、この crate を実コードから
+// 参照していないと Rust 1.x の autolink が build script のメタデータを最終バイナリの
+// link graph に伝搬しないため、明示的に no-op で参照する。
+#[cfg(feature = "bundled-spatialite")]
+use link_cplusplus as _;
+
 use arrow_schema::SchemaRef;
 use shpx_core::{
     Capabilities, Crs, Driver, LayerReader, LayerWriter, ReadOpts, Result, StringEncoding, Uri,

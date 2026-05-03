@@ -1111,6 +1111,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "geos-src"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63ee625c548bdf7ead03c75779d156ddfe48dc57820d336eeb39407c19f9a3b5"
+dependencies = [
+ "cmake",
+]
+
+[[package]]
 name = "geozero"
 version = "0.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2561,7 +2570,9 @@ dependencies = [
  "arrow-schema",
  "cc",
  "chrono",
+ "geos-src",
  "libsqlite3-sys",
+ "link-cplusplus",
  "rusqlite",
  "serde",
  "serde_json",
