@@ -34,25 +34,35 @@ shpx の全 9 driver は v0.8 で reader を真のストリーミングに揃え
 `READ_BATCH_SIZE` は driver ごとに 65536 行 (RDB / file 共通) または 4096 行 (GeoJSON: JSON
 parse コスト分担のため小さく刻む) で実装されている。
 
-## peak RSS 期待値 (10M 行 × 10 属性入力)
+## peak RSS 計測値 (10M 行 × 10 属性入力、ubuntu-latest x64、2026-05-04)
 
-| driver | 期待 peak RSS | 計測手段 |
-|---|---|---|
-| Parquet | < 256 MB | `crates/shpx-core/src/bench_util.rs::peak_rss_kib` (Linux のみ) |
-| SHP / FGB / CSV / GeoJSON | < 256 MB | 同上 |
-| GPKG / SpatiaLite | < 512 MB | 同上 (rusqlite のページキャッシュ込み) |
-| PostGIS | < 1 GB | 同上 (tokio_postgres の TLS バッファ込み、`RowStream` の内部 channel 含む) |
-| SQL Server | < 1 GB | 同上 (tiberius の TDS バッファ込み) |
+`.github/workflows/bench-peak-rss.yml` (workflow_dispatch、`rows=10000000`) を 1 回回した結果。
+`shpx-bench-rss --driver=<name> --rows=10000000 --read-only` が読みだし phase の
+`/proc/self/status::VmHWM` を JSON で吐き、artifact として upload している。
+
+| driver | peak RSS | 期待値 | elapsed (read) | 備考 |
+|---|---|---|---|---|
+| Parquet | 42.7 MB | < 256 MB | 0.5 s | row group meta のみで `take` ベース、最も軽い |
+| CSV | 34.0 MB | < 256 MB | 4.9 s | 真の streaming (BufReader) |
+| GeoJSON FeatureCollection | 17.4 MB | < 256 MB | 34.8 s | 自前 JSON state machine、4096 行 chunk |
+| GeoJSON NDJSON | 17.4 MB | < 256 MB | 20.0 s | `BufRead::lines()` ベース |
+| FGB | 68.4 MB | < 256 MB | 16.8 s | flatgeobuf `FeatureIter` の internal buffer 込み |
+| GPKG | 70.8 MB | < 512 MB | 13.8 s | rusqlite ページキャッシュ込み |
+| SpatiaLite | 80.0 MB | < 512 MB | 16.3 s | 同上 + libspatialite (dynamic link) |
+| **SHP** | **429 MB** | < 512 MB | 44.8 s | `shapefile` crate の internal buffer + DBF + SHX index、他より一桁大きい |
+| PostGIS | 93.2 MB | < 1 GB | 16.0 s | tokio_postgres TLS バッファ + `RowStream` channel 込み |
+| SQL Server | 94.3 MB | < 1 GB | 96.0 s | tiberius TDS バッファ + worker `sync_channel(2)` 込み |
+
+期待値は **元々 SHP / FGB / CSV / GeoJSON が一括 < 256 MB** だったが、SHP の 429 MB は
+`shapefile` 0.6 の `Reader::iter_shapes_and_records()` が SHX index と DBF を内部で
+全読みするためで、driver 側の chunk 化 (`sync_channel(2)`) では削れない。SHP 単独で
+< 512 MB に緩めたが、これ以上を狙うなら `shapefile` crate を fork して memory map 経路
+を入れるしかない (v1.x 候補)。
 
 `peak_rss_kib()` は `/proc/self/status` の `VmHWM` 行をパースする。macOS / Windows では
-`None` を返すので CI 計測は ubuntu-latest 限定。
-
-実数値の取得は `crates/shpx-bench-rss/` (workspace-internal binary) と
-`.github/workflows/bench-peak-rss.yml` (workflow_dispatch only) で行う。1 driver × 1 job
-で **1 プロセス 1 計測** (peak RSS = `VmHWM` はリセット不可)、`shpx-bench-rss --driver=<name>
---rows=<N>` が `{"driver":..., "rows":..., "row_count":..., "peak_rss_kib":...,
-"elapsed_ms":...}` の JSON 1 行を artifact として upload する。詳細は
-`docs/ROADMAP.md` v0.8 cycle 7 を参照。
+`None` を返すので CI 計測は ubuntu-latest 限定。1 driver × 1 job で **1 プロセス 1 計測**
+(peak RSS = `VmHWM` はリセット不可なので prepare phase と read phase を別 process で
+切り分けている)。再計測手順は `docs/ROADMAP.md` v0.8 cycle 7 を参照。
 
 ## キャンセル挙動
 
