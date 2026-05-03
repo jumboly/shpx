@@ -4,7 +4,25 @@
 
 ## [Unreleased]
 
-### Added
+## [0.8.0] - 2026-05-03
+
+v0.8 マイルストーン「Streaming Reader Parity」のリリース。reader 9 driver のうち Parquet 以外で残っていた eager-load (`Vec<Feature>` / `VecDeque<Row>` / `Vec<RecordBatch>` 等) を全廃し、`open()` 直後に全行をメモリへ載せる経路を撲滅した。10M 行クラスの入力でもピーク RSS が batch サイズ + 接続バッファに頭打ちになる構造を全 driver で揃え、v1.0 出荷時のメモリプロファイル一貫性を確保した。`LayerReader` trait シグネチャは v0.1 から不変のまま、内部実装のみを置き換える形での achievement。本リリースには 0.7.0 以降に積まれた v1.0 cycle 1〜2 (LICENSE / NOTICE / 進捗バー / `--quiet`) と v0.4 ベンチ完了確認も同梱する。
+
+### Added (v0.8)
+
+- **shpx-driver-shp / fgb / csv (v0.8 cycle 1、真のストリーミング)** [d61c83f, 既出]: SHP は worker thread + `sync_channel(2)`、FGB は `FeatureIter<R, NotSeekable>` を field に保持、CSV は `csv::Reader<Box<dyn Read>>` を field 化することで eager-load (`VecDeque<Row>` 等) を撲滅。
+- **shpx-driver-gpkg / spatialite (v0.8 cycle 2、SQLite keyset pagination)** [d61c83f, 既出]: `crates/shpx-rdb-common/src/streaming.rs` 新設で `KeysetRowsIter` (`WHERE rowid > ? ORDER BY rowid LIMIT ?`) と `OffsetRowsIter` (`LIMIT ? OFFSET ?`) を提供、GPKG / SpatiaLite reader が共有する。SpatiaLite の WITHOUT ROWID テーブルは `Error::Driver` で明示拒否。
+- **shpx-driver-geojson (v0.8 cycle 3、真のストリーミング)**: `crates/shpx-driver-geojson/src/stream.rs` を新設し、FeatureCollection 用の自前 `FcFeatureStream` (JSON state machine で `[` までシーク → `,` 区切りで 1 feature ずつ pull) と NDJSON 用の `NdjsonStream` (`BufRead::lines()` ベース) を実装。`reader.rs` は file head 1 MiB を probe して top-level `crs` メンバを抽出 → 先頭 N=1024 feature をサンプリングして型推論 → 本番ストリームはファイル再 open + 真の逐次 yield、の 3-pass 構造に再編。サンプル数は `SHPX_GEOJSON_INFER_SAMPLE` env で override 可。`geojson::FeatureReader` 直用ではなく自前 `FcFeatureStream` を使う理由は、上流 0.24 の空配列 panic + Iterator 終了後 panic の 2 バグ回避。
+- **shpx-driver-postgis (v0.8 cycle 4、async-to-sync mpsc)**: `Vec<RecordBatch>` field と `chunk_batch` ヘルパを撤廃し、background OS thread + `std::sync::mpsc::sync_channel(2)` で `tokio_postgres::query_raw` の `RowStream` を逐次消費する構造へ置換。worker は reader 専用に新規 connect した `Client` を所有し、`READ_BATCH_SIZE` (65536) 行ごとに `RecordBatch` を組んで channel へ送る。`tests/reader_cancel.rs` 新設で「Reader を mid-iter で drop した時 worker が SELECT を解放する」ことを env-gated 検証 (`reader_drop_releases_select_promptly` / `reader_full_consume_drops_cleanly`)。
+- **shpx-driver-sqlserver (v0.8 cycle 5、async-to-sync mpsc)**: cycle 4 と同じ pattern で `tiberius::QueryStream` を逐次消費。`exec_select` / `extract_srid_from_first_row` / `chunk_batch` を削除、SRID 解決は probe `SELECT TOP 1 ... STSrid` 一本に集約。
+- **shpx-core (v0.8 cycle 6、bench infra)**: `crates/shpx-core/src/bench_util.rs` 新設で `peak_rss_kib() -> Option<u64>` を提供 (Linux: `/proc/self/status` の `VmHWM`、その他 OS: `None`)。reader streaming のピーク RSS 計測に使う。
+- **`docs/STREAMING.md` 新設 (v0.8 cycle 6)**: driver × streaming 戦略 × 期待 peak RSS 表、キャンセル挙動、トランザクション保持期間、バッチサイズ影響、関連実装ファイルへのリンクを 1 箇所に集約。
+
+### Changed (v0.8)
+
+- **`LayerReader::row_count_hint`**: cycle 4/5 で PostGIS / SQL Server の hint を `Some(row_count)` → `None` に変更 (streaming のため事前に行数は確定しない)。GeoJSON / NDJSON も同じく `None` に。CLI 進捗バーは `None` の場合 Spinner にフォールバック (v1.0 cycle 2 の挙動)。
+
+### Added (v0.4 / v1.0 cycle 1〜2 — 0.8.0 同梱)
 
 - **LICENSE / NOTICE**: MIT / Apache-2.0 dual license の `LICENSE-MIT` / `LICENSE-APACHE` をリポジトリルートに配置、`NOTICE` で third-party 依存 (libspatialite / libgeos / libproj / SQLite / arrow-rs / parquet / tokio-postgres / tiberius / flatgeobuf / geozero / shapefile / geojson / proj / rusqlite ほか) を aggregate listing。`Cargo.toml` の `[workspace.package].license = "MIT OR Apache-2.0"` 宣言は v0.1 から既出だが、ルートに license 本文が無く `cargo-dist` 配布の前提を満たさないため整備した。`crates/shpx-driver-spatialite/NOTICE` は driver scope の詳細 (vendor 範囲・LGPL 2.1 配布要件) を持つためそのまま残す。
 - **shpx-cli (v1.0 cycle 2、進捗バー)**: `shpx convert` 実行中に行ベースの進捗バーを stderr に表示する。`LayerReader::row_count_hint()` が `Some(n)` を返す driver (SHP / Parquet / GPKG / FGB / GeoJSON / PostGIS / SQL Server / SpatiaLite) は `{percent}% [{bar}] {pos}/{len} rows {per_sec} ETA {eta}` の ProgressBar、`None` を返す CSV は `{spinner} {pos} rows {per_sec}` の Spinner に倒す。stderr が非 TTY (CI ログ / pipe) のときは `std::io::IsTerminal` 判定で自動的に `ProgressBar::hidden()` に倒し、ANSI escape で CI ログを汚さない。`indicatif = "0.17"` を workspace dep に追加。
