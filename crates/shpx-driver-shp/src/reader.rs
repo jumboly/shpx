@@ -1,8 +1,29 @@
 //! Shapefile を Arrow `RecordBatch` ストリームとして読み出す。
+//!
+//! v0.8 cycle 1 で eager-load (`VecDeque<(Shape, Record)>`) を真のストリーミングに置き換えた。
+//!
+//! # 実装メモ — なぜ worker thread + sync_channel か
+//!
+//! `shapefile::Reader::iter_shapes_and_records()` は内部で `ShapeIterator` を
+//! `current_pos = HEADER_SIZE` でゼロから初期化するため、**呼び出すたびにファイル先頭から
+//! 再列挙する** (`shapefile-0.6.0/src/reader.rs:344-352`)。借用ベースの batch iterator
+//! では「1 batch ぶん消費 → 次 batch で続きから」が成立しない。
+//!
+//! 一方 `iter_shapes_and_records()` の戻り値 `ShapeRecordIterator<'_>` は `&mut Reader`
+//! を借用するため、`BatchIter` の field として保持しようとすると self-referential に
+//! なってコンパイルが通らない。crate 外の owning iterator API も提供されていない。
+//!
+//! 解決策として **専用 OS スレッドが Reader を所有し、`sync_channel` 経由で 1 batch 単位の
+//! `Vec<(Shape, Record)>` を main スレッドへ送る** 方式を採る。channel 容量は 2 (= 高々
+//! 2 batch のみ in-flight) で、receiver 側 (BatchIter) が Drop されると `tx.send` が
+//! Err を返してスレッドが自然終了する。`JoinHandle` は捨てる (Drop で detach されるが、
+//! receiver 終了を契機にスレッド側も自然停止するため join 不要)。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::Arc;
+use std::thread;
 
 use arrow_array::builder::{
     BinaryBuilder, BooleanBuilder, Date32Builder, Float64Builder, Int32Builder, StringBuilder,
@@ -27,6 +48,10 @@ const READ_BATCH_SIZE: usize = 65_536;
 /// Arrow 列メタに元 DBF 型を保存するためのキー。Writer 側で復元に使う。
 pub const SOURCE_DBF_TYPE_KEY: &str = "shpx:shp:dbf_type";
 
+/// worker thread から送られてくる 1 batch ぶんの records。
+/// `Err` の場合はその batch で打ち切り (worker は早期 return)。
+type RecordChunk = std::result::Result<Vec<(shapefile::Shape, dbase::Record)>, shpx_core::Error>;
+
 /// Shapefile の `LayerReader` 実装。
 pub struct ShpReader {
     schema: SchemaRef,
@@ -37,13 +62,9 @@ pub struct ShpReader {
     /// DBF フィールドの元名（Record から取り出す際のキー）。
     dbf_field_names: Vec<String>,
     on_loss: shpx_core::OnLoss,
-    /// 全件 (shape, record) を事前にロードした作業バッファ。
-    ///
-    /// `iter_shapes_and_records()` は呼び出すたびにファイル先頭から再列挙する設計のため、
-    /// 複数 batch に跨る逐次読みには使えない。v0.1 では事前ロード方式で対処する
-    /// （Shapefile はサイズが小さいユースケースが大半なので許容できる）。
-    /// メモリ使用量を抑えたい場合は v0.2 で stateful iterator に置き換える余地あり。
-    pending: std::collections::VecDeque<(shapefile::Shape, dbase::Record)>,
+    /// worker thread からの batch 受信口。`batches()` で take() して BatchIter に渡す。
+    /// rx の drop が worker 側 tx.send Err を誘発し、スレッド自然終了に繋がる。
+    rx: Option<Receiver<RecordChunk>>,
 }
 
 impl ShpReader {
@@ -59,8 +80,13 @@ impl ShpReader {
         };
         let _encoding = cpg::resolve_read_encoding(&cpg_path, opts)?;
 
-        let mut inner = ShpReaderInner::from_path(&shp_path).map_err(|e| driver_err(&e))?;
-        let shape_type = inner.header().shape_type;
+        // schema / row_count / DBF field 一覧を確定するための Reader を 1 つ開く。
+        // この Reader は schema 抽出後すぐ drop し、worker thread には別途新規に open する。
+        // (.shp ヘッダ + .dbf ヘッダの読み込みは数 KB 程度なので 2 度開くオーバーヘッドは無視可能)
+        let probe_reader = ShpReaderInner::from_path(&shp_path).map_err(|e| driver_err(&e))?;
+        let shape_type = probe_reader.header().shape_type;
+        let row_count = probe_reader.shape_count().ok();
+        drop(probe_reader);
 
         // shapefile::Reader は dbase_reader が private のため、fields() 取得用に独立して 1 回開く。
         let dbf_reader_for_fields =
@@ -93,13 +119,45 @@ impl ShpReader {
         arrow_fields.push(geom_field);
 
         let schema = Arc::new(Schema::new(arrow_fields));
-        let row_count = inner.shape_count().ok();
 
-        let mut pending = std::collections::VecDeque::with_capacity(row_count.unwrap_or(0));
-        for item in inner.iter_shapes_and_records() {
-            let (shape, record) = item.map_err(|e| driver_err(&e))?;
-            pending.push_back((shape, record));
-        }
+        // worker thread を起動: Reader を所有し、READ_BATCH_SIZE 件ごとに chunk を送る。
+        // channel 容量 2 = main 側が 1 batch 処理中にも次の 1 batch を生産できる。
+        let (tx, rx) = sync_channel::<RecordChunk>(2);
+        let shp_path_clone = shp_path.clone();
+        thread::spawn(move || {
+            let mut inner = match ShpReaderInner::from_path(&shp_path_clone) {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.send(Err(driver_err(&e)));
+                    return;
+                }
+            };
+            let mut buf: Vec<(shapefile::Shape, dbase::Record)> =
+                Vec::with_capacity(READ_BATCH_SIZE);
+            for item in inner.iter_shapes_and_records() {
+                match item {
+                    Ok(t) => {
+                        buf.push(t);
+                        if buf.len() >= READ_BATCH_SIZE {
+                            let chunk = std::mem::replace(
+                                &mut buf,
+                                Vec::with_capacity(READ_BATCH_SIZE),
+                            );
+                            if tx.send(Ok(chunk)).is_err() {
+                                return; // receiver dropped, exit cleanly
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(driver_err(&e)));
+                        return;
+                    }
+                }
+            }
+            if !buf.is_empty() {
+                let _ = tx.send(Ok(buf));
+            }
+        });
 
         Ok(Self {
             schema,
@@ -108,7 +166,7 @@ impl ShpReader {
             dbf_field_types,
             dbf_field_names,
             on_loss: shpx_core::OnLoss::Warn,
-            pending,
+            rx: Some(rx),
         })
     }
 }
@@ -127,61 +185,79 @@ impl LayerReader for ShpReader {
     }
 
     fn batches(&mut self) -> Box<dyn Iterator<Item = Result<RecordBatch>> + Send + '_> {
+        let rx = self.rx.take();
         Box::new(BatchIter {
-            reader: self,
-            finished: false,
+            rx,
+            schema: self.schema.clone(),
+            dbf_field_types: self.dbf_field_types.clone(),
+            dbf_field_names: self.dbf_field_names.clone(),
+            on_loss: self.on_loss,
         })
     }
 }
 
-struct BatchIter<'a> {
-    reader: &'a mut ShpReader,
-    finished: bool,
+struct BatchIter {
+    rx: Option<Receiver<RecordChunk>>,
+    schema: SchemaRef,
+    dbf_field_types: Vec<FieldType>,
+    dbf_field_names: Vec<String>,
+    on_loss: shpx_core::OnLoss,
 }
 
-impl Iterator for BatchIter<'_> {
+impl Iterator for BatchIter {
     type Item = Result<RecordBatch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.finished {
-            return None;
-        }
-        match read_one_batch(self.reader) {
-            Ok(Some(batch)) => Some(Ok(batch)),
-            Ok(None) => {
-                self.finished = true;
-                None
-            }
-            Err(e) => {
-                self.finished = true;
+        let rx = self.rx.as_ref()?;
+        match rx.recv() {
+            // worker からの Err は無条件で error 化して以降は終了。
+            Ok(Err(e)) => {
+                self.rx = None;
                 Some(Err(e))
+            }
+            Ok(Ok(chunk)) => match build_record_batch(
+                &chunk,
+                &self.schema,
+                &self.dbf_field_types,
+                &self.dbf_field_names,
+                self.on_loss,
+            ) {
+                Ok(b) => Some(Ok(b)),
+                Err(e) => {
+                    self.rx = None;
+                    Some(Err(e))
+                }
+            },
+            // recv() Err は worker thread が tx を drop した = データ尽きた。
+            Err(_) => {
+                self.rx = None;
+                None
             }
         }
     }
 }
 
-fn read_one_batch(r: &mut ShpReader) -> Result<Option<RecordBatch>> {
-    if r.pending.is_empty() {
-        return Ok(None);
-    }
-    // 残量と batch 上限の小さい方で alloc。最終 batch で 65536 行ぶんの空 alloc を抱えない。
-    let n_rows = r.pending.len().min(READ_BATCH_SIZE);
+fn build_record_batch(
+    chunk: &[(shapefile::Shape, dbase::Record)],
+    schema: &SchemaRef,
+    dbf_field_types: &[FieldType],
+    dbf_field_names: &[String],
+    on_loss: shpx_core::OnLoss,
+) -> Result<RecordBatch> {
+    let n_rows = chunk.len();
 
-    let mut attr_builders: Vec<AttrBuilder> = r
-        .dbf_field_types
+    let mut attr_builders: Vec<AttrBuilder> = dbf_field_types
         .iter()
         .map(|t| AttrBuilder::new(*t, n_rows))
         .collect();
     let mut geom_builder = BinaryBuilder::with_capacity(n_rows, n_rows * 32);
 
-    for _ in 0..n_rows {
-        let (shape, record) = r.pending.pop_front().expect("invariant: n_rows ≤ pending");
-
+    for (shape, record) in chunk {
         for (i, builder) in attr_builders.iter_mut().enumerate() {
-            builder.push(record.get(&r.dbf_field_names[i]))?;
+            builder.push(record.get(&dbf_field_names[i]))?;
         }
 
-        match shp_to_geom(&shape, r.on_loss)? {
+        match shp_to_geom(shape, on_loss)? {
             Some(g) => {
                 let bytes = wkb::encode(&g)?;
                 geom_builder.append_value(&bytes);
@@ -196,9 +272,8 @@ fn read_one_batch(r: &mut ShpReader) -> Result<Option<RecordBatch>> {
     }
     columns.push(Arc::new(geom_builder.finish()) as ArrayRef);
 
-    let batch = RecordBatch::try_new(r.schema.clone(), columns)
-        .map_err(|e| shpx_core::Error::Schema(e.to_string()))?;
-    Ok(Some(batch))
+    RecordBatch::try_new(schema.clone(), columns)
+        .map_err(|e| shpx_core::Error::Schema(e.to_string()))
 }
 
 /// 1 列分のビルダ。`FieldType` ごとに内部表現を切り替える。

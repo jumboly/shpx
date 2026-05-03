@@ -3,9 +3,17 @@
 //! - ヘッダから列定義 / CRS / geometry_type を取得し Arrow Schema を構築
 //! - 各 feature の geometry は geozero `WkbWriter` で WKB バイト列に変換
 //! - 属性は `PropertyProcessor` で 1 列ずつ受け取り、Arrow `ArrayBuilder` に蓄積
-//! - 全行を `VecDeque` に積んでから `batches()` で 4096 件ずつ流す（GPKG/GeoJSON と同じ eager-load 方針）
+//!
+//! v0.8 cycle 1 で eager-load (`VecDeque<Row>`) をやめ、`FeatureIter<BufReader<File>,
+//! NotSeekable>` を field に保持する真のストリーミング化を行った。`FallibleStreamingIterator`
+//! の特性上、`feature_iter.next()?` は 1 feature ずつ進むので READ_BATCH_SIZE 件回せば
+//! 1 batch 完成。
+//!
+//! DateTime → Date32 の refine 推定は streaming と相性が悪い (全行を見ないと型が確定
+//! しない) ため、**最初の SAMPLE_LIMIT 件 (= 1 batch ぶん) を open() で先読みして
+//! refine 判定** に使い、その判定が「全行 walk 済み」なら Date32 に絞る。サンプルが
+//! ファイル全体を覆えなかった場合は安全側に倒し header 宣言の `Timestamp` を採用する。
 
-use std::collections::VecDeque;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
@@ -20,7 +28,8 @@ use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use chrono::NaiveDate;
 use flatgeobuf::{
-    ColumnType, FallibleStreamingIterator, FgbReader as InnerFgbReader, GeometryType as FgbGeomType,
+    ColumnType, FallibleStreamingIterator, FeatureIter, FgbReader as InnerFgbReader,
+    GeometryType as FgbGeomType, NotSeekable,
 };
 use geozero::error::GeozeroError;
 use geozero::{
@@ -36,8 +45,11 @@ use crate::type_map::{fgb_column_to_arrow_field, fgb_to_shpx_geometry_type};
 use crate::util::{driver_err, driver_msg};
 use crate::value::{from_column_value, OwnedValue};
 
-/// 1 batch あたりの行数。eager-load 後に分割するためのチャンクサイズ。
-const READ_BATCH_SIZE: usize = 4096;
+/// 1 batch あたりの行数。
+const READ_BATCH_SIZE: usize = 65_536;
+/// open() 時に DateTime → Date32 refine のため先読みするサンプル上限。
+/// サンプルでファイル末尾に到達できれば全行 walk 済みなので安全に Date32 に絞れる。
+const SAMPLE_LIMIT: usize = READ_BATCH_SIZE;
 
 /// FlatGeobuf の `LayerReader` 実装。
 pub struct FgbReader {
@@ -45,7 +57,14 @@ pub struct FgbReader {
     crs: Option<Crs>,
     /// FGB 列名 / FGB ColumnType / Arrow 列計画。
     columns: Vec<ColumnPlan>,
-    rows: VecDeque<Row>,
+    has_z: bool,
+    has_m: bool,
+    /// open() 時に refine 用に先読みした sample。batches() で先に流す。
+    sample: Option<Vec<Row>>,
+    /// streaming 用の FeatureIter。`select_all_seq()` で `FgbReader` を消費して
+    /// 内部 reader を所有させているため self-referential にならない。
+    feature_iter: Option<FeatureIter<BufReader<File>, NotSeekable>>,
+    row_count_hint: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,7 +91,7 @@ impl FgbReader {
 
         // ヘッダから列・geometry_type・CRS を抽出する。`select_all_seq` は `fgb` を
         // 消費するため、ヘッダから必要な値はあらかじめ owned 形に取り出しておく。
-        let (columns, geom_type, crs_from_header, has_z, has_m) = {
+        let (columns, geom_type, crs_from_header, has_z, has_m, features_count) = {
             let header = fgb.header();
             let columns: Vec<ColumnPlan> = match header.columns() {
                 None => Vec::new(),
@@ -96,33 +115,61 @@ impl FgbReader {
                 other => fgb_to_shpx_geometry_type(other),
             };
             let crs_from_header = decode_header_crs(&header);
+            let features_count = header.features_count();
             (
                 columns,
                 geom_type,
                 crs_from_header,
                 header.has_z(),
                 header.has_m(),
+                features_count,
             )
         };
 
         let crs = opts.src_crs.clone().or(crs_from_header);
 
-        // 全 feature を eager-load する。
-        let mut iter = fgb.select_all_seq().map_err(|e| driver_err(&e))?;
-        let mut rows: Vec<Row> = Vec::new();
-        loop {
-            match iter.next() {
-                Ok(None) => break,
-                Ok(Some(feat)) => {
-                    let row = collect_row(feat, &columns, has_z, has_m)?;
-                    rows.push(row);
+        let mut feature_iter = fgb.select_all_seq().map_err(|e| driver_err(&e))?;
+
+        // DateTime 列の有無で sample 先読みの要否が決まる: refine 対象が無ければサンプル不要で
+        // 即 streaming に入れる (典型 FGB は DateTime 列なし、peak RSS と open() latency を削減)。
+        let needs_refine = columns
+            .iter()
+            .any(|c| matches!(c.column_type, ColumnType::DateTime));
+
+        // refine が必要な場合のみ、先頭 SAMPLE_LIMIT 件をバッファに先読みする。
+        // ファイルが SAMPLE_LIMIT 以下で全行 walk 済みなら、observe-based refine で型を絞る。
+        // 越えた場合は header 宣言型 (= Timestamp) のままにし、誤った Date32 化を避ける。
+        let (sample, sample_exhausted_file) = if needs_refine {
+            let mut buf: Vec<Row> = Vec::with_capacity(SAMPLE_LIMIT);
+            let mut exhausted = false;
+            loop {
+                match feature_iter.next() {
+                    Ok(None) => {
+                        exhausted = true;
+                        break;
+                    }
+                    Ok(Some(feat)) => {
+                        let row = collect_row(feat, &columns, has_z, has_m)?;
+                        buf.push(row);
+                        if buf.len() >= SAMPLE_LIMIT {
+                            break;
+                        }
+                    }
+                    Err(e) => return Err(driver_err(&e)),
                 }
-                Err(e) => return Err(driver_err(&e)),
             }
-        }
+            (buf, exhausted)
+        } else {
+            (Vec::new(), false)
+        };
 
         // 列の Arrow 型を観測値で絞り込む（DateTime → Date32 / Timestamp）。
-        let arrow_types = refine_arrow_types(&columns, &rows);
+        // sample がファイル全体を覆っている時のみ適用する。
+        let arrow_types = if sample_exhausted_file {
+            refine_arrow_types(&columns, &sample)
+        } else {
+            columns.iter().map(|c| c.arrow_type.clone()).collect()
+        };
         let columns: Vec<ColumnPlan> = columns
             .into_iter()
             .zip(arrow_types)
@@ -134,11 +181,31 @@ impl FgbReader {
 
         let schema = build_schema(&columns, geom_type, crs.as_ref())?;
 
+        // FGB header の features_count は信頼できるなら使う (ストリーミング reader でも
+        // 進捗バー分母を提供するため)。0 は「不定」を表す慣習。
+        let row_count_hint = match (sample_exhausted_file, features_count) {
+            (true, _) => Some(sample.len()),
+            (false, n) if n > 0 => usize::try_from(n).ok(),
+            _ => None,
+        };
+
+        // sample 経路が走らなかった (DateTime 列なし) or 走ったがファイル末尾に到達 した
+        // 場合は feature_iter を保持する必要なし。
+        let feature_iter = if sample_exhausted_file {
+            None
+        } else {
+            Some(feature_iter)
+        };
+
         Ok(Self {
             schema,
             crs,
             columns,
-            rows: rows.into(),
+            has_z,
+            has_m,
+            sample: Some(sample),
+            feature_iter,
+            row_count_hint,
         })
     }
 }
@@ -304,16 +371,19 @@ impl LayerReader for FgbReader {
     }
 
     fn row_count_hint(&self) -> Option<usize> {
-        Some(self.rows.len())
+        self.row_count_hint
     }
 
     fn batches(&mut self) -> Box<dyn Iterator<Item = Result<RecordBatch>> + Send + '_> {
-        let rows = std::mem::take(&mut self.rows);
+        let sample = self.sample.take().unwrap_or_default();
+        let feature_iter = self.feature_iter.take();
         Box::new(BatchIter {
             schema: self.schema.clone(),
             columns: self.columns.clone(),
-            rows: rows.into_iter(),
-            done: false,
+            has_z: self.has_z,
+            has_m: self.has_m,
+            sample_iter: sample.into_iter(),
+            feature_iter,
         })
     }
 }
@@ -321,19 +391,47 @@ impl LayerReader for FgbReader {
 struct BatchIter {
     schema: SchemaRef,
     columns: Vec<ColumnPlan>,
-    rows: std::collections::vec_deque::IntoIter<Row>,
-    done: bool,
+    has_z: bool,
+    has_m: bool,
+    sample_iter: std::vec::IntoIter<Row>,
+    /// `None` = 全 streaming 完了 (sample_iter も使い切った後の終了状態を表す)。
+    feature_iter: Option<FeatureIter<BufReader<File>, NotSeekable>>,
 }
 
 impl BatchIter {
     fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
-        let mut chunk: Vec<Row> = Vec::new();
-        for row in self.rows.by_ref() {
+        let mut chunk: Vec<Row> = Vec::with_capacity(READ_BATCH_SIZE);
+
+        // sample 残を先に流す。`for` loop は `break` 後 IntoIter を中断状態のまま残す。
+        for row in self.sample_iter.by_ref() {
             chunk.push(row);
             if chunk.len() >= READ_BATCH_SIZE {
                 break;
             }
         }
+
+        // sample が尽きたら feature_iter から streaming で取り込む。
+        // chunk が既に READ_BATCH_SIZE に達していれば下の while は条件不成立で skip される。
+        if let Some(iter) = self.feature_iter.as_mut() {
+            while chunk.len() < READ_BATCH_SIZE {
+                match iter.next() {
+                    Ok(None) => {
+                        // file 末尾。以降は読まない。
+                        self.feature_iter = None;
+                        break;
+                    }
+                    Ok(Some(feat)) => {
+                        let row = collect_row(feat, &self.columns, self.has_z, self.has_m)?;
+                        chunk.push(row);
+                    }
+                    Err(e) => {
+                        self.feature_iter = None;
+                        return Err(driver_err(&e));
+                    }
+                }
+            }
+        }
+
         if chunk.is_empty() {
             return Ok(None);
         }
@@ -364,17 +462,13 @@ impl Iterator for BatchIter {
     type Item = Result<RecordBatch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.done {
-            return None;
-        }
         match self.next_batch() {
             Ok(Some(b)) => Some(Ok(b)),
-            Ok(None) => {
-                self.done = true;
-                None
-            }
+            Ok(None) => None,
             Err(e) => {
-                self.done = true;
+                // エラー後はバッファを空にして次回以降 None を返すよう保証する。
+                self.feature_iter = None;
+                self.sample_iter = Vec::new().into_iter();
                 Some(Err(e))
             }
         }
