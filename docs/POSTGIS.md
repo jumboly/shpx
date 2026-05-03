@@ -198,8 +198,9 @@ Z/M / GeometryCollection は `shpx-geom::wkb` 自体が未対応のため、Post
 
 ## 損失変換
 
-- CRS 無し → `apply_on_loss("missing-crs-on-postgis", ...)`
-- 未登録 EPSG → cycle 3b で `spatial_ref_sys` への自動 INSERT を実装（WKT 解決可能な場合のみ、ベストエフォート）
+`--on-loss=error|warn|skip` の挙動と、PostGIS driver が発する loss kind (`missing-crs-on-postgis`) は [`docs/ON_LOSS.md`](ON_LOSS.md) を参照。
+
+driver 固有の補助動作: 未登録 EPSG の SRID 解決時には `spatial_ref_sys` への best-effort `INSERT ... ON CONFLICT (srid) DO NOTHING` を試みる (WKT 解決可能な場合のみ、PostGIS の geometry 列は `spatial_ref_sys` 行が無くても動作するため失敗しても続行)。
 
 ## スコープ外（v0.4 以降）
 

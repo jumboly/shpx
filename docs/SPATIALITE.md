@@ -130,9 +130,9 @@ SpatiaLite は独自の binary 形式で geometry 列を格納する。`shpx-geo
 
 ## 損失変換
 
-- CRS 無し → `apply_on_loss("missing-crs-on-spatialite", ...)`
-- 未登録 EPSG → `spatial_ref_sys` への自動 INSERT を実装（WKT 解決可能な場合のみ、ベストエフォート）
-- `Decimal128` / `Decimal256` → `TEXT` 文字列化（`supports_decimal = false`）。bit-identical 往復はしない
+`--on-loss=error|warn|skip` の挙動と、SpatiaLite driver が発する loss kind 一覧 (`missing-crs-on-spatialite` / `decimal-on-spatialite` / `uint64-overflow-on-spatialite`) は [`docs/ON_LOSS.md`](ON_LOSS.md) を参照。
+
+driver 固有の補助動作: 未登録 EPSG の SRID 解決時には `spatial_ref_sys` への best-effort `INSERT OR IGNORE` を試みる (WKT 解決可能な場合のみ)。`Decimal128` / `Decimal256` は `TEXT` への文字列化で精度を保つが bit-identical 往復はしない (`Capabilities::supports_decimal = false`)。
 
 ## スコープ外（v0.6 以降）
 

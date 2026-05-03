@@ -63,7 +63,11 @@ URL 内の特殊文字（パスワードの記号など）は `%xx` で percent 
 | Timestamp(_, UTC) | `datetimeoffset` | UTC 固定 offset |
 | Geometry (WKB) | `geometry` または `geography` | URI クエリ `?geom_type=` で切替 |
 
-未対応型: Int8 / UInt 系 / Date64 / 他 TZ / xml / hierarchyid / sql_variant / Decimal256（cycle 3b 時点ではスコープ外）。
+未対応型: Int8 / UInt 系 / Date64 / 他 TZ / xml / hierarchyid / sql_variant / Decimal256。
+
+## 損失変換
+
+`--on-loss=error|warn|skip` の挙動と、SQL Server driver が発する loss kind (`missing-crs-on-sqlserver`) は [`docs/ON_LOSS.md`](ON_LOSS.md) を参照。`geometry` 列は CRS 不明時に SRID 0 へフォールバックするが、`geography` 列は valid な geographic CRS が必須のため SRID 4326 へフォールバックする (`STGeomFromWKB` が SRID 0 では失敗するため)。
 
 ## staging bulk の動作（案 B）
 
