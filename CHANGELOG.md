@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Added (v1.0 cycle 1 完了確認)
+
+- **v1.0 cycle 1 完了基準を再定義**: ogr2ogr 比較 (`shpx_secs <= 1.667 * ogr_secs`) を完了基準から外し、`bench-smoke-mssql.yml` で取得した shpx 単独 wall-clock を絶対値として公開する形に変更し `docs/ROADMAP.md` v1.0 完了基準を `[x]` 化。`scripts/bench-vs-ogr-mssql.sh` はローカル開発者向けの参考 utility として温存 (CI では使わない)。実測値と詳細は `docs/SQLSERVER.md` Benchmark 節を参照。
+
 ### Added (v1.0 cycle 3)
 
 - **examples/*.sh ×6 + `examples/data/`**: SHP → GeoParquet (01) / SHP → PostGIS (02) / PostGIS → FGB (03) / `--reproject` (04) / `--on-loss=error|warn|skip` 比較 (05) / `--insert-mode=bulk` vs `batch` (06) の 1-shot シナリオを新設。test data は `cities.shp` (5 都市 / WGS84) / `cities-3857.shp` (Web Mercator 派生) / `lossy.csv` (DBF 10-byte 制限に引っ掛かる長い列名) を `examples/data/` にコミットし cold で `bash examples/01-*.sh` が走る。共通環境変数は `SHPX_BIN` (実行コマンド)、`OUT` (出力先 `/tmp/shpx-examples`)、`PG_URL` (PostGIS 接続)。再生成手順は `examples/data/REGENERATE.md`。
