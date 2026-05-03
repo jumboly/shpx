@@ -223,14 +223,7 @@ fn locate_sibling_out(
 /// v0.6 cycle 2 で `OMIT_GEOS` を解除 (`geos-src` 同梱)、cycle 3 で `OMIT_PROJ` を解除
 /// (`shpx-geom/bundled-proj` 経由 proj-sys 同梱)。
 #[cfg(feature = "bundled-spatialite")]
-const OMIT_FEATURES: &[&str] = &[
-    "ICONV",
-    "FREEXL",
-    "MATHSQL",
-    "EPSG",
-    "KNN",
-    "GEOCALLBACKS",
-];
+const OMIT_FEATURES: &[&str] = &["ICONV", "FREEXL", "MATHSQL", "EPSG", "KNN", "GEOCALLBACKS"];
 
 /// lemon/flex 由来の parser/lexer 出力。wrapper の `gg_*.c` が `#include` する
 /// データファイル (`Makefile.am` の EXTRA_DIST) であり、直接 compile してはいけない。
@@ -265,7 +258,10 @@ const MSVC_STUB: &str = "/* shpx: non-MSVC build, intentionally empty */\n";
 /// cc-rs の incremental 判定 (timestamp 比較) と相性が悪くなるため。
 #[cfg(feature = "bundled-spatialite")]
 fn write_if_changed(path: &std::path::Path, body: &str) {
-    if std::fs::read_to_string(path).map(|cur| cur == body).unwrap_or(false) {
+    if std::fs::read_to_string(path)
+        .map(|cur| cur == body)
+        .unwrap_or(false)
+    {
         return;
     }
     std::fs::write(path, body).unwrap_or_else(|e| panic!("write {} failed: {e}", path.display()));
