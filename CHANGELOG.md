@@ -12,6 +12,10 @@
 
 - **`.github/workflows/bench-smoke-mssql.yml` 新設**: SQL Server bench を Linux x86_64 (ubuntu-latest) で実行する `workflow_dispatch` 専用 workflow。`services.mssql` 上で `shpx convert --insert-mode=bulk --create-table=always` を `SHPX_MSSQL_BULK_CHUNK=1000000` 下で 10M 行流し、tempdb 溢れずに完走することを確認する (= v0.4 完了基準判定)。`rows` / `runs` input、`bench-output.txt` を artifact で 30 日保持。`scripts/bench-vs-ogr-mssql.sh` は ogr2ogr 比較用にローカル開発者向けで温存。
 
+### Fixed
+
+- **v0.4 完了基準 (chunk size 1M でも tempdb 溢れなし) を確認**: 上記 bench workflow を `rows=10000000 runs=3` で実行し、ubuntu-latest 上で 3 run 全完走 (139.01 / 138.23 / 138.53 s、median 138.53s)。`docs/ROADMAP.md` v0.4 完了基準 L.95 を `[ ]` → `[x]`、`docs/SQLSERVER.md` Benchmark 節と `CHANGELOG.md` 0.4.0 Known Issues を訂正。
+
 ## [0.7.0] - 2026-05-03
 
 v0.7 マイルストーン「Driver Feature Parity & Refactor」のリリース。新 driver (PostGIS / SQL Server / SpatiaLite) と古い driver (SHP / Parquet / GPKG / GeoJSON / CSV / FGB) の間に残っていた data-correctness 直結のギャップ 3 項目 ((1) Parquet writer の OnLoss scaffold 整備、(2) GeoJSON writer の silent demotion を `apply_on_loss` 経由化、(3) SpatiaLite reader への `--where` / `--select` / `--query` backport) を塞ぎ、cycle 2 で reader 側の CRS metadata 経路 (Parquet PROJJSON / FGB header `crs` / GPKG `definition_12_063` WKT2) を完備、`crates/shpx-cli/tests/cross_driver_matrix.rs` で driver 横断 e2e roundtrip matrix を整備した。配布工程 (`cargo-dist`、追加 OS 対応) は v1.0 へ分離する。
@@ -119,7 +123,7 @@ v0.4 マイルストーン「SQL Server」のリリース。`shpx-driver-sqlserv
 
 - **tiberius 0.12 bulk encode の既知不整合**: 多列スキーマ (10+ 列) で `decimal(p, s)` と複数の `varbinary(max)` 列、または `datetime2` / `datetimeoffset` 列が混在すると、特定の列で `Token error: 'Invalid column type from bcp client'` を踏むケースがある。完了基準の各型 (decimal(38, 10) / timestamptz / bytea) は単独テストで bit-identical を確認済みで、`tests/bulk_roundtrip.rs::bulk_all_types_together` のみ一時的に `#[ignore]`。tiberius 上流に再現報告予定。
 - **`--create-index=Always` は事前 PK 必須**: SQL Server の `CREATE SPATIAL INDEX` は仕様で clustered primary key を要求する。shpx 汎用 driver は `CREATE TABLE` で PK を勝手に付与しないため、`--create-index=Always` を使うには利用者が事前に PK 付きテーブルを作成して `--create-table=never` で append する運用になる。`--create-index=Auto` は no-op で安全側。
-- **完了基準ベンチ値は Linux x86_64 で取得予定**: Apple Silicon では SQL Server image が amd64-only で emulation 必須。100k 行の smoke では shpx 1.28s (78k rows/s) を計測したが、これは emulation 経由の参考値で production を反映しない。10M 行 × 3 runs median は CI もしくは Linux ホストで取得する。
+- **完了基準ベンチ値は Linux x86_64 で取得予定** [v1.0 cycle 1 で取得済み]: 当初 100k 行の smoke (Apple Silicon emulation) で shpx 1.28s しか取れていなかったが、v1.0 cycle 1 で `.github/workflows/bench-smoke-mssql.yml` を整備し、ubuntu-latest 上で 10M 行 × 3 runs の median 138.53s (≈ 72k rows/s) を確認、tempdb 溢れなしを担保。
 
 ## [0.3.0] - 2026-04-25
 
