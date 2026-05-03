@@ -32,6 +32,22 @@ the additional terms of one of the libspatialite licenses (per recipient
 choice).
 
 ================================================================================
+PROJ (transitively bundled via shpx-geom + proj-sys)
+================================================================================
+
+When the `bundled-spatialite` feature is enabled, libspatialite is linked
+against libproj 9.4.x, which is built from C source by the `proj-sys` crate
+(via the `shpx-geom/bundled-proj` feature, which `bundled-spatialite` implies).
+
+PROJ is licensed under the X/MIT License (a permissive, BSD-style license).
+The full PROJ license text is shipped inside the proj-sys crate's vendored
+PROJ source tree (under the `LICENSE` file).
+
+shpx does not vendor PROJ source directly; it consumes whichever PROJ version
+proj-sys 0.25.0 (or compatible) builds. See `crates/shpx-geom/Cargo.toml`
+for the exact `proj` / `proj-sys` versions in use.
+
+================================================================================
 shpx local modifications to libspatialite 5.1.0 source tree
 ================================================================================
 
