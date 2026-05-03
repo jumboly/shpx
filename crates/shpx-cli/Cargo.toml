@@ -43,6 +43,7 @@ shpx-driver-spatialite = { path = "../shpx-driver-spatialite" }
 shpx-geom           = { path = "../shpx-geom" }
 arrow-schema        = { workspace = true }
 clap                = { workspace = true }
+indicatif           = { workspace = true }
 serde_json          = { workspace = true }
 tracing             = { workspace = true }
 tracing-subscriber  = { workspace = true }

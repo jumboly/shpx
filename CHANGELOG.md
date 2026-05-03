@@ -7,6 +7,12 @@
 ### Added
 
 - **LICENSE / NOTICE**: MIT / Apache-2.0 dual license の `LICENSE-MIT` / `LICENSE-APACHE` をリポジトリルートに配置、`NOTICE` で third-party 依存 (libspatialite / libgeos / libproj / SQLite / arrow-rs / parquet / tokio-postgres / tiberius / flatgeobuf / geozero / shapefile / geojson / proj / rusqlite ほか) を aggregate listing。`Cargo.toml` の `[workspace.package].license = "MIT OR Apache-2.0"` 宣言は v0.1 から既出だが、ルートに license 本文が無く `cargo-dist` 配布の前提を満たさないため整備した。`crates/shpx-driver-spatialite/NOTICE` は driver scope の詳細 (vendor 範囲・LGPL 2.1 配布要件) を持つためそのまま残す。
+- **shpx-cli (v1.0 cycle 2、進捗バー)**: `shpx convert` 実行中に行ベースの進捗バーを stderr に表示する。`LayerReader::row_count_hint()` が `Some(n)` を返す driver (SHP / Parquet / GPKG / FGB / GeoJSON / PostGIS / SQL Server / SpatiaLite) は `{percent}% [{bar}] {pos}/{len} rows {per_sec} ETA {eta}` の ProgressBar、`None` を返す CSV は `{spinner} {pos} rows {per_sec}` の Spinner に倒す。stderr が非 TTY (CI ログ / pipe) のときは `std::io::IsTerminal` 判定で自動的に `ProgressBar::hidden()` に倒し、ANSI escape で CI ログを汚さない。`indicatif = "0.17"` を workspace dep に追加。
+- **shpx-cli (v1.0 cycle 2、`--quiet` global flag)**: `-q` / `--quiet` を全サブコマンド共通の global flag として追加し、`init_tracing` を `error` レベルに倒して `shpx::cli` の info ログと進捗バーの両方を抑止する。`--verbose` とは clap の `conflicts_with` で排他。
+
+### Docs
+
+- **`docs/ON_LOSS.md` 精緻化 (v1.0 cycle 2)**: SHP の `z-on-shp` / `m-on-shp` を「将来用、現状の中間表現が XY のみのため未発火」から「reader 経路で `*Z` / `*M` shape を読み込む際に発火する」に訂正 (`crates/shpx-driver-shp/src/geometry.rs:64-85`)。SpatiaLite / PostGIS / SQL Server の loss_kind 発火位置に writer.rs の line ref を追記。CSV `encoding-unmappable` を「定義のみ、現状未発火」表注に格上げ。`row_count_hint` と進捗バーの対応表を新設し、driver ごとの ProgressBar / Spinner モードを 1 表で並べた。kind 命名規約 (`<phenomenon>-on-<driver>` で prefix 共通) を Future Work メモに追加。
 
 ### Build
 

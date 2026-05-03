@@ -16,6 +16,10 @@ pub struct Cli {
     /// `-v` で INFO、`-vv` で DEBUG、`-vvv` で TRACE。`RUST_LOG` 環境変数も尊重。
     #[arg(short, long, global = true, action = ArgAction::Count)]
     pub verbose: u8,
+
+    /// 進捗バーと info ログを抑止する。WARN / ERROR は引き続き出る。`--verbose` とは排他。
+    #[arg(short, long, global = true, conflicts_with = "verbose")]
+    pub quiet: bool,
 }
 
 #[derive(Subcommand, Debug)]
