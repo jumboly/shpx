@@ -36,13 +36,13 @@ pub struct Crs {
 
 | フォーマット | 読み出し時の解決経路 | 備考 |
 |---|---|---|
-| **GeoParquet** | Arrow field metadata の `geo` JSON (`columns.<geom>.crs`) を `shpx_geom::projjson::decode` で parse し、`Crs` の authority / wkt2 / projjson を復元 | v0.7 cycle 2 で実装 |
-| **GeoPackage** | `gpkg_geometry_columns.srs_id` → `gpkg_spatial_ref_sys` の `definition` (WKT1) と `definition_12_063` (WKT2) を結合 | v0.7 cycle 2 で WKT2 経路を完備 |
-| **Shapefile `.prj`** | サイドカー `.prj` (WKT1) を読み EPSG authority を抽出 | v0.1 から |
+| **GeoParquet** | Arrow field metadata の `geo` JSON (`columns.<geom>.crs`) を `shpx_geom::projjson::decode` で parse し、`Crs` の authority / wkt2 / projjson を復元 | |
+| **GeoPackage** | `gpkg_geometry_columns.srs_id` → `gpkg_spatial_ref_sys` の `definition` (WKT1) と `definition_12_063` (WKT2) を結合 | |
+| **Shapefile `.prj`** | サイドカー `.prj` (WKT1) を読み EPSG authority を抽出 | |
 | **PostGIS** | table モード: `geometry_columns` view → 先頭行 `ST_SRID()` の 2 段で SRID 取得。query モード: サブクエリ経由の先頭 `ST_SRID()` のみ。WKT は `spatial_ref_sys` から引かない (`--src-crs` で WKT 直接指定可) | |
 | **SQL Server** | `[col].STSrid` を `STAsBinary` と併走 SELECT で取得 | 空テーブルでは SRID 不明 |
 | **SpatiaLite** | `geometry_columns.srid` を参照。`--src-crs` で上書き可 | SRID 0 は SpatiaLite 慣習で unknown |
-| **FlatGeobuf** | header の `crs` field (org / code / wkt) を parse | v0.7 cycle 2 で実装 |
+| **FlatGeobuf** | header の `crs` field (org / code / wkt) を parse | |
 | **GeoJSON / GeoJSONL** | top-level `crs` メンバ (旧仕様、`urn:ogc:def:crs:EPSG::NNNN` / `urn:ogc:def:crs:OGC:1.3:CRS84`) を解釈、無ければ既定 EPSG:4326 | RFC 7946 互換 |
 | **CSV** | サイドカー `.prj` または `--src-crs` で明示 | CSV 自体には CRS 情報がない |
 

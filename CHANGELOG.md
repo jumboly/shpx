@@ -6,7 +6,7 @@
 
 ## [0.7.0] - 2026-05-03
 
-v0.7 マイルストーン「Driver Feature Parity & Refactor」のリリース。3 並列 Explore 監査で発見した driver 間 parity ギャップ (`/Users/masa/.claude/plans/velvety-percolating-hinton.md` 参照) のうち data-correctness に直結する 3 項目 ((1) Parquet writer の OnLoss scaffold 整備、(2) GeoJSON writer の silent demotion を `apply_on_loss` 経由化、(3) SpatiaLite reader への `--where` / `--select` / `--query` backport) を塞ぎ、cycle 2 で reader 側の CRS metadata 経路 (Parquet PROJJSON / FGB header `crs` / GPKG `definition_12_063` WKT2) を完備、`crates/shpx-cli/tests/cross_driver_matrix.rs` で driver 横断 e2e roundtrip matrix を整備した。配布工程 (`cargo-dist`、追加 OS 対応) は v1.0 へ分離する。
+v0.7 マイルストーン「Driver Feature Parity & Refactor」のリリース。新 driver (PostGIS / SQL Server / SpatiaLite) と古い driver (SHP / Parquet / GPKG / GeoJSON / CSV / FGB) の間に残っていた data-correctness 直結のギャップ 3 項目 ((1) Parquet writer の OnLoss scaffold 整備、(2) GeoJSON writer の silent demotion を `apply_on_loss` 経由化、(3) SpatiaLite reader への `--where` / `--select` / `--query` backport) を塞ぎ、cycle 2 で reader 側の CRS metadata 経路 (Parquet PROJJSON / FGB header `crs` / GPKG `definition_12_063` WKT2) を完備、`crates/shpx-cli/tests/cross_driver_matrix.rs` で driver 横断 e2e roundtrip matrix を整備した。配布工程 (`cargo-dist`、追加 OS 対応) は v1.0 へ分離する。
 
 ### Added
 

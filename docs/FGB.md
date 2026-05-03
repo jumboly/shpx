@@ -104,7 +104,7 @@ FGB driver は現時点で driver 専用の環境変数を持たない。CRS 解
 - 書き出しは `flatgeobuf::FgbWriter::create_with_options` に `write_index: false` を渡して固定 (空間インデックスは出力しない)
 - geometry の WKB ↔ FGB FlatBuffers 変換は `geozero::wkb::WkbWriter` / `flatgeobuf::geozero` 経由
 - DateTime 列の Arrow 型 refine (`Date32` か `Timestamp(Microsecond, Some("UTC"))` か) は cycle 4 当時の reader 実装で観測値の形式から推定
-- v0.7 cycle 2 で reader が header の `crs` field (org / code / wkt) を `Crs` 構造体に復元する経路を完備した (それ以前は EPSG 整数のみ拾っていた)
+- reader は header の `crs` field (org / code / wkt) を `Crs` 構造体に復元する
 - `apply_on_loss` ヘルパは `crates/shpx-driver-fgb/src/util.rs` で `shpx-rdb-common` の薄ラッパとして定義 (`tracing::warn!(target: "shpx::fgb", ...)`)
 
 ## Future work
