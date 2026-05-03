@@ -1,0 +1,64 @@
+This crate (shpx-driver-spatialite) bundles libspatialite under the
+`bundled-spatialite` Cargo feature. The bundled C source is included
+in-tree under `vendor/libspatialite-5.1.0/` and is statically linked
+into the resulting binary by `build.rs` via the `cc` crate.
+
+================================================================================
+libspatialite 5.1.0
+================================================================================
+
+Upstream: https://www.gaia-gis.it/gaia-sins/libspatialite-sources/libspatialite-5.1.0.tar.gz
+Tarball SHA256: 43be2dd349daffe016dd1400c5d11285828c22fea35ca5109f21f3ed50605080
+Author: Alessandro Furieri <a.furieri@lqt.it>
+Copyright (C) 2008-2023 Alessandro Furieri and SpatiaLite contributors.
+
+License: triple-licensed under MPL 1.1 / GPL 2.0 / LGPL 2.1.
+See `vendor/libspatialite-5.1.0/COPYING` for the full text of all three licenses.
+
+shpx links libspatialite STATICALLY when the `bundled-spatialite` feature is
+enabled. Under the LGPL 2.1 option, distributors of resulting binaries are
+expected to either:
+
+  (a) provide the recipient with the means to relink the binary against a
+      modified libspatialite (typically by shipping the .o files of all
+      modules that link directly with libspatialite, or by providing the
+      shpx source code so the recipient can rebuild), or
+  (b) license the resulting binary under MPL 1.1 or GPL 2.0 instead.
+
+Distributors should consult the LGPL 2.1 text for the exact requirements.
+shpx itself is dual-licensed MIT OR Apache-2.0; combining it with the
+bundled libspatialite via static linking puts the resulting binary under
+the additional terms of one of the libspatialite licenses (per recipient
+choice).
+
+================================================================================
+shpx local modifications to libspatialite 5.1.0 source tree
+================================================================================
+
+The following modifications were applied to the vendored libspatialite source
+to make it compile under shpx's `OMIT_GEOS` minimal configuration (v0.6 cycle 1):
+
+1. Removed (not vendored, present in upstream tarball):
+   - `test/`, `examples/` — test data and sample programs, not needed for shpx.
+   - autotools generated files (`aclocal.m4`, `configure`, `config.*`,
+     `Makefile.*`, `m4/`) — replaced by shpx's `build.rs`.
+   - `src/srsinit/epsg_inlined_{00..63,prussian}.c` (12 MB total) — full EPSG
+     seed data, not needed when `OMIT_EPSG` is defined. Only the WGS84 seed
+     files (`epsg_inlined_wgs84_00.c`, `epsg_inlined_wgs84_01.c`) and the
+     dispatcher (`epsg_inlined_extra.c`) are kept.
+   - `src/srsinit/epsg_update/` — upstream maintainer-only code generator.
+   - `src/connection_cache/generator/`, `src/gaiageo/lemon/`,
+     `src/gaiageo/flex/` — upstream-only code generators (we ship the already
+     generated `Kml.c` / `Gml.c` / etc. as part of the source tree).
+
+2. Modified (search for `shpx-patch` comments in source):
+   - `src/spatialite/spatialite.c`: wrapped two `CREATE VIRTUAL TABLE KNN2`
+     statements inside `fnct_InitSpatialMetaData` with `#ifndef OMIT_GEOS`,
+     because the `VirtualKNN2` module is itself wrapped in `#ifndef OMIT_GEOS`
+     in `src/spatialite/virtualknn2.c` and unguarded use of the module would
+     cause `InitSpatialMetaData(1)` to roll back the entire transaction
+     (including `spatial_ref_sys` / `geometry_columns` creation).
+
+These modifications will be revisited in v0.6 cycle 2 (GEOS link) when GEOS
+becomes available; the `shpx-patch` ifdef blocks will then become permanently
+active code (cycle 2+ does not define `OMIT_GEOS`).

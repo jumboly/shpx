@@ -6,15 +6,21 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "shpx 用 SpatiaLite (sqlite://) ドライバ"
+# `bundled-spatialite` feature 有効時に vendor/libspatialite-5.1.0/src の C ソースを
+# `cc` で static link する。feature 無効時は build.rs は何もしない (cc::Build を呼ばない)
+# ので、shpx-cli の default ビルドに `cc` の実行コストはかからない。
+build = "build.rs"
 
 [lints]
 workspace = true
 
 [features]
 # `bundled-spatialite` を有効化すると、配布バイナリ (cargo-dist) 用に
-# libspatialite を C ソースから static link する。実装は v0.6 を予定。
-# 現状 (v0.5) は no-op で、有効化してもシステム libspatialite (apt の
-# libsqlite3-mod-spatialite 等) を `load_extension` 経由で使う挙動と同じ。
+# libspatialite を vendor/libspatialite-5.1.0/src から `cc` で static link する。
+# v0.6 cycle 1 時点では GEOS / PROJ / RTTOPO / libxml2 / freexl / iconv / minizip /
+# geopackage を全 OMIT した最小構成 (geometry blob I/O + R*Tree + WGS84 seed のみ)。
+# GEOS は cycle 2、PROJ は cycle 3 で追加予定。feature を無効化したビルド (default)
+# では `mod_spatialite` を `load_extension` で動的ロードする従来挙動 (v0.5 互換)。
 bundled-spatialite = []
 
 [dependencies]
@@ -31,6 +37,18 @@ tracing      = { workspace = true }
 # `load_extension` で mod_spatialite を runtime ロードする。
 # `blob` / `chrono` は GPKG driver と同じく値 bind を simplify するため。
 rusqlite     = { workspace = true, features = ["bundled", "blob", "chrono", "load_extension"] }
+# rusqlite が transitive で依存する libsqlite3-sys を direct dep として再宣言する。
+# 目的は `bundled-spatialite` feature 有効時に build.rs で `DEP_SQLITE3_INCLUDE`
+# 環境変数 (Cargo の `links = "sqlite3"` メタデータ伝搬) を読み、libspatialite ビルドの
+# `cc::Build.include(...)` に渡せるようにすること (sqlite3ext.h / sqlite3.h の解決)。
+# 直接依存にしないと build.rs から DEP_* env が見えないため。
+libsqlite3-sys = { version = "0.28", features = ["bundled"] }
+
+[build-dependencies]
+# `bundled-spatialite` feature 有効時のみ build.rs から呼ぶ。default ビルドでは
+# Cargo は build script を実行するが `cc::Build` は走らない (build.rs 側の
+# cfg ガードで分岐)。
+cc = { workspace = true }
 
 [dev-dependencies]
 tempfile           = { workspace = true }
