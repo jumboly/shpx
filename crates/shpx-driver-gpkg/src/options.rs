@@ -84,48 +84,11 @@ fn parse_query_table(raw: &str) -> Result<Option<String>> {
                     "{DRIVER_NAME}: empty `?table=` in URI query"
                 )));
             }
-            // 簡易デコード: `+` → space と `%XX` のみ（GPKG は通常 ASCII テーブル名）。
-            return Ok(Some(percent_decode(v)));
+            // 簡易デコード: `+` → space と `%XX`（GPKG は通常 ASCII テーブル名）。
+            return Ok(Some(shpx_rdb_common::percent_decode(v)));
         }
     }
     Ok(None)
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b'%' if i + 2 < bytes.len() => {
-                if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                    out.push((h << 4) | l);
-                    i += 3;
-                } else {
-                    out.push(bytes[i]);
-                    i += 1;
-                }
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
 }
 
 /// `Uri::path` は `?table=...` 部分を含む raw 文字列を返すので、
@@ -164,13 +127,6 @@ mod tests {
     fn parse_query_without_question_returns_none() {
         let v = parse_query_table("/tmp/a.gpkg").unwrap();
         assert!(v.is_none());
-    }
-
-    #[test]
-    fn percent_decode_handles_space_and_hex() {
-        assert_eq!(percent_decode("a%20b"), "a b");
-        assert_eq!(percent_decode("a+b"), "a b");
-        assert_eq!(percent_decode("%E3%81%82"), "あ");
     }
 
     #[test]

@@ -2,6 +2,8 @@
 //! トラッキングログのターゲットと損失種別だけを GPKG 用に差し替える。
 
 use shpx_core::{Error, OnLoss, Result};
+// driver 識別名を rdb-common 経由ではなく driver 側にローカライズする (target が const 文字列に
+// しかなれないため)。`Error` の Display も driver 名を埋め込む。
 
 /// このドライバの識別名（`Driver::name` 戻り値、`Error::Driver.name`、tracing target に使う）。
 pub const DRIVER_NAME: &str = "gpkg";
@@ -26,24 +28,16 @@ pub fn driver_msg(msg: impl Into<String>) -> Error {
     Error::driver_msg(DRIVER_NAME, msg)
 }
 
-/// 損失検出時の挙動を 1 箇所で適用する。
+/// 損失検出時の挙動を 1 箇所で適用する。`shpx_rdb_common::apply_on_loss` の薄いラッパで、
+/// `Warn` 経路の tracing target をこの driver 用 (`shpx::gpkg`) に固定する。
 ///
-/// 戻り値:
-/// - `Ok(true)`  — 続行（`Warn` 経路）
-/// - `Ok(false)` — その要素 (列・値) をスキップ
-/// - `Err(_)`    — `OnLoss::Error` での中断
+/// `tracing::warn!` の `target:` フィールドはマクロ展開時に const を要求するため、
+/// クロージャ経由で driver 側に target 文字列リテラルを残す設計にしている
+/// （PostGIS / SpatiaLite / SQL Server と同型）。
 pub fn apply_on_loss(kind: &'static str, field: &str, on_loss: OnLoss) -> Result<bool> {
-    match on_loss {
-        OnLoss::Error => Err(Error::OnLoss {
-            kind: kind.to_string(),
-            field: field.to_string(),
-        }),
-        OnLoss::Warn => {
-            tracing::warn!(target: "shpx::gpkg", kind, field, "lossy conversion");
-            Ok(true)
-        }
-        OnLoss::Skip => Ok(false),
-    }
+    shpx_rdb_common::apply_on_loss(kind, field, on_loss, || {
+        tracing::warn!(target: "shpx::gpkg", kind, field, "lossy conversion");
+    })
 }
 
 /// SQL 識別子（テーブル名・列名）を `"..."` でクオートする。

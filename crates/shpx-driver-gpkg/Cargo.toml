@@ -11,8 +11,9 @@ description = "shpx 用 GeoPackage (.gpkg) ドライバ"
 workspace = true
 
 [dependencies]
-shpx-core    = { path = "../shpx-core" }
-shpx-geom    = { path = "../shpx-geom" }
+shpx-core       = { path = "../shpx-core" }
+shpx-geom       = { path = "../shpx-geom" }
+shpx-rdb-common = { path = "../shpx-rdb-common" }
 arrow-array  = { workspace = true }
 arrow-schema = { workspace = true }
 chrono       = { workspace = true }

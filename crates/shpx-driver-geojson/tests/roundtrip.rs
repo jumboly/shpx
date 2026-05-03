@@ -817,11 +817,7 @@ fn schema_with_ts_ns() -> Arc<Schema> {
     schema_with_geom(
         vec![
             Field::new("name", DataType::Utf8, true),
-            Field::new(
-                "ts",
-                DataType::Timestamp(TimeUnit::Nanosecond, None),
-                true,
-            ),
+            Field::new("ts", DataType::Timestamp(TimeUnit::Nanosecond, None), true),
         ],
         GeometryType::Point,
         None,
@@ -845,7 +841,9 @@ fn timestamp_nanosecond_on_loss_error_aborts() {
     match try_open_write(&p, schema, &write_opts_with_loss(OnLoss::Error)) {
         Ok(_) => panic!("open_write must abort under OnLoss::Error for Timestamp(ns)"),
         Err(Error::OnLoss { kind, .. }) => assert_eq!(kind, "timestamp-precision-on-geojson"),
-        Err(other) => panic!("expected Error::OnLoss(timestamp-precision-on-geojson), got {other:?}"),
+        Err(other) => {
+            panic!("expected Error::OnLoss(timestamp-precision-on-geojson), got {other:?}")
+        }
     }
 }
 

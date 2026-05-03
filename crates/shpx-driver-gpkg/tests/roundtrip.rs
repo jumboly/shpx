@@ -15,7 +15,7 @@ use arrow_schema::{DataType, Field, Schema};
 use rusqlite::Connection;
 use shpx_core::{
     schema::{GeometryMeta, GeometryType, GEOMETRY_META_KEY},
-    Crs, Driver, ReadOpts, Uri, WriteOpts,
+    Crs, Driver, ReadOpts, Uri, WktFlavor, WriteOpts,
 };
 use shpx_driver_gpkg::GpkgDriver;
 use shpx_geom::wkb::{self, Geom};
@@ -442,6 +442,118 @@ fn rejects_plain_sqlite_file() {
     let err = driver.open_read(&uri, &ReadOpts::default()).err().unwrap();
     let msg = format!("{err}");
     assert!(msg.contains("GeoPackage") || msg.contains("application_id"));
+}
+
+#[test]
+fn wkt2_definition_takes_precedence_over_wkt1() {
+    // OGC 12-063 拡張 (`definition_12_063` 列) を持つ非 EPSG SRS を fixture として手書きし、
+    // reader が WKT2 を採用して `WktFlavor::V2` を返すことを確認する。
+    // GpkgWriter は WKT2 列を書かないため、ここでは raw SQL で GPKG を組み立てる。
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wkt2.gpkg");
+
+    let conn = Connection::open(&path).unwrap();
+    conn.pragma_update(None, "application_id", 0x4750_4b47_i64)
+        .unwrap();
+    conn.pragma_update(None, "user_version", 10_300_i64)
+        .unwrap();
+
+    // 必須メタテーブル。
+    conn.execute_batch(
+        r"
+        CREATE TABLE gpkg_spatial_ref_sys (
+            srs_name TEXT NOT NULL,
+            srs_id INTEGER NOT NULL PRIMARY KEY,
+            organization TEXT NOT NULL,
+            organization_coordsys_id INTEGER NOT NULL,
+            definition TEXT NOT NULL,
+            description TEXT,
+            definition_12_063 TEXT
+        );
+        CREATE TABLE gpkg_contents (
+            table_name TEXT NOT NULL PRIMARY KEY,
+            data_type TEXT NOT NULL,
+            identifier TEXT,
+            description TEXT,
+            last_change DATETIME,
+            min_x DOUBLE, min_y DOUBLE, max_x DOUBLE, max_y DOUBLE,
+            srs_id INTEGER
+        );
+        CREATE TABLE gpkg_geometry_columns (
+            table_name TEXT NOT NULL,
+            column_name TEXT NOT NULL,
+            geometry_type_name TEXT NOT NULL,
+            srs_id INTEGER NOT NULL,
+            z TINYINT NOT NULL,
+            m TINYINT NOT NULL,
+            PRIMARY KEY (table_name, column_name)
+        );
+        ",
+    )
+    .unwrap();
+
+    // 必須行 + 非 EPSG SRS（authority='custom'）に WKT1 + WKT2 両方を入れる。
+    conn.execute_batch(
+        r#"
+        INSERT INTO gpkg_spatial_ref_sys VALUES
+          ('Undefined cartesian SRS', -1, 'NONE', -1, 'undefined', 'undef', NULL),
+          ('Undefined geographic SRS', 0, 'NONE', 0, 'undefined', 'undef', NULL);
+        INSERT INTO gpkg_spatial_ref_sys VALUES (
+          'Custom CRS',
+          12345,
+          'custom',
+          7,
+          'GEOGCS["wkt1-only",DATUM["d",SPHEROID["s",6378137,298.257223563]],PRIMEM["g",0],UNIT["d",0.017453292519943295]]',
+          'WKT1 fallback',
+          'GEOGCRS["wkt2-preferred",DATUM["d",ELLIPSOID["s",6378137,298.257223563,LENGTHUNIT["metre",1]]],CS[ellipsoidal,2],AXIS["lat",north],AXIS["lon",east],UNIT["degree",0.017453292519943295],ID["custom",7]]'
+        );
+        INSERT INTO gpkg_contents VALUES
+          ('features1', 'features', 'features1', '', '2026-05-03T00:00:00.000Z',
+           NULL, NULL, NULL, NULL, 12345);
+        INSERT INTO gpkg_geometry_columns VALUES
+          ('features1', 'geom', 'POINT', 12345, 0, 0);
+
+        CREATE TABLE features1 (
+          fid INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT,
+          geom BLOB
+        );
+        "#,
+    )
+    .unwrap();
+
+    // 1 行だけ feature を insert（geom は GPKG header 付き blob）。
+    let wkb_bytes = shpx_geom::wkb::encode(&Geom::Point(1.0, 2.0)).unwrap();
+    let geom_blob = shpx_geom::gpkg_blob::encode(
+        &shpx_geom::gpkg_blob::GpkgBlobHeader::standard(12345),
+        &wkb_bytes,
+    );
+    conn.execute(
+        "INSERT INTO features1 (name, geom) VALUES (?1, ?2)",
+        rusqlite::params!["a", &geom_blob],
+    )
+    .unwrap();
+    conn.close().unwrap();
+
+    let (_, crs, batches) = read_back(&path, None);
+    assert_eq!(batches.len(), 1);
+
+    let crs = crs.expect("CRS should be present");
+    assert_eq!(crs.wkt_flavor, WktFlavor::V2);
+    let wkt = crs.wkt.expect("WKT should be the WKT2 definition");
+    assert!(
+        wkt.starts_with("GEOGCRS["),
+        "expected WKT2 (starts with GEOGCRS), got: {wkt}"
+    );
+    assert!(
+        wkt.contains("wkt2-preferred"),
+        "expected WKT2 marker, got: {wkt}"
+    );
+    assert_eq!(
+        crs.authority,
+        Some(("custom".to_string(), 7)),
+        "non-EPSG authority should be retained from organization+organization_coordsys_id"
+    );
 }
 
 #[test]
