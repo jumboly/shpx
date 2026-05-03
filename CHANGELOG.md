@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- **LICENSE / NOTICE**: MIT / Apache-2.0 dual license の `LICENSE-MIT` / `LICENSE-APACHE` をリポジトリルートに配置、`NOTICE` で third-party 依存 (libspatialite / libgeos / libproj / SQLite / arrow-rs / parquet / tokio-postgres / tiberius / flatgeobuf / geozero / shapefile / geojson / proj / rusqlite ほか) を aggregate listing。`Cargo.toml` の `[workspace.package].license = "MIT OR Apache-2.0"` 宣言は v0.1 から既出だが、ルートに license 本文が無く `cargo-dist` 配布の前提を満たさないため整備した。`crates/shpx-driver-spatialite/NOTICE` は driver scope の詳細 (vendor 範囲・LGPL 2.1 配布要件) を持つためそのまま残す。
+
+### Build
+
+- **`.github/workflows/bench-smoke-mssql.yml` 新設**: SQL Server bench を Linux x86_64 (ubuntu-latest) で実行する `workflow_dispatch` 専用 workflow。`services.mssql` + Microsoft apt repo (`msodbcsql18` / `unixodbc-dev` / `mssql-tools18`) + `gdal-bin` を導入し、`scripts/bench-vs-ogr-mssql.sh` の shpx vs ogr2ogr 比較を CI で回す。`rows` / `runs` を input で受け、bench 出力を `actions/upload-artifact@v4` で 30 日保持する。Apple Silicon の SQL Server image は emulation 経由で参考値しか取れないため、v0.4 完了基準 (`shpx_secs <= 1.667 * ogr_secs`) は本 workflow での 10M 行 × 3-run median で判定する。
+
 ## [0.7.0] - 2026-05-03
 
 v0.7 マイルストーン「Driver Feature Parity & Refactor」のリリース。新 driver (PostGIS / SQL Server / SpatiaLite) と古い driver (SHP / Parquet / GPKG / GeoJSON / CSV / FGB) の間に残っていた data-correctness 直結のギャップ 3 項目 ((1) Parquet writer の OnLoss scaffold 整備、(2) GeoJSON writer の silent demotion を `apply_on_loss` 経由化、(3) SpatiaLite reader への `--where` / `--select` / `--query` backport) を塞ぎ、cycle 2 で reader 側の CRS metadata 経路 (Parquet PROJJSON / FGB header `crs` / GPKG `definition_12_063` WKT2) を完備、`crates/shpx-cli/tests/cross_driver_matrix.rs` で driver 横断 e2e roundtrip matrix を整備した。配布工程 (`cargo-dist`、追加 OS 対応) は v1.0 へ分離する。

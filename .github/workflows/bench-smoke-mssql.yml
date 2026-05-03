@@ -1,0 +1,97 @@
+# SQL Server bench smoke. workflow_dispatch only.
+# rows=10000000 で v0.4 完了基準 (shpx_secs <= 1.667 * ogr_secs) を判定する。
+name: bench-smoke-mssql
+
+on:
+  workflow_dispatch:
+    inputs:
+      rows:
+        description: "Bench input row count (smoke は数万〜10 万、リリース計測は 10000000)"
+        required: false
+        default: "100000"
+      runs:
+        description: "Number of repetitions per tool (median wins)"
+        required: false
+        default: "3"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: "Shpx_test_pw1!"
+          MSSQL_PID: Developer
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P Shpx_test_pw1! -C -Q 'SELECT 1' || exit 1"
+          --health-interval 5s
+          --health-timeout 10s
+          --health-retries 30
+    env:
+      SHPX_TEST_SQLSERVER_URL: mssql://sa:Shpx_test_pw1!@localhost:1433/shpx_test
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Setup Microsoft apt repository
+        run: |
+          set -euxo pipefail
+          curl -sSL -O https://packages.microsoft.com/keys/microsoft.asc
+          sudo install -o root -g root -m 644 microsoft.asc /etc/apt/trusted.gpg.d/microsoft.asc
+          # Microsoft prod.list の対応版が無い Ubuntu バージョンは 22.04 (jammy) を流用。
+          case "$(lsb_release -rs)" in
+            22.04|24.04) repo_version="$(lsb_release -rs)" ;;
+            *)           repo_version="22.04" ;;
+          esac
+          curl -fsSL "https://packages.microsoft.com/config/ubuntu/${repo_version}/prod.list" \
+            | sudo tee /etc/apt/sources.list.d/mssql-release.list >/dev/null
+          sudo apt-get update
+          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev mssql-tools18
+
+      - name: Install build deps and gdal-bin
+        run: |
+          set -euxo pipefail
+          sudo apt-get install -y libproj-dev pkg-config gdal-bin
+          # bench-vs-ogr-mssql.sh の sqlcmd 解決経路 (host PATH または `docker compose exec`) は
+          # GitHub Actions services 上では後者が成立しないため、host PATH に出す必要がある。
+          sudo ln -sf /opt/mssql-tools18/bin/sqlcmd /usr/local/bin/sqlcmd
+          sudo ln -sf /opt/mssql-tools18/bin/bcp /usr/local/bin/bcp
+
+      - name: Create shpx_test database in mssql
+        run: |
+          set -euxo pipefail
+          docker exec ${{ job.services.mssql.id }} \
+            /opt/mssql-tools18/bin/sqlcmd \
+            -S localhost -U sa -P "Shpx_test_pw1!" -C \
+            -Q "IF DB_ID('shpx_test') IS NULL CREATE DATABASE shpx_test"
+
+      - name: Run bench (shpx vs ogr2ogr)
+        env:
+          SHPX_BENCH_ROWS: ${{ github.event.inputs.rows }}
+        run: |
+          set -euxo pipefail
+          mkdir -p target/bench-data
+          bash scripts/bench-vs-ogr-mssql.sh \
+            --rows ${{ github.event.inputs.rows }} \
+            --runs ${{ github.event.inputs.runs }} \
+            2>&1 | tee target/bench-data/bench-output.txt
+
+      - name: Upload bench output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-${{ github.run_id }}
+          path: target/bench-data/bench-output.txt
+          retention-days: 30
+          if-no-files-found: warn
