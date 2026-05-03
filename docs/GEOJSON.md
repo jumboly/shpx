@@ -128,7 +128,9 @@ GeoJSON `Feature.id` は読み捨てる。v0.3 で `_id` 専用列としてラ�
 
 ### 巨大 FeatureCollection
 
-FeatureCollection / GeoJSONL のいずれも全件メモリロードする（`Vec<geojson::Feature>`）。`struson` 等の streaming JSON parser でのインクリメンタル読みは Future work。
+v0.8 cycle 3 で reader を真のストリーミング化した。FeatureCollection は `crates/shpx-driver-geojson/src/stream.rs` の `FcFeatureStream` がカスタム JSON state machine で `[` までシーク → カンマ区切りで Feature を 1 つずつ deserialize、GeoJSONL は `BufRead::lines()` ベースで 1 行 1 Feature を逐次パースする。peak RSS は batch サイズ + I/O バッファに頭打ち。
+
+ただし型推論は **先頭 N=1024 feature サンプル** に降格しているため、1024 件目以降に新しい properties キーが現れても列としては追加されない (既存列に対する型混在の demote は引き続き有効)。サンプル数は環境変数 `SHPX_GEOJSON_INFER_SAMPLE` で override できる (`0` 指定で型推論なし → 全列 Utf8 相当に倒す想定だが、現実装では空サンプルから推論された場合は属性列ゼロになる点に注意)。
 
 ### RFC 7946 違反入力への寛容性
 
@@ -141,17 +143,19 @@ FeatureCollection / GeoJSONL のいずれも全件メモリロードする（`Ve
 | 環境変数 | 用途 | 既定 |
 |---|---|---|
 | `SHPX_GEOJSON_PRETTY` | FeatureCollection 出力時の pretty-print（`true`/`false`）。GeoJSONL では無視 | `false` |
+| `SHPX_GEOJSON_INFER_SAMPLE` | reader の型推論サンプル件数 (FeatureCollection / NDJSON 共通)。streaming reader は先頭 N feature だけサンプリングして列スキーマを決める | `1024` |
 
 ## 環境変数まとめ
 
 | 変数 | 役割 |
 |---|---|
 | `SHPX_GEOJSON_PRETTY` | FeatureCollection 出力時の pretty-print 切替 |
+| `SHPX_GEOJSON_INFER_SAMPLE` | reader の型推論サンプル件数 |
 
 ## 内部実装メモ
 
 - `Capabilities { read: true, write: true, bulk_load: false, supports_blob: false, supports_decimal: false (列除外), supports_timestamp_tz: true (秒精度のみ), string_encoding: Fixed("utf-8") }`
-- 読み出しは `geojson::FeatureCollection` (`.geojson`) または行単位 `geojson::Feature` (`.geojsonl` 等) の 2 経路
+- 読み出しは `crates/shpx-driver-geojson/src/stream.rs` の `FcFeatureStream` (FeatureCollection 用、自前 state machine) または `NdjsonStream` (NDJSON 用、`BufRead::lines()` ベース) の 2 経路で、いずれも 1 feature ずつ pull する真のストリーミング
 - 書き出しは `serde_json::Value` を組み立てて `serde_json::to_writer` で 1 行ずつ flush
 - 非 EPSG:4326 入力の自動 reproject は `shpx-geom::Reprojector` を経由 (`shpx-cli` の `--reproject` 経路と同実装を共有)
 - `apply_on_loss` ヘルパは `crates/shpx-driver-geojson/src/util.rs` で `shpx-rdb-common` の薄ラッパとして定義 (`tracing::warn!(target: "shpx::geojson", ...)` で driver target 固定)
@@ -162,5 +166,4 @@ FeatureCollection / GeoJSONL のいずれも全件メモリロードする（`Ve
 - `--geojson-crs-extension` で非標準 `crs` メンバの書き出し（PostGIS / Leaflet 互換用途）
 - `Feature.id` 専用列（`_id`）でのラウンドトリップ
 - foreign members の保全（属性カラムまたは driver-specific メタデータ経由）
-- `struson` 等での streaming JSON 読み出し
 - GeometryCollection / Z / M 座標の対応（`shpx_geom::Geom` の拡張と同時）

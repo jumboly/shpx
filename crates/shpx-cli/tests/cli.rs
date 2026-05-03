@@ -242,14 +242,15 @@ fn convert_shp_to_geojson_then_back() {
         .success();
     assert!(geojson.exists());
 
-    // info で 2 行・EPSG:4326 が表示されること。
+    // info で driver/CRS が表示されること。GeoJSON reader は v0.8 cycle 3 で
+    // 真のストリーミング化されたため row_count_hint = None で `(unknown)` 表示になる。
     Command::cargo_bin("shpx")
         .unwrap()
         .args(["info", geojson.to_str().unwrap()])
         .assert()
         .success()
         .stdout(contains("driver:  geojson"))
-        .stdout(contains("rows:    2"))
+        .stdout(contains("rows:    (unknown)"))
         .stdout(contains("crs:     EPSG:4326"));
 
     // GeoJSON → SHP
