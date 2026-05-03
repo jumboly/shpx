@@ -15,7 +15,9 @@ pub mod wkt1_prj;
 
 pub use epsg_wkt1::epsg_to_wkt1;
 pub use geom_walk::{for_each_coord, for_each_coord_mut};
-pub use projjson::minimal_for_epsg;
+pub use projjson::{
+    decode as decode_projjson, decode_value as decode_projjson_value, minimal_for_epsg,
+};
 pub use reproject::{parse_target_crs, Reprojector};
 pub use wkb::{decode, encode, Geom};
 pub use wkt1_prj::extract_epsg;

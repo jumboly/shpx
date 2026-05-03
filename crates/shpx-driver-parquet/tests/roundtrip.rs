@@ -315,11 +315,7 @@ fn decimal128_38_10_roundtrip_preserves_precision_and_value() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("decimal_38_10.parquet");
 
-    let fields = vec![Field::new(
-        "amount",
-        DataType::Decimal128(38, 10),
-        true,
-    )];
+    let fields = vec![Field::new("amount", DataType::Decimal128(38, 10), true)];
     let schema = schema_with_geom(fields, GeometryType::Point, None);
 
     // Decimal128(38, 10) で表現できる極端な値 (絶対値が 10^28 オーダ) も保持されることを確認。
@@ -352,7 +348,11 @@ fn decimal128_38_10_roundtrip_preserves_precision_and_value() {
         .downcast_ref::<arrow_array::Decimal128Array>()
         .unwrap();
     assert_eq!(arr.value(0), big, "decimal value must be bit-identical");
-    assert_eq!(arr.value(1), neg, "negative decimal value must be bit-identical");
+    assert_eq!(
+        arr.value(1),
+        neg,
+        "negative decimal value must be bit-identical"
+    );
 }
 
 #[test]

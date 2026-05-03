@@ -87,9 +87,20 @@ FROM gpkg_geometry_columns
 WHERE table_name = ?1
 ";
 
-/// gpkg_spatial_ref_sys の 1 行を引く SQL。
+/// gpkg_spatial_ref_sys の 1 行を引く SQL（WKT1 のみ）。
+///
+/// `definition` は WKT1 が標準で全 GPKG ファイルに存在する。OGC 12-063 拡張列
+/// `definition_12_063`（WKT2）は ext がある GPKG にだけ存在するため、reader が
+/// `PRAGMA table_info` で列の有無を判定したうえで [`SQL_SELECT_SRS_WITH_WKT2`] を選ぶ。
 pub const SQL_SELECT_SRS: &str = r"
 SELECT srs_name, organization, organization_coordsys_id, definition
+FROM gpkg_spatial_ref_sys
+WHERE srs_id = ?1
+";
+
+/// `definition_12_063`（WKT2）も拾う SQL。OGC 12-063 拡張がある GPKG でのみ使う。
+pub const SQL_SELECT_SRS_WITH_WKT2: &str = r"
+SELECT srs_name, organization, organization_coordsys_id, definition, definition_12_063
 FROM gpkg_spatial_ref_sys
 WHERE srs_id = ?1
 ";

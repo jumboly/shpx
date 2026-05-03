@@ -160,8 +160,8 @@ impl SpatialiteReader {
             if geom_info.is_none() {
                 if let ValueRef::Blob(b) = v {
                     if let Ok((srid, wkb_bytes)) = shpx_geom::spatialite_blob::decode(b) {
-                        let gt = infer_geom_type_from_wkb(&wkb_bytes)
-                            .unwrap_or(GeometryType::Geometry);
+                        let gt =
+                            infer_geom_type_from_wkb(&wkb_bytes).unwrap_or(GeometryType::Geometry);
                         geom_info = Some((i, srid, gt));
                     }
                 }

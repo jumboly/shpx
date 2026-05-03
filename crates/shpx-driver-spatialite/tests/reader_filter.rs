@@ -46,7 +46,12 @@ fn seed_fixture(path: &std::path::Path) {
     let driver = SpatialiteDriver::new();
     let uri = Uri::from_path(path.to_string_lossy().to_string());
     let mut w = driver
-        .open_write(&uri, schema, Some(Crs::from_epsg(4326)), &default_write_opts())
+        .open_write(
+            &uri,
+            schema,
+            Some(Crs::from_epsg(4326)),
+            &default_write_opts(),
+        )
         .expect("open_write");
     w.write_batch(&batch).expect("write_batch");
     w.finish().expect("finish");

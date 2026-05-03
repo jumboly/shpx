@@ -75,47 +75,10 @@ fn parse_query_table(raw: &str) -> Result<Option<String>> {
                     "{DRIVER_NAME}: empty `?table=` in URI query"
                 )));
             }
-            return Ok(Some(percent_decode(v)));
+            return Ok(Some(shpx_rdb_common::percent_decode(v)));
         }
     }
     Ok(None)
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b'%' if i + 2 < bytes.len() => {
-                if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                    out.push((h << 4) | l);
-                    i += 3;
-                } else {
-                    out.push(bytes[i]);
-                    i += 1;
-                }
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
 }
 
 /// `--query` の早期バリデーション。`shpx-rdb-common` 経由 (PostGIS / SpatiaLite で共有)。

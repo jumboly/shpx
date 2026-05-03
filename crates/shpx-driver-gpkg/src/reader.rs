@@ -223,24 +223,34 @@ fn read_geometry_column(conn: &Connection, table: &str) -> Result<(String, Strin
 }
 
 /// gpkg_spatial_ref_sys の 1 行から `Crs` を構築する。
+///
+/// OGC 12-063 拡張で追加された `definition_12_063`（WKT2）列が存在し、かつ非空ならば
+/// WKT2 を採用する。それ以外は標準 `definition`（WKT1）にフォールバックする。
 fn read_crs_for_srs(conn: &Connection, srs_id: i32) -> Result<Option<Crs>> {
     // shpx は仕様必須の特殊 SRS（-1, 0）を「CRS 不明」として扱う。
     if srs_id == -1 || srs_id == 0 {
         return Ok(None);
     }
-    let mut stmt = conn
-        .prepare(meta::SQL_SELECT_SRS)
-        .map_err(|e| driver_err(&e))?;
-    let r: std::result::Result<(String, String, i32, String), _> =
-        stmt.query_row([srs_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i32>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        });
-    let (_name, organization, org_code, definition) = match r {
+
+    let has_wkt2 = srs_table_has_wkt2_column(conn)?;
+    let sql = if has_wkt2 {
+        meta::SQL_SELECT_SRS_WITH_WKT2
+    } else {
+        meta::SQL_SELECT_SRS
+    };
+    let mut stmt = conn.prepare(sql).map_err(|e| driver_err(&e))?;
+    let r = stmt.query_row([srs_id], |row| {
+        let organization = row.get::<_, String>(1)?;
+        let org_code = row.get::<_, i32>(2)?;
+        let def_wkt1 = row.get::<_, String>(3)?;
+        let def_wkt2 = if has_wkt2 {
+            row.get::<_, Option<String>>(4)?
+        } else {
+            None
+        };
+        Ok((organization, org_code, def_wkt1, def_wkt2))
+    });
+    let (organization, org_code, def_wkt1, def_wkt2) = match r {
         Ok(v) => v,
         Err(rusqlite::Error::QueryReturnedNoRows) => {
             return Err(Error::Crs(format!(
@@ -249,6 +259,13 @@ fn read_crs_for_srs(conn: &Connection, srs_id: i32) -> Result<Option<Crs>> {
         }
         Err(e) => return Err(driver_err(&e)),
     };
+
+    // WKT2 が非空なら優先。空文字列 / NULL は WKT1 にフォールバックする。
+    let (wkt, wkt_flavor) = match def_wkt2.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(_) => (def_wkt2.expect("non-empty above"), WktFlavor::V2),
+        None => (def_wkt1, WktFlavor::V1),
+    };
+
     if organization.eq_ignore_ascii_case(meta::ORG_EPSG) {
         let code = u32::try_from(org_code).map_err(|_| {
             Error::Crs(format!(
@@ -257,18 +274,26 @@ fn read_crs_for_srs(conn: &Connection, srs_id: i32) -> Result<Option<Crs>> {
         })?;
         Ok(Some(Crs::from_epsg(code)))
     } else {
-        // EPSG 以外は authority + definition (WKT1) を保持する。
-        // gpkg_spatial_ref_sys.definition は WKT1 が標準。WKT2 拡張列 definition_12_063 は
-        // v0.2 では読み出さない（OGC 12-063 拡張未対応の GPKG が多数のため）。
         Ok(Some(Crs {
-            authority: u32::try_from(org_code)
-                .ok()
-                .map(|c| (organization.clone(), c)),
-            wkt: Some(definition),
-            wkt_flavor: WktFlavor::V1,
+            authority: u32::try_from(org_code).ok().map(|c| (organization, c)),
+            wkt: Some(wkt),
+            wkt_flavor,
             projjson: None,
         }))
     }
+}
+
+/// `gpkg_spatial_ref_sys` に OGC 12-063 拡張列 `definition_12_063` があるか判定する。
+fn srs_table_has_wkt2_column(conn: &Connection) -> Result<bool> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(gpkg_spatial_ref_sys)")
+        .map_err(|e| driver_err(&e))?;
+    let names: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| driver_err(&e))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| driver_err(&e))?;
+    Ok(names.iter().any(|n| n == "definition_12_063"))
 }
 
 fn read_attribute_schema(

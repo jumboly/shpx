@@ -22,7 +22,7 @@
 use serde_json::{json, Map, Value};
 use shpx_core::{
     schema::{Edges, GeometryEncoding, GeometryMeta, GeometryType},
-    Crs, Error, Result, WktFlavor,
+    Crs, Error, Result,
 };
 use shpx_geom::projjson;
 
@@ -101,7 +101,9 @@ pub fn parse_geo_metadata(geo_json: &str) -> Result<(String, GeometryMeta)> {
         Some("spherical") => Edges::Spherical,
         _ => Edges::Planar,
     };
-    let crs = parse_crs(col.get("crs"));
+    // GeoParquet 1.0 minimal (`{"id": {...}}`) も 1.1 full PROJJSON も `decode_value` で受け取れる。
+    // 非 EPSG authority (ESRI 等) や id 不在の full PROJJSON も `Crs.projjson` に温存される。
+    let crs = col.get("crs").and_then(projjson::decode_value);
 
     Ok((
         primary,
@@ -165,25 +167,6 @@ fn parse_geometry_types(v: Option<&Value>) -> GeometryType {
         "GeometryCollection" => GeometryType::GeometryCollection,
         _ => GeometryType::Geometry,
     }
-}
-
-/// `crs` フィールドの PROJJSON から `Crs` を組み立てる。`null` または欠落は `None`。
-fn parse_crs(v: Option<&Value>) -> Option<Crs> {
-    let v = v?;
-    if v.is_null() {
-        return None;
-    }
-    // 最小 PROJJSON: `{"id": {"authority": "EPSG", "code": N}}`
-    let id = v.get("id")?;
-    let authority = id.get("authority").and_then(Value::as_str)?.to_string();
-    let code = id.get("code").and_then(Value::as_u64)?;
-    let code = u32::try_from(code).ok()?;
-    Some(Crs {
-        authority: Some((authority, code)),
-        wkt: None,
-        wkt_flavor: WktFlavor::V2,
-        projjson: Some(serde_json::to_string(v).ok()?),
-    })
 }
 
 #[cfg(test)]
@@ -260,6 +243,51 @@ mod tests {
         }"#;
         let (_, meta) = parse_geo_metadata(json).unwrap();
         assert_eq!(meta.encoding, GeometryEncoding::Wkb);
+    }
+
+    #[test]
+    fn parse_full_projjson_without_id_keeps_projjson() {
+        // GeoParquet 1.1 が出すような datum / coordinate_system まで含む PROJJSON。
+        // id が無いため authority は埋まらないが、原文 PROJJSON は失わずに保持する。
+        let json = r#"{
+            "version": "1.1.0",
+            "primary_column": "geometry",
+            "columns": {
+                "geometry": {
+                    "encoding": "WKB",
+                    "geometry_types": [],
+                    "crs": {
+                        "type": "GeographicCRS",
+                        "name": "Custom",
+                        "datum": {"type": "GeodeticReferenceFrame", "name": "Custom Datum"}
+                    }
+                }
+            }
+        }"#;
+        let (_, meta) = parse_geo_metadata(json).unwrap();
+        let crs = meta.crs.expect("CRS should be parsed even without id");
+        assert!(crs.epsg_code().is_none());
+        assert!(crs.projjson.as_deref().unwrap().contains("Custom Datum"));
+    }
+
+    #[test]
+    fn parse_non_epsg_authority_kept() {
+        // ESRI authority も id 形式なら authority に落ちる。
+        let json = r#"{
+            "version": "1.1.0",
+            "primary_column": "geometry",
+            "columns": {
+                "geometry": {
+                    "encoding": "WKB",
+                    "geometry_types": [],
+                    "crs": {"id": {"authority": "ESRI", "code": 102100}}
+                }
+            }
+        }"#;
+        let (_, meta) = parse_geo_metadata(json).unwrap();
+        let crs = meta.crs.expect("ESRI CRS should be retained");
+        assert_eq!(crs.authority, Some(("ESRI".to_string(), 102_100)));
+        assert_eq!(crs.epsg_code(), None);
     }
 
     #[test]
