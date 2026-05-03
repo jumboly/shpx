@@ -1,7 +1,4 @@
 # SQL Server bench smoke. workflow_dispatch only.
-# rows=10000000 で v0.4 完了基準 (chunk size 1M でも tempdb 溢れなし) を確認する。
-# ogr2ogr との比較は GDAL Parquet plugin の CI 整備コスト (ubuntugis PPA / launchpad API)
-# に見合わないため、shpx 単独の wall-clock 計測 + 完走 (= tempdb 溢れなし) のみを取る。
 name: bench-smoke-mssql
 
 on:
@@ -56,16 +53,21 @@ jobs:
             -S localhost -U sa -P "Shpx_test_pw1!" -C \
             -Q "IF DB_ID('shpx_test') IS NULL CREATE DATABASE shpx_test"
 
+      - name: Build shpx-cli
+        run: cargo build --release -p shpx-cli --locked
+
       - name: Generate input parquet
         env:
           SHPX_BENCH_ROWS: ${{ github.event.inputs.rows }}
         run: |
           set -euxo pipefail
-          # criterion harness の `ensure_parquet` で `target/bench-data/points_mssql_<rows>.parquet`
-          # を生成する。--quick で計測自体は短時間で打ち切る (ベンチ目的では使わない)。
+          INPUT="target/bench-data/points_mssql_${SHPX_BENCH_ROWS}.parquet"
+          # criterion bench は --quick でも timing 計測の exit code が 0 でない
+          # ことがある。本 step の目的は parquet 生成だけなので、parquet が出来て
+          # いれば成功とみなす。
           cargo bench -q -p shpx-driver-sqlserver --bench bulk_insert -- \
-            --quick --warm-up-time 1 --measurement-time 1 || true
-          test -f "target/bench-data/points_mssql_${SHPX_BENCH_ROWS}.parquet"
+            --quick --warm-up-time 1 --measurement-time 1 || [ -f "$INPUT" ]
+          test -f "$INPUT"
 
       - name: Run shpx bench (staging bulk)
         env:
@@ -74,16 +76,10 @@ jobs:
         run: |
           set -euxo pipefail
           INPUT="target/bench-data/points_mssql_${SHPX_BENCH_ROWS}.parquet"
-          SHPX_BIN="target/release/shpx"
-          if [ ! -x "$SHPX_BIN" ]; then
-            cargo build --release -p shpx-cli --locked
-          fi
-          mkdir -p target/bench-data
           {
             echo "==> rows=${SHPX_BENCH_ROWS}, runs=${{ github.event.inputs.runs }}, chunk=${SHPX_MSSQL_BULK_CHUNK}"
             for i in $(seq 1 ${{ github.event.inputs.runs }}); do
-              # `--create-table=always` が DROP→CREATE するので前段の手動 DROP は不要。
-              t=$(/usr/bin/time -p "$SHPX_BIN" convert \
+              t=$(/usr/bin/time -p target/release/shpx convert \
                   --insert-mode=bulk \
                   --create-table=always \
                   --create-index=auto \
