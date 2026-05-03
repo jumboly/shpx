@@ -1,10 +1,26 @@
-//! `shpx drivers` の実装。登録 driver と capabilities を一覧表示する。
+//! `shpx drivers` の実装。登録 driver と capabilities を `--format=text|json` で
+//! 一覧表示する。`json` は CI / scripting 向けの `[{ name, schemes, capabilities }]`
+//! 配列で、`Capabilities` の `serde::Serialize` 出力をそのまま `capabilities` に
+//! 入れる。
 
-use shpx_core::{Capabilities, StringEncoding};
+use serde::Serialize;
+use shpx_core::{Capabilities, Result, StringEncoding};
 
+use crate::cli::{DriversArgs, OutputFormatArg};
+use crate::commands::serialize_json;
 use crate::registry;
 
-pub fn run() {
+pub fn run(args: &DriversArgs) -> Result<()> {
+    match args.format {
+        OutputFormatArg::Text => {
+            print_text();
+            Ok(())
+        }
+        OutputFormatArg::Json => print_json(args.pretty),
+    }
+}
+
+fn print_text() {
     let drivers = registry::all_drivers();
     println!("{} driver(s) registered:", drivers.len());
     for d in drivers {
@@ -28,6 +44,27 @@ pub fn run() {
         println!("    timestamp_tz:      {}", caps.supports_timestamp_tz);
         println!("    string_encoding:   {}", encoding_label(&caps));
     }
+}
+
+fn print_json(pretty: bool) -> Result<()> {
+    let drivers = registry::all_drivers();
+    let entries: Vec<DriverEntry> = drivers
+        .iter()
+        .map(|d| DriverEntry {
+            name: d.name().to_string(),
+            schemes: d.supported_schemes().to_vec(),
+            capabilities: d.capabilities(),
+        })
+        .collect();
+    println!("{}", serialize_json(&entries, pretty, "drivers")?);
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct DriverEntry {
+    name: String,
+    schemes: Vec<&'static str>,
+    capabilities: Capabilities,
 }
 
 fn read_write(c: &Capabilities) -> &'static str {

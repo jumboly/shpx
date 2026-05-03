@@ -17,10 +17,7 @@ fn main() -> ExitCode {
         cli::Cmd::Convert(args) => commands::convert::run(&args, parsed.quiet),
         cli::Cmd::Info(args) => commands::info::run(args),
         cli::Cmd::Schema(args) => commands::schema::run(args),
-        cli::Cmd::Drivers => {
-            commands::drivers::run();
-            Ok(())
-        }
+        cli::Cmd::Drivers(args) => commands::drivers::run(&args),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
