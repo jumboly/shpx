@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "shpx 用 SpatiaLite (sqlite://) ドライバ"
 build = "build.rs"
+# Cargo の duplicate `links` 検出を有効化するため named link を宣言する。
+# proj-sys が `links = "proj"` を独占しているため、本 crate は別名 `spatialite_bundled` を使う。
+links = "spatialite_bundled"
 
 [lints]
 workspace = true
@@ -14,8 +17,15 @@ workspace = true
 [features]
 # 配布バイナリ (cargo-dist) 用に libspatialite を vendor から `cc` で static link する。
 # 詳細スコープと cycle 構成は build.rs / docs/ROADMAP.md の v0.6 セクション参照。
-# bundle 経路は libgeos (geos-src) と C++ stdlib (link-cplusplus) を要求する。
-bundled-spatialite = ["dep:geos-src", "dep:link-cplusplus"]
+# bundle 経路は libgeos (geos-src) / libproj (shpx-geom/bundled-proj 経由 proj-sys) /
+# C++ stdlib (link-cplusplus) を要求する。
+# v0.6 cycle 3 で `shpx-geom/bundled-proj` を implies に追加し、driver 単体ビルドでも
+# proj-sys の bundled build がトリガされ build.rs の `locate_proj_root` が必ず成功する状態にする。
+bundled-spatialite = [
+    "dep:geos-src",
+    "dep:link-cplusplus",
+    "shpx-geom/bundled-proj",
+]
 
 [dependencies]
 shpx-core       = { path = "../shpx-core" }

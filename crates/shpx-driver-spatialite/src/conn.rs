@@ -87,10 +87,24 @@ fn load_bundled(conn: &Connection) -> Result<()> {
         );
     }
 
+    // bundled feature 経路では `SHPX_SPATIALITE_PATH` を解釈する余地がない (extension は
+    // 静的 link 済みで dlopen しない)。env が誤設定で残っていると挙動が変わったように
+    // 誤解されがちなので、最初の load 時に 1 回だけ警告する。
+    static WARN_ENV: Once = Once::new();
     static GLOBAL_INIT: Once = Once::new();
+
+    WARN_ENV.call_once(|| {
+        if std::env::var_os(ENV_SPATIALITE_PATH).is_some() {
+            tracing::warn!(
+                env = ENV_SPATIALITE_PATH,
+                "bundled-spatialite feature is enabled; ignoring env override (libspatialite is statically linked)"
+            );
+        }
+    });
+
     // SAFETY: `Connection::handle()` の raw pointer は conn 生存期間有効。
     // `spatialite_alloc_connection` の cache は接続 drop 時に leak する
-    // (TODO(v0.6 cycle 3): owned wrapper で `spatialite_cleanup_ex` を呼ぶ。
+    // (TODO(v0.6 post-cycle3 / v1.0): owned wrapper で `spatialite_cleanup_ex` を呼ぶ。
     // 接続あたり数 KB なので単発 CLI / 通常テスト数では実害なし)。
     unsafe {
         GLOBAL_INIT.call_once(|| spatialite_initialize());

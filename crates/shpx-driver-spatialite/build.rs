@@ -1,14 +1,18 @@
 //! `bundled-spatialite` feature 有効時に libspatialite を vendor から static link する build script。
 //!
-//! v0.6 cycle 2 時点のスコープ: GEOS は `geos-src` crate で同梱 (ON)。
-//! PROJ / RTTOPO / libxml2 / freexl / iconv / minizip / geopackage は OFF のまま。
-//! GeomFromWKB / AsBinary / R*Tree に加え、`ST_Buffer` 等の GEOS 依存関数も使える。
+//! v0.6 cycle 3 時点のスコープ: GEOS は `geos-src` crate で同梱 (ON、cycle 2)、
+//! PROJ は shpx-geom の `bundled-proj` 経由 proj-sys 0.25.0 (libproj 9.4.x) で同梱 (ON、cycle 3)。
+//! RTTOPO / libxml2 / freexl / iconv / minizip / geopackage は OFF のまま。
+//! GeomFromWKB / AsBinary / R*Tree に加え、`ST_Buffer` (GEOS) / `Transform` (PROJ) も使える。
 //!
 //! sqlite3.h / sqlite3ext.h は libsqlite3-sys (`links = "sqlite3"`) が伝搬する
 //! `DEP_SQLITE3_INCLUDE` 経由で解決する。
-//! geos_c.h は `geos-src` 0.2.x が `DEP_GEOSSRC_*` を出さないため、本 build.rs から
-//! sibling の `target/<profile>/build/geos-src-<hash>/out/{include,lib}` を直接探す
-//! (`locate_geos_root` 参照)。
+//! geos_c.h / proj.h は `geos-src` 0.2.x / `proj-sys` 0.25.0 がいずれも `cargo:include=` /
+//! `DEP_*` を出さないため、本 build.rs から sibling の
+//! `target/<profile>/build/{geos-src,proj-sys}-<hash>/out/{include,lib}` を直接探す
+//! (`locate_geos_root` / `locate_proj_root` 参照)。
+//! link 命令は GEOS は本 build.rs が出すが、PROJ は proj-sys が `links = "proj"` を
+//! 宣言しているため Cargo に link 順を任せる (二重 `cargo:rustc-link-lib=proj` を避ける)。
 
 #[cfg(not(feature = "bundled-spatialite"))]
 fn main() {
@@ -42,6 +46,13 @@ fn main() {
     // `gg_relations.c::evalGeosCache` が zlib の `crc32` を使う。OS 同梱の libz を動的リンク。
     println!("cargo:rustc-link-lib=z");
 
+    // PROJ は proj-sys (`links = "proj"`) が `cargo:rustc-link-lib=proj` を出すため、
+    // 本 build.rs からは link 命令を出さず Cargo に link 順解決を任せる。
+    // include path は proj-sys 0.25.0 が `cargo:include=` を emit しないため、sibling の
+    // OUT_DIR (`target/<profile>/build/proj-sys-<hash>/out/include/proj.h`) を直接探す。
+    // 将来 proj-sys が `cargo:include=` を出すようになったら `DEP_PROJ_INCLUDE` env で代替する。
+    let proj_root = locate_proj_root(&out_dir);
+
     write_generated_headers(&out_dir);
 
     let mut build = cc::Build::new();
@@ -52,8 +63,14 @@ fn main() {
         .include(&out_dir)
         .include(&sqlite_include)
         .include(geos_root.join("include"))
+        .include(proj_root.join("include"))
         .include(src_dir.join("headers"))
         .define("VERSION", "\"5.1.0\"")
+        // `PROJ_NEW=1` は cc command line で渡す必要がある (gaiaconfig.h で defined しても、
+        // 一部 .c (例: srid_aux.c) は `<spatialite/gaiaconfig.h>` を読む前に
+        // `#ifdef PROJ_NEW ... #include <proj.h> #else #include <proj_api.h>` を評価する。
+        // proj_api.h は PROJ 8+ で削除された legacy header のためここで build が落ちる)。
+        .define("PROJ_NEW", "1")
         .warnings(false);
     for omit in OMIT_FEATURES {
         build.define(&format!("OMIT_{omit}"), None);
@@ -136,6 +153,42 @@ fn main() {
 /// 複数バージョンが残っていた場合は mtime 最新を採用。
 #[cfg(feature = "bundled-spatialite")]
 fn locate_geos_root(out_dir: &std::path::Path) -> std::path::PathBuf {
+    locate_sibling_out(out_dir, "geos-src-", "include/geos_c.h").unwrap_or_else(|build_root| {
+        panic!(
+            "could not locate geos-src OUT_DIR (expected {}/geos-src-*/out/include/geos_c.h). \
+             Make sure `geos-src` is declared as a build-dependency.",
+            build_root.display()
+        )
+    })
+}
+
+/// `target/<profile>/build/proj-sys-<hash>/out` (= cmake install prefix) を探す。
+///
+/// proj-sys 0.25.0 は `cargo:include=` / `cargo:root=` を emit しないため、依存元から
+/// `DEP_PROJ_INCLUDE` で受け取れない。代わりに sibling の build dir を直接探す。
+/// `bundled_proj` feature 有効時は cmake で proj 9.4.x を install するため、`out/include/proj.h`
+/// と `out/lib/libproj.a` (Linux/macOS) が生成される。
+#[cfg(feature = "bundled-spatialite")]
+fn locate_proj_root(out_dir: &std::path::Path) -> std::path::PathBuf {
+    locate_sibling_out(out_dir, "proj-sys-", "include/proj.h").unwrap_or_else(|build_root| {
+        panic!(
+            "could not locate proj-sys OUT_DIR (expected {}/proj-sys-*/out/include/proj.h). \
+             Make sure `shpx-geom/bundled-proj` is implied by the `bundled-spatialite` feature \
+             so that proj-sys is built with `bundled_proj` enabled.",
+            build_root.display()
+        )
+    })
+}
+
+/// 自分の OUT_DIR の sibling として `<prefix><hash>/out/<sentinel>` を持つ build dir を
+/// 見つけ、`out/` までのパスを返す。複数候補があれば mtime 最新を採用する。
+/// 見つからない場合は build_root を `Err` で返し、呼び出し側でメッセージを組み立てる。
+#[cfg(feature = "bundled-spatialite")]
+fn locate_sibling_out(
+    out_dir: &std::path::Path,
+    prefix: &str,
+    sentinel_rel: &str,
+) -> std::result::Result<std::path::PathBuf, std::path::PathBuf> {
     let build_root = out_dir
         .parent()
         .and_then(std::path::Path::parent)
@@ -147,11 +200,11 @@ fn locate_geos_root(out_dir: &std::path::Path) -> std::path::PathBuf {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !name.starts_with("geos-src-") {
+        if !name.starts_with(prefix) {
             continue;
         }
         let root = entry.path().join("out");
-        if !root.join("include/geos_c.h").exists() {
+        if !root.join(sentinel_rel).exists() {
             continue;
         }
         let mtime = entry
@@ -162,22 +215,15 @@ fn locate_geos_root(out_dir: &std::path::Path) -> std::path::PathBuf {
             best = Some((mtime, root));
         }
     }
-    best.unwrap_or_else(|| {
-        panic!(
-            "could not locate geos-src OUT_DIR (expected {}/geos-src-*/out/include/geos_c.h). \
-             Make sure `geos-src` is declared as a build-dependency.",
-            build_root.display()
-        )
-    })
-    .1
+    best.map(|(_, p)| p).ok_or_else(|| build_root.to_path_buf())
 }
 
 /// libspatialite の OMIT_* スイッチ。`build.rs` から `cc::Build.define` する側と
 /// `OUT_DIR/spatialite/gaiaconfig.h` の `#define` 側で共有することで、整合性ズレを防ぐ。
-/// v0.6 cycle 2 で `OMIT_GEOS` を解除 (`geos-src` 同梱)、PROJ は cycle 3 で解除予定。
+/// v0.6 cycle 2 で `OMIT_GEOS` を解除 (`geos-src` 同梱)、cycle 3 で `OMIT_PROJ` を解除
+/// (`shpx-geom/bundled-proj` 経由 proj-sys 同梱)。
 #[cfg(feature = "bundled-spatialite")]
 const OMIT_FEATURES: &[&str] = &[
-    "PROJ",
     "ICONV",
     "FREEXL",
     "MATHSQL",
@@ -276,13 +322,22 @@ fn gaiaconfig_h_body() -> String {
     // 上流 `vendor/.../headers/spatialite/gaiaconfig.h` を OUT_DIR で上書きするための公開 API
     // 制御マクロ。OMIT_* リストは `cc::Build.define` 側と共有 (両者がズレると preprocess 結果が
     // ファイルごとに分裂する)。`#undef ENABLE_*` 群は上流 baked-in の有効化を打ち消す。
+    // `PROJ_NEW` は libspatialite が PROJ 6+ API (`proj_create_crs_to_crs` 等) を選択する
+    // ためのスイッチ。proj-sys 0.25.0 同梱の libproj 9.4.x は当然 PROJ 6+ のため必須。
+    // `gg_transform.c` 等の `#ifdef PROJ_NEW` 分岐が新 API パスに入る。
+    // `GEOS_REENTRANT` は libspatialite が `spatialite_alloc_reentrant()` 経路 (PROJ_NEW
+    // guard 付き) を選択するためのスイッチ。これを undef にすると `spatialite_alloc_connection`
+    // が非 reentrant fallback (`alloc_cache.c` L.705 付近) に落ち、そこには PROJ_NEW guard
+    // 無しの `pj_ctx_alloc()` (PROJ 8+ で削除済みの legacy API) があり build が落ちる。
+    // libgeos 3.x は完全 reentrant のため有効化して問題なし (上流 baked-in も同設定)。
     let mut body = String::from(
         "#ifndef GAIACONFIG_H_BUNDLED\n#define GAIACONFIG_H_BUNDLED\n\n\
          #undef ENABLE_GCP\n#undef ENABLE_GEOPACKAGE\n#undef ENABLE_LIBXML2\n\
          #undef ENABLE_MINIZIP\n#undef ENABLE_RTTOPO\n\
          #undef GEOS_370\n#undef GEOS_3100\n#undef GEOS_3110\n\
-         #undef GEOS_ADVANCED\n#undef GEOS_ONLY_REENTRANT\n#undef GEOS_REENTRANT\n\
-         #undef PROJ_NEW\n\n",
+         #undef GEOS_ADVANCED\n#undef GEOS_ONLY_REENTRANT\n\
+         #define GEOS_REENTRANT 1\n\
+         #define PROJ_NEW 1\n\n",
     );
     for omit in OMIT_FEATURES {
         use std::fmt::Write;
