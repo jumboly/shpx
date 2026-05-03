@@ -299,6 +299,7 @@
 - Homebrew tap (`jumboly/homebrew-shpx`) — formula は cargo-dist 出力に依存
 - Docker image (`ghcr.io/jumboly/shpx`) — bundled-spatialite で base image が膨らむため最適化込みで切り出し
 - MS-SSCLRT UDT エンコーダで SQL Server 真の bulk
+- SQL Server 型網羅 bulk insert の実証 — tiberius 0.12.3 の `src/tds/codec/token/token_col_metadata.rs:56` で `datetimeoffset` の Display が scale を含めず (`datetime2` は `datetime2({scale})` を吐くのに対し `datetimeoffset` だけ scale 抜き)、staging 経由 `bulk_insert` が `Invalid column type from bcp client for colid N` を返す。MS-TDS / bcp 仕様自体は datetimeoffset の bulk を許可しており、tiberius を fork / 上流 PR で `datetimeoffset({scale})` を吐かせれば本番 driver / bench-rss 共に型網羅 bulk が成立する見込み。bench-rss prepare の 1h batch INSERT を 1 分台に短縮できる
 - 追加 RDB driver（MySQL / MariaDB / Oracle 等）— 既存 PostGIS / SQL Server で共通化済みの `shpx-rdb-common` を利用して URI/CRS/`OnLoss` 周りの boilerplate を共有する想定
 - 対話的 REPL モード（`shpx repl`）
 - 動的プラグイン（dylib / WASM）
