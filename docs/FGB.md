@@ -2,7 +2,7 @@
 
 `.fgb` (FlatGeobuf) を `shpx-driver-fgb` が担当する。GDAL 非依存方針に従い、公式 Rust 実装である [`flatgeobuf`](https://crates.io/crates/flatgeobuf) クレート (BSD-2-Clause、作者は仕様策定者の Björn Harrtell) を採用する。geometry の入出力は [`geozero`](https://crates.io/crates/geozero) を経由し、shpx 側の WKB 中間表現と FGB 内部の FlatBuffers geometry を相互変換する。
 
-## 対応範囲（v0.2 サイクル 4）
+## 対応範囲（v0.7 リリース時点）
 
 - 読み:
   - `.fgb` ファイル全体を eager-load（巨大ファイルの streaming は v0.3+）
@@ -78,17 +78,11 @@ CRS が `None` の場合は `OnLoss` を経由し、`Error` 経路では拒否�
 | `Binary` | `Binary` | |
 | `DateTime` | `Date32` または `Timestamp(Microsecond, Some("UTC"))` | 観測値の形式から refine |
 
-## 損失処理
+## 損失変換
 
-| 損失種別 | 内容 |
-|---|---|
-| `decimal-on-fgb` | Arrow `Decimal128/256` を FGB `Double` に降格 |
-| `uint64-overflow-on-fgb` | `UInt64` で `i64::MAX` 超の値（roundtrip 安定性に影響） |
-| `missing-crs-on-fgb` | CRS なしのデータを `code=0` で書き出す |
+`--on-loss=error|warn|skip` の挙動と、FGB driver が発する loss kind 一覧 (`decimal-on-fgb` / `uint64-overflow-on-fgb` / `missing-crs-on-fgb`) は [`docs/ON_LOSS.md`](ON_LOSS.md) を参照。
 
-`--on-loss=error` で停止、`--on-loss=warn` で警告ログを出して続行、`--on-loss=skip` は Decimal/UInt64 の場合は値ベース処理が必要なため将来検討（cycle 4 では Warn 同等扱い）。
-
-## 制限
+## スコープ外
 
 - **Z / M 座標は未対応** (XY のみ。FGB header の `has_z` / `has_m` を出力時は常に `false` で固定)
 - **GeometryCollection は未対応** (writer 側で `Geometry::GeometryCollection` を渡すと WKB encode 済みであれば書けるが、roundtrip テスト未整備)
@@ -98,6 +92,20 @@ CRS が `None` の場合は `OnLoss` を経由し、`Error` 経路では拒否�
 - **HTTP feature は無効** (`flatgeobuf` を `default-features = false` でビルドし、reqwest を持ち込まない)
 - **`Json` カラムは Utf8 として扱う**
 - **`circularstring` 等の SQL-MM Part 3 曲線型は未対応** (`flatgeobuf` がサポートする型のうち XY-only の Simple Features 範囲のみ)
+
+## 環境変数まとめ
+
+FGB driver は現時点で driver 専用の環境変数を持たない。CRS 解決は `--src-crs` / 入力 header / 出力時 `--reproject` で完結する。
+
+## 内部実装メモ
+
+- `Capabilities { read: true, write: true, bulk_load: false, supports_blob: true, supports_decimal: false (Double 降格), supports_timestamp_tz: true, string_encoding: Fixed("utf-8") }`
+- 読み出しは `flatgeobuf::FgbReader` を eager に走らせて `Vec<Row>` に展開 (streaming は Future work)
+- 書き出しは `flatgeobuf::FgbWriter::create_with_options` に `write_index: false` を渡して固定 (空間インデックスは出力しない)
+- geometry の WKB ↔ FGB FlatBuffers 変換は `geozero::wkb::WkbWriter` / `flatgeobuf::geozero` 経由
+- DateTime 列の Arrow 型 refine (`Date32` か `Timestamp(Microsecond, Some("UTC"))` か) は cycle 4 当時の reader 実装で観測値の形式から推定
+- v0.7 cycle 2 で reader が header の `crs` field (org / code / wkt) を `Crs` 構造体に復元する経路を完備した (それ以前は EPSG 整数のみ拾っていた)
+- `apply_on_loss` ヘルパは `crates/shpx-driver-fgb/src/util.rs` で `shpx-rdb-common` の薄ラッパとして定義 (`tracing::warn!(target: "shpx::fgb", ...)`)
 
 ## Future work
 

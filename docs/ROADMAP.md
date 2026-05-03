@@ -125,8 +125,8 @@
 - `bundled-spatialite` feature の本実装は v0.6 に繰り延べ。v0.5 はシステム libspatialite (CI / 開発機の apt 等) 前提で出荷し、feature 宣言は v0.6 予約として no-op で残す
 
 **完了基準**:
-- [ ] SpatiaLite ↔ GPKG / Shapefile の往復
-- [ ] 空間インデックス（R*Tree）のオプション作成 (`--create-index=always` で `CreateSpatialIndex` 発行)
+- [x] SpatiaLite ↔ GPKG / Shapefile の往復
+- [x] 空間インデックス（R*Tree）のオプション作成 (`--create-index=always` で `CreateSpatialIndex` 発行)
 
 **確定済み設計判断**:
 - **URI scheme は SpatiaLite が `sqlite` を専有**: `*.sqlite` / `*.db` / `*.spatialite` / `sqlite://...` はすべて SpatiaLite driver に解決する。GPKG は `*.gpkg` / `gpkg` scheme のみのまま。`?mod_spatialite=true` フラグ運用は採用しない（DESIGN.md L.149-160 表は v0.5 cycle 3 で訂正）。content-sniffing による自動振り分けは v1.0 以降の検討事項。
@@ -200,9 +200,9 @@
 
 **サブ cycle 構成** (v0.3 以降と同じく cycle ごとに `/clear` して clean に再開する):
 
-- **cycle 1 — data-correctness 修正**: (1) `crates/shpx-driver-parquet/src/writer.rs` に OnLoss を実装 (`precision-on-parquet` / `nanosecond-truncation-on-parquet` / `z-on-parquet` / `m-on-parquet`)、(2) `crates/shpx-driver-geojson/src/writer.rs` の silent demotion (Decimal / Timestamp_tz) を `apply_on_loss` 経由に置換 (`decimal-on-geojson` / `timestamp-precision-on-geojson`)、(3) `crates/shpx-driver-spatialite/src/reader.rs` に PostGIS 同型の table mode / query mode 分岐を実装し `--where` / `--select` / `--query` を backport。`shpx_rdb_common::apply_on_loss` (`crates/shpx-rdb-common/src/on_loss.rs`) を Parquet / GeoJSON でも再利用 (RDB common は名前と裏腹に純粋ヘルパで、ファイル driver から呼んでも問題ない)。CSV driver の OnLoss クロージャ (`crates/shpx-driver-csv/src/util.rs`) を手本にする。
+- **cycle 1 — data-correctness 修正**（完了）: (1) `crates/shpx-driver-parquet/src/util.rs` に `apply_on_loss` ヘルパと空の `loss_kind` module を整備 (現状の Parquet writer は `coerce_types=false` 固定で発火経路を持たないため、`precision-on-parquet` / `nanosecond-truncation-on-parquet` / `z-on-parquet` / `m-on-parquet` の実定数追加は v0.8+ に繰り延べ。dead_code scaffold + ロスなし確認テストで cycle 1 内は閉じる)、(2) `crates/shpx-driver-geojson/src/writer.rs` の silent demotion (Decimal / Timestamp_tz) を `apply_on_loss` 経由に置換 (`decimal-on-geojson` / `timestamp-precision-on-geojson`)、(3) `crates/shpx-driver-spatialite/src/reader.rs` に PostGIS 同型の table mode / query mode 分岐を実装し `--where` / `--select` / `--query` を backport。`shpx_rdb_common::apply_on_loss` (`crates/shpx-rdb-common/src/on_loss.rs`) を Parquet / GeoJSON でも再利用 (RDB common は名前と裏腹に純粋ヘルパで、ファイル driver から呼んでも問題ない)。CSV driver の OnLoss クロージャ (`crates/shpx-driver-csv/src/util.rs`) を手本にする。
 - **cycle 2 — CRS metadata reader & refactor**: (1) Parquet reader で Arrow field metadata の `geo` JSON を `shpx_geom::projjson::decode` で parse、(2) FGB reader で header の `crs` field を parse、(3) GPKG reader の `gpkg_geometry_columns.srs_id` → `gpkg_spatial_ref_sys` 経路を確認し抜けがあれば補完、(4) GPKG / SpatiaLite / SQL Server の自前 `percent_decode` を `shpx_rdb_common::percent_decode` に統一、(5) GPKG `apply_on_loss` を直接 `tracing::warn!` 呼び出しから rdb-common closure パターンに変更、(6) `crates/shpx-cli/tests/cross_driver_matrix.rs` を新設し PostGIS ↔ SQL Server / SpatiaLite / Parquet / FGB / GeoJSON / SHP の主要往復を env-gate で網羅 (既存 `crates/shpx-driver-spatialite/tests/cross_driver_roundtrip.rs` は driver scope の回帰検出として残す)。
-- **cycle 3 — docs + ROADMAP 更新 + 0.7.0 release**: `docs/ROADMAP.md:128-129` の v0.5 完了基準チェック (`[ ]` → `[x]`、実体は v0.5 cycle 2a / 3 で実装済み) を訂正、`docs/ON_LOSS.md` を新設 (driver × loss kind 表 + 各 kind の発生条件 + `--on-loss=error|warn|skip` の動作仕様)、`docs/{CSV,GEOJSON,GPKG,FGB}.md` を `docs/{POSTGIS,SQLSERVER,SPATIALITE}.md` と同形 (Quick Start / Capabilities / Limitations / Future Work) に揃え、`CHANGELOG.md` に v0.7.0 セクション、workspace `Cargo.toml` を `0.7.0` へ bump、release commit + `v0.7.0` annotated tag。
+- **cycle 3 — docs + ROADMAP 更新 + 0.7.0 release**（完了）: `docs/ROADMAP.md:128-129` の v0.5 完了基準チェック (`[ ]` → `[x]`、実体は v0.5 cycle 2a / 3 で実装済み) を訂正、`docs/ON_LOSS.md` を新設 (driver × loss kind 表 + 各 kind の発生条件 + `--on-loss=error|warn|skip` の動作仕様)、`docs/{CSV,GEOJSON,GPKG,FGB}.md` を `docs/{POSTGIS,SQLSERVER,SPATIALITE}.md` と同形 (Quick Start / Capabilities / Limitations / Future Work) に揃え、`CHANGELOG.md` に v0.7.0 セクション、workspace `Cargo.toml` を `0.7.0` へ bump、release commit + `v0.7.0` annotated tag。
 
 ---
 
