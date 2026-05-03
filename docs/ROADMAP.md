@@ -206,6 +206,52 @@
 
 ---
 
+## v0.8 — Streaming Reader Parity
+
+**背景**: `LayerReader::batches()` (`crates/shpx-core/src/driver.rs:63-75`) は構造的にストリーミング iterator API だが、現状 9 driver 中 **Parquet のみが真のストリーミング** で、残り 8 driver は `open()` 内で全行を `Vec` / `VecDeque` に展開する eager-load 方式。10M 行クラスの入力では reader 開時のピーク RSS が GB 級にスパイクし、v1.0 cycle 2 で導入した進捗バーが「読み終わってから書き始める」体感を悪化させる。writer は既に全 driver で streaming 化されているため、conversion パイプラインのメモリ bottleneck は reader 側にのみ存在する。v1.0 配布工程の前に reader streaming 化を完了させ、`1.0.0` 出荷時のメモリプロファイルを一貫させる。
+
+**スコープ**:
+- 全 9 driver の reader を真のストリーミング化（peak RSS が batch サイズ + 接続バッファで頭打ち）
+- `LayerReader` trait は **据え置き**（現行シグネチャで全 driver 対応可能）
+- Reader 内部実装の置き換えのみ（CLI / writer / tests / benches は呼び出し変更不要）
+- メモリプロファイルベンチ整備（peak RSS 測定）
+- `docs/STREAMING.md` 新設
+
+**完了基準**:
+- [ ] 全 driver の reader が `open()` 後に「全行を保持する Vec / VecDeque」を field に持たない（コードレビュー + grep）
+- [ ] `cargo test --workspace` 緑 + 全 env-gated 統合テスト緑（PostGIS / SQL Server / SpatiaLite）
+- [ ] 各 RDB driver で 10M 行 reader の peak RSS < 1 GB（新規 bench `reader_streaming.rs` で確認）
+- [ ] 各 file driver で 10M feature reader の peak RSS < 256 MB（同 bench）
+- [ ] `docs/STREAMING.md` に driver × streaming 戦略 × peak RSS の表が記載
+
+**確定済み設計判断**:
+- **`LayerReader` trait は据え置き**: `Box<dyn Iterator + Send + '_>` の `'_ = &'_ mut self` で各 driver は内部 field（reader inner / Connection / mpsc::Receiver）を借用しつつ Iterator を返せる。Parquet パターン (`crates/shpx-driver-parquet/src/reader.rs:139-142`) を SHP / FGB / CSV / GPKG / SpatiaLite に展開、PostGIS / SQL Server は async stream → sync iter ブリッジ。
+- **trait に `close()` 追加なし**: streaming reader の cleanup は Drop で自動化（rusqlite `Statement` / tokio_postgres `Client` / tiberius `Client` は全て Drop でクリーンクローズ）。
+- **shapefile / flatgeobuf は実は lazy iterator 提供済み**: `shapefile::Reader::iter_shapes_and_records()` は `ShapeRecordIterator<'_>` を返す lazy `Iterator` (shapefile 0.6 reader.rs L.155-167)、`flatgeobuf::FeatureIter<R, NotSeekable>` は `FallibleStreamingIterator` を実装 (flatgeobuf 6.0 file_reader.rs L.237)。eager-load しているのは shpx 側の `Vec::push` ループのみ。`crates/shpx-driver-shp/src/reader.rs:42-45` の「ファイル先頭から再列挙する設計」コメントは誤りなので修正対象。
+- **async-to-sync ブリッジ手法**: PostGIS / SQL Server とも background thread + `std::sync::mpsc::sync_channel(buf=2)` 方式。Reader struct が `JoinHandle<()>` を所有し、Drop で channel receiver を drop → background tokio task が send 失敗で自動停止。runtime は既存の `OnceLock<Runtime>` singleton (`crates/shpx-driver-postgis/src/runtime.rs:19`, `crates/shpx-driver-sqlserver/src/runtime.rs`) を再利用。
+- **SQLite 系の self-referential 回避**: rowid keyset pagination で batch ごとに `SELECT ..., rowid FROM <table> WHERE rowid > ? ORDER BY rowid LIMIT 65536` を `prepare_cached` で発行（GPKG / SpatiaLite 共通）。`Statement<'_>` と `Rows<'_>` を struct field に同居させる self-referential 設計は採らず、batch 内で `Vec<rusqlite::types::Value>` に展開してから次へ進む（`Statement` / `Rows` lifetime は batches() の next() スコープ内で閉じる）。`--query` モード（任意 SQL）は rowid 列が保証されないため LIMIT/OFFSET フォールバック。
+- **GeoJSON FeatureCollection の streaming**: serde_json は features 配列の chunked parse を直接 API として提供しないため、`crates/shpx-driver-geojson/src/stream.rs` を新設し `serde_json::Deserializer::from_reader(...)` を low-level に進めて `"features"` array element を `StreamDeserializer<_, Feature>` 相当で逐次 yield する。NDJSON は `Deserializer::into_iter::<Feature>()` で素直に streaming。
+- **GeoJSON 型推論の妥協**: 現在 `infer_columns` は全 Feature を walk するが、streaming 化に伴い「最初の N=1024 feature サンプル」方式に降格。N より後で型不一致が見つかれば既存 `Utf8` demote ロジックで継続。サンプル数は環境変数 `SHPX_GEOJSON_INFER_SAMPLE` で override 可。
+- **shpx-rdb-common に streaming helper を追加**: `crates/shpx-rdb-common/src/streaming.rs` を新設し、rowid keyset pagination iterator (`KeysetRowsIter`) を GPKG / SpatiaLite で共有。既存モジュール (`uri.rs`, `on_loss.rs`, `arrow.rs`, `opts.rs`, `table.rs`, `crs.rs`) と同列。
+- **メモリベンチ infrastructure**: `crates/shpx-core/src/bench_util.rs` を新設し、Linux 限定で `/proc/self/status` の `VmRSS` を読む `peak_rss_kib()` ヘルパを置く。各 driver の `benches/reader_streaming.rs` で利用。`procfs` crate を workspace dep に追加 (Linux only、cfg gated)。CI 計測は ubuntu-latest 限定。
+
+**サブ cycle 構成** (v0.3 以降と同じく cycle ごとに `/clear` して clean に再開する):
+
+- **cycle 1 — file 系 easy wins (SHP + FGB + CSV)**: `crates/shpx-driver-shp/src/reader.rs` の `pending: VecDeque<...>` を削除し `inner: shapefile::Reader<...>` を field 化、`batches(&mut self)` で `iter_shapes_and_records()` を借用し 65536 行 chunk で yield。`crates/shpx-driver-fgb/src/reader.rs` の `rows: VecDeque<Row>` を削除し `feature_iter: FeatureIter<File, NotSeekable>` を field 化、`FallibleStreamingIterator::next()` を `BatchIter::next()` で 65536 回呼ぶ。`crates/shpx-driver-csv/src/reader.rs` の `body: Option<String>` を `Box<dyn Read + Send>` に置換し `csv::Reader::from_reader(...)` を field 化、UTF-8 以外は `encoding_rs::DecodeReaderBytes` を `Read` に挟む lazy decode に切り替え。完了基準: 既存 SHP / FGB / CSV roundtrip + cross-driver matrix 緑、`grep -rE "load_all|VecDeque<.*Row|all_records|body: .*String" crates/shpx-driver-{shp,fgb,csv}/src` がヒットゼロ。peak RSS は cycle 6 の bench infra で一括計測。
+- **cycle 2 — SQLite 系 (GPKG + SpatiaLite) + 共通 helper**: `crates/shpx-rdb-common/src/streaming.rs` 新設で `KeysetRowsIter<'a>` 構造体（`Connection` を `&'a` で借用、`prepare_cached` で reuse、batch ごとに `last_rowid` を保持して `WHERE rowid > ? ORDER BY rowid LIMIT N` を発行、`Statement` / `Rows` lifetime は next() スコープ内に閉じる）と `--query` モード用 `OffsetRowsIter<'a>` を実装。**この helper は SQLite 系 (GPKG / SpatiaLite) 専用** — PostGIS / SQL Server は cycle 4-5 で async stream + mpsc bridge を採るため `streaming.rs` は使わない。`crates/shpx-driver-gpkg/src/reader.rs` の `load_all_rows` を削除、`rows: VecDeque<Row>` を削除、`KeysetRowsIter` を `batches()` で借用し SQLite ValueRef → AttrValue 変換を batch 単位で実行。SpatiaLite reader も同 helper を call。WITHOUT ROWID テーブル / 明示 PK 不在の SpatiaLite テーブルは error 化（または LIMIT/OFFSET フォールバック）。完了基準: 既存 roundtrip + cross-driver matrix 緑、`grep -E "load_rows|load_all_rows" crates/shpx-driver-{gpkg,spatialite}/src` がヒットゼロ。peak RSS は cycle 6 で計測。
+- **cycle 3 — GeoJSON streaming (NDJSON + FeatureCollection)**: `crates/shpx-driver-geojson/src/stream.rs` 新設で NDJSON 用 `LineFeatureStream<R>` (`Deserializer::into_iter::<Feature>()`) と FeatureCollection 用 `FcFeatureStream<R>` (root Object を `Deserializer` で進めて `"features"` の `[` を読み、配列要素を逐次 deserialize) を実装。`crates/shpx-driver-geojson/src/reader.rs` の `parse_feature_collection` / `parse_geojson_lines` の eager Vec collect 経路を削除、`stream::*` を `batches()` で借用。型推論を「最初の N=1024 feature サンプル」方式に降格、`SHPX_GEOJSON_INFER_SAMPLE` env override、後続で型不一致なら既存 demote ロジックで `Utf8` 降格。`docs/GEOJSON.md` に streaming 仕様を追記。完了基準: 既存 GeoJSON / NDJSON roundtrip 緑、`grep -E "Vec<Feature>|features:.*Vec" crates/shpx-driver-geojson/src` がヒットゼロ。peak RSS は cycle 6 で計測。
+- **cycle 4 — PostGIS reader streaming**: `crates/shpx-driver-postgis/src/reader.rs` の `rows: Vec<RecordBatch>` (L.49) を削除。`tokio_postgres::Client::query_raw(sql, &[])` の `RowStream` を background tokio task で consume、`std::sync::mpsc::sync_channel::<Result<RecordBatch>>(2)` で send。`PostgisReader` 内に `Receiver<...>` と `JoinHandle<()>` を保持、Drop で receiver close → task 自動停止（`tokio::select!` で channel disconnection と query を競合）。`chunk_batch` ヘルパ (L.166) は廃止、batch 化は task 内で 65536 行ごとに行う。`Self::finish` (L.157-173) を再構成、`open_table_mode` / `open_query_mode` の戻り値を `RowStream` に変更。完了基準: 既存 PostGIS roundtrip + cross-driver matrix + bulk_roundtrip 緑（env-gated）、SIGINT で Reader を drop 時に tokio task が clean に終了することを test (`tests/reader_cancel.rs`) で確認。peak RSS と新規 bench は cycle 6 で整備。
+- **cycle 5 — SQL Server reader streaming**: cycle 4 と同パターンを `crates/shpx-driver-sqlserver/src/reader.rs` の tiberius `Client::query()` の `QueryStream` に対して適用。`exec_select` (L.298-303) の `into_first_result().await` 全件 collect を削除、`QueryStream` を background task で consume。完了基準: 既存 SQL Server roundtrip + cross-driver matrix + bulk_roundtrip 緑（env-gated）。peak RSS は cycle 6 で計測。
+- **cycle 6 — メモリベンチ + docs + 0.8.0 release**: `crates/shpx-core/src/bench_util.rs` 新設で `peak_rss_kib()` (Linux: `/proc/self/status`、その他 OS: feature gated で `None`)、`procfs = { version = "0.16", optional = true }` を workspace dep に追加。各 driver の `benches/reader_streaming.rs` 新設で 1M / 10M 行 reader の peak RSS と throughput を criterion 計測。`docs/STREAMING.md` 新設 (driver × streaming 戦略 × peak RSS の表、batch_size 影響、PostGIS/MSSQL の transaction 長期保持の注意、cancel 挙動)。各 `docs/{GPKG,GEOJSON,FGB,CSV,POSTGIS,SQLSERVER,SPATIALITE}.md` の Limitations / Future Work 節を更新（「巨大入力での RSS スパイク」の注意を削除）。`CHANGELOG.md` に v0.8.0 セクション、workspace `Cargo.toml` を `0.8.0` へ bump、release commit + `v0.8.0` annotated tag。
+
+**リスクと縮退判断**:
+- **GeoJSON FeatureCollection low-level parser**: serde_json の Deserializer を root から手動進める実装は複雑度が高く、cycle 3 内で完成しない可能性あり。詰まれば FeatureCollection は eager-load を据え置き、NDJSON のみ streaming で v0.8 出荷（`docs/GEOJSON.md` に「巨大 FeatureCollection は NDJSON 推奨」を明記）。完了基準の peak RSS 閾値も FeatureCollection は除外。
+- **SpatiaLite WITHOUT ROWID テーブル**: cycle 2 で WITHOUT ROWID テーブル / 明示 PK 不在のテーブルは LIMIT/OFFSET フォールバックでも対応可能だが大きい OFFSET でスキャンが遅延する。詰まれば「LIMIT/OFFSET フォールバックは小規模テーブル限定、巨大テーブルは rowid 必須」と docs に明記して妥協出荷。
+- **async-to-sync mpsc bridge の cancel 伝播**: SIGINT で Reader を Drop した時、tokio task が中途半端な query 状態のまま残る可能性。`tokio::select!` で channel sender close を select 対象に入れて clean abort する。cycle 4-5 で test 化必須。
+- **v1.0 への影響**: v0.8 が長引けば v1.0 出荷が遅延する。cycle 4 (PostGIS) または cycle 5 (SQL Server) で詰まれば、その driver は eager-load を据え置きで v0.8 を 0.8.0 release し、残りは v0.9 に切り出す（マイルストーン縮退）。
+
+---
+
 ## v1.0 — 仕上げと配布
 
 **スコープ** (v0.7 で parity を済ませた前提で、配布工程に集中):
@@ -234,7 +280,7 @@
 - **cycle 2 — 進捗バー + on-loss completeness**: workspace dep に `indicatif = "0.17"` 追加、`crates/shpx-cli/src/commands/convert.rs` に ProgressBar / Spinner 統合と `--quiet` フラグ追加。各 driver で `LayerReader::row_count_hint` の実装を確認・統一 (DB 系は table mode で `SELECT COUNT(*)`、Parquet は row group meta、SHP は header record count、FGB は `features_count`、GPKG / SpatiaLite-file は `SELECT COUNT(*)`、CSV / GeoJSON / NDJSON は `None`)。v0.7 cycle 3 で新設した `docs/ON_LOSS.md` の loss kind 表を完成させ、抜け落ちている driver × kind を埋める (例: timestamp ns 切り捨ては Parquet と FGB で同じ kind 名)。
 - **cycle 3 — examples + README + schema/drivers JSON**: `examples/01-shp-to-parquet.sh` / `02-shp-to-postgis.sh` / `03-postgis-to-fgb.sh` / `04-reproject.sh` / `05-on-loss.sh` / `06-bulk-load.sh` を新設 (test data は `examples/data/` に同梱 or scripts で生成)。`README.md` を再構成し「5 分チュートリアル」(SHP → GeoParquet → PostGIS → reproject) と examples へのリンクを追加。`crates/shpx-cli/src/commands/{schema,drivers}.rs` に `--format=text|json` を追加 (drivers は `[{ name, schemes, capabilities }]` 形式)。
 - **cycle 4 — cargo-dist + multi-platform CI**: workspace `Cargo.toml` に `[workspace.metadata.dist]` (targets: 5 OS、`installers = ["shell"]`、`bundled-spatialite` / `bundled-proj` 有効化)、`cargo-dist generate-ci github` で `.github/workflows/release.yml` を生成。`.github/workflows/ci.yml` に `bundled-smoke-macos` / `bundled-smoke-windows` job を追加 (macOS は `brew install cmake`、Windows は chocolatey で `cmake` / `clang`)。Linux smoke (`bundled-spatialite-smoke`) は既存。`docs/SPATIALITE.md` の bundled 節に「macOS arm64 + Linux のみ Release、Windows / macOS x64 は best-effort」の縮退方針を明記。
-- **cycle 5 — 1.0.0 release**: `docs/ROADMAP.md` v1.0 完了基準チェックを全部 `[x]`、`CHANGELOG.md` Unreleased → `[1.0.0] - YYYY-MM-DD` (compare URL も `1.0.0...HEAD` に更新)、workspace `Cargo.toml` `version` を `0.7.0` → `1.0.0`、`release: v1.0.0` 1 commit + `v1.0.0` annotated tag。`git push --tags` 後 cargo-dist が GitHub Release を自動生成、shell installer のダウンロード URL を `README.md` の「install 方法」節に反映。後送り項目 (crates.io / Homebrew / Docker / その他 UX) を `docs/ROADMAP.md` v1.x 候補に追記。
+- **cycle 5 — 1.0.0 release**: `docs/ROADMAP.md` v1.0 完了基準チェックを全部 `[x]`、`CHANGELOG.md` Unreleased → `[1.0.0] - YYYY-MM-DD` (compare URL も `1.0.0...HEAD` に更新)、workspace `Cargo.toml` `version` を `0.8.0` → `1.0.0`、`release: v1.0.0` 1 commit + `v1.0.0` annotated tag。`git push --tags` 後 cargo-dist が GitHub Release を自動生成、shell installer のダウンロード URL を `README.md` の「install 方法」節に反映。後送り項目 (crates.io / Homebrew / Docker / その他 UX) を `docs/ROADMAP.md` v1.x 候補に追記。
 
 **リスクと縮退判断**:
 - **macOS / Windows の bundled build**: cycle 4 で Windows の `cmake` / `clang` 経由 `bundled-spatialite` build がリンカ問題で詰まる可能性。詰まれば Windows を best-effort 扱いで Release から除外し、Linux + macOS arm64 のみで `1.0.0` 出荷。`docs/SPATIALITE.md` で対応 OS を明記する。
