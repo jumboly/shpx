@@ -1,0 +1,44 @@
+[package]
+name = "shpx-bench-rss"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "v0.8 reader streaming peak RSS bench harness (workspace-internal, not published)"
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# `cargo-dist` 同様に SpatiaLite を vendored ビルドする。Linux CI で
+# `apt-get install libspatialite-dev` を避けたい場合に有効化する。
+bundled-spatialite = [
+    "shpx-driver-spatialite/bundled-spatialite",
+    "shpx-geom/bundled-proj",
+]
+bundled-proj = ["shpx-geom/bundled-proj"]
+
+[[bin]]
+name = "shpx-bench-rss"
+path = "src/main.rs"
+
+[dependencies]
+shpx-core              = { path = "../shpx-core" }
+shpx-geom              = { path = "../shpx-geom" }
+shpx-driver-parquet    = { path = "../shpx-driver-parquet" }
+shpx-driver-shp        = { path = "../shpx-driver-shp" }
+shpx-driver-fgb        = { path = "../shpx-driver-fgb" }
+shpx-driver-csv        = { path = "../shpx-driver-csv" }
+shpx-driver-geojson    = { path = "../shpx-driver-geojson" }
+shpx-driver-gpkg       = { path = "../shpx-driver-gpkg" }
+shpx-driver-spatialite = { path = "../shpx-driver-spatialite" }
+shpx-driver-postgis    = { path = "../shpx-driver-postgis" }
+shpx-driver-sqlserver  = { path = "../shpx-driver-sqlserver" }
+arrow-array            = { workspace = true }
+arrow-schema           = { workspace = true }
+clap                   = { workspace = true }
+serde                  = { workspace = true }
+serde_json             = { workspace = true }

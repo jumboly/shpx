@@ -47,6 +47,13 @@ parse コスト分担のため小さく刻む) で実装されている。
 `peak_rss_kib()` は `/proc/self/status` の `VmHWM` 行をパースする。macOS / Windows では
 `None` を返すので CI 計測は ubuntu-latest 限定。
 
+実数値の取得は `crates/shpx-bench-rss/` (workspace-internal binary) と
+`.github/workflows/bench-peak-rss.yml` (workflow_dispatch only) で行う。1 driver × 1 job
+で **1 プロセス 1 計測** (peak RSS = `VmHWM` はリセット不可)、`shpx-bench-rss --driver=<name>
+--rows=<N>` が `{"driver":..., "rows":..., "row_count":..., "peak_rss_kib":...,
+"elapsed_ms":...}` の JSON 1 行を artifact として upload する。詳細は
+`docs/ROADMAP.md` v0.8 cycle 7 を参照。
+
 ## キャンセル挙動
 
 - File 系 (SHP / FGB / CSV / GeoJSON / GPKG / SpatiaLite / Parquet): Reader を mid-iter で
