@@ -119,7 +119,7 @@ SHPX_BENCH_ROWS=10000000 \
   cargo bench -q -p shpx-driver-sqlserver --bench bulk_insert -- \
   --quick --warm-up-time 1 --measurement-time 1
 
-# shpx 単独の wall-clock 計測 (上記 CI workflow と同じ流れ)
+# shpx 単独の wall-clock 計測
 SHPX_TEST_SQLSERVER_URL='mssql://sa:Shpx_test_pw1!@localhost:1433/shpx_test' \
 SHPX_MSSQL_BULK_CHUNK=1000000 \
   /usr/bin/time -p target/release/shpx convert \
@@ -128,13 +128,11 @@ SHPX_MSSQL_BULK_CHUNK=1000000 \
     "${SHPX_TEST_SQLSERVER_URL}?table=bench_shpx"
 ```
 
+`scripts/bench-vs-ogr-mssql.sh` は `ogr2ogr -f MSSQLSpatial` との median 比較用 (GDAL Parquet plugin + msodbcsql18 をローカルで揃える前提)。
+
 ### Smoke (Apple Silicon, Rosetta/QEMU emulation 経由 SQL Server 2022)
 
 100k 行 1 run: shpx staging bulk **1.28s** (78k rows/s)。動作確認のみ。emulation 経由なので production 値ではなく、Linux x86_64 native では更に速くなる見込み。
-
-### ogr2ogr 比較
-
-`scripts/bench-vs-ogr-mssql.sh` が `ogr2ogr -f MSSQLSpatial` との median wall-clock 比較を行う (PostGIS の 0.6× 目標と同等の緩めの目標、staging のラウンドトリップ込み)。GDAL に Parquet driver と MSSQLSpatial driver の双方が要るため (`libgdal-arrow-parquet` は ubuntugis-unstable PPA、`msodbcsql18` は Microsoft apt repo) CI 標準環境では走らせず、開発者がローカルでセットアップした上で参考値を取る用途に絞る。CI smoke は shpx 単独計測のみ。
 
 ## 制限事項 / 既知の落とし穴
 
