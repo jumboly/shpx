@@ -6,10 +6,13 @@
 use std::sync::Arc;
 
 use arrow_array::{
-    builder::{BinaryBuilder, BooleanBuilder, Date32Builder, Decimal128Builder, StringBuilder},
-    ArrayRef, RecordBatch,
+    builder::{
+        BinaryBuilder, BooleanBuilder, Date32Builder, Decimal128Builder, StringBuilder,
+        TimestampNanosecondBuilder,
+    },
+    Array, ArrayRef, RecordBatch,
 };
-use arrow_schema::{DataType, Field, Schema};
+use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use shpx_core::{
     schema::{GeometryMeta, GeometryType, GEOMETRY_META_KEY},
     Crs, Driver, ReadOpts, Uri, WriteOpts,
@@ -257,6 +260,102 @@ fn overwrite_false_fails_when_exists() {
         panic!("open_write must fail when overwrite=false and file exists");
     };
     assert!(matches!(err, shpx_core::Error::Format(_)));
+}
+
+// v0.7 cycle 1 で Parquet driver に OnLoss skeleton を入れたが、現状の shpx は
+// Decimal128 (≤ 38) と Timestamp(Nanosecond) を ArrowWriter にそのまま渡している。
+// 以下 2 件は「writer デフォルト設定 (coerce_types=false) で precision/unit が
+// 完全保持される」ことを実機で裏付けるための回帰テスト。これらが緑である限り
+// `precision-on-parquet` / `nanosecond-truncation-on-parquet` の loss kind は
+// 実装する必要がない (cycle 3 で ROADMAP の該当列挙を訂正する根拠になる)。
+
+#[test]
+fn timestamp_nanosecond_roundtrip_preserves_unit_and_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("ts_ns.parquet");
+
+    let fields = vec![Field::new(
+        "ts",
+        DataType::Timestamp(TimeUnit::Nanosecond, None),
+        true,
+    )];
+    let schema = schema_with_geom(fields, GeometryType::Point, None);
+
+    // 1234567890.123456789 — sub-second 9 桁分の情報が ms/μs では失われる値。
+    let raw_ns: i64 = 1_234_567_890_123_456_789;
+    let mut ts = TimestampNanosecondBuilder::new();
+    ts.append_value(raw_ns);
+    ts.append_null();
+    let attrs: Vec<ArrayRef> = vec![Arc::new(ts.finish())];
+
+    write_geoms(
+        &p,
+        schema.clone(),
+        &[Some(Geom::Point(0.0, 0.0)), Some(Geom::Point(1.0, 1.0))],
+        attrs,
+        None,
+        &default_write_opts(),
+    );
+
+    let (out_schema, _crs, batches) = read_back(&p);
+    assert_eq!(
+        out_schema.field_with_name("ts").unwrap().data_type(),
+        &DataType::Timestamp(TimeUnit::Nanosecond, None),
+        "Parquet writer must preserve Nanosecond TimeUnit"
+    );
+    let arr = batches[0]
+        .column_by_name("ts")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow_array::TimestampNanosecondArray>()
+        .unwrap();
+    assert_eq!(arr.value(0), raw_ns, "ns value must be bit-identical");
+    assert!(arr.is_null(1));
+}
+
+#[test]
+fn decimal128_38_10_roundtrip_preserves_precision_and_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("decimal_38_10.parquet");
+
+    let fields = vec![Field::new(
+        "amount",
+        DataType::Decimal128(38, 10),
+        true,
+    )];
+    let schema = schema_with_geom(fields, GeometryType::Point, None);
+
+    // Decimal128(38, 10) で表現できる極端な値 (絶対値が 10^28 オーダ) も保持されることを確認。
+    let big: i128 = 12_345_678_901_234_567_890_123_456_789_i128;
+    let neg: i128 = -98_765_432_101_234_567_890_123_456_789_i128;
+    let mut dec = Decimal128Builder::new().with_data_type(DataType::Decimal128(38, 10));
+    dec.append_value(big);
+    dec.append_value(neg);
+    let attrs: Vec<ArrayRef> = vec![Arc::new(dec.finish())];
+
+    write_geoms(
+        &p,
+        schema.clone(),
+        &[Some(Geom::Point(0.0, 0.0)), Some(Geom::Point(1.0, 1.0))],
+        attrs,
+        None,
+        &default_write_opts(),
+    );
+
+    let (out_schema, _crs, batches) = read_back(&p);
+    assert_eq!(
+        out_schema.field_with_name("amount").unwrap().data_type(),
+        &DataType::Decimal128(38, 10),
+        "Parquet writer must preserve Decimal128(38, 10) precision/scale"
+    );
+    let arr = batches[0]
+        .column_by_name("amount")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow_array::Decimal128Array>()
+        .unwrap();
+    assert_eq!(arr.value(0), big, "decimal value must be bit-identical");
+    assert_eq!(arr.value(1), neg, "negative decimal value must be bit-identical");
 }
 
 #[test]

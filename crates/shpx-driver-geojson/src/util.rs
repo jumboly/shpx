@@ -21,6 +21,10 @@ pub mod loss_kind {
     pub const UINT64_OVERFLOW_ON_GEOJSON: &str = "uint64-overflow-on-geojson";
     /// RFC 8259 で JSON Number として禁じられている NaN / Infinity。
     pub const NONFINITE_FLOAT_ON_GEOJSON: &str = "nonfinite-float-on-geojson";
+    /// `Timestamp(Nanosecond | Microsecond)` を ISO 8601 9/6 桁少数で出力する場合に発火する。
+    /// 値自体は lossless だが、JSON consumer 側 (Pandas / Excel / ogr2ogr 等) で
+    /// 多桁少数を読めないものがあるため互換性低下を警告する。
+    pub const TIMESTAMP_PRECISION_ON_GEOJSON: &str = "timestamp-precision-on-geojson";
 }
 
 /// 任意の `Display` を `Error::Driver` に詰める。

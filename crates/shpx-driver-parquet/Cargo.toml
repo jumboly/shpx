@@ -11,15 +11,16 @@ description = "shpx 用 GeoParquet ドライバ"
 workspace = true
 
 [dependencies]
-shpx-core    = { path = "../shpx-core" }
-shpx-geom    = { path = "../shpx-geom" }
-arrow        = { workspace = true }
-arrow-array  = { workspace = true }
-arrow-schema = { workspace = true }
-parquet      = { workspace = true }
-serde        = { workspace = true }
-serde_json   = { workspace = true }
-tracing      = { workspace = true }
+shpx-core       = { path = "../shpx-core" }
+shpx-geom       = { path = "../shpx-geom" }
+shpx-rdb-common = { path = "../shpx-rdb-common" }
+arrow           = { workspace = true }
+arrow-array     = { workspace = true }
+arrow-schema    = { workspace = true }
+parquet         = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+tracing         = { workspace = true }
 
 [dev-dependencies]
 tempfile           = { workspace = true }

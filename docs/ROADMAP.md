@@ -180,28 +180,73 @@
 
 ---
 
-## v1.0 — 仕上げと配布
+## v0.7 — Driver Feature Parity & Refactor
+
+**背景**: v0.1 → v0.6 の段階的 driver 追加で、新 driver (PostGIS / SQL Server / SpatiaLite) と古い driver (SHP / Parquet / GPKG / GeoJSON / CSV / FGB) の間に整合性ギャップが残った。1.0 を「全 driver 一貫した動作」で切るため、parity backport と refactor を 1 マイルストーンに集約する。3 並列 Explore 監査で発見したギャップ (`/Users/masa/.claude/plans/velvety-percolating-hinton.md` 参照) のうちデータ正しさに直結する欠落を v0.7 で塞ぎ、配布工程は v1.0 に分離する。
 
 **スコープ**:
-- 損失ポリシー（`--on-loss=error|warn|skip`）の完全実装
-- `indicatif` で進捗バー、`tracing` でログレベル整備
-- `shpx schema` / `shpx drivers` サブコマンド
-- ドキュメント完備（README / docs / examples/）
-- `cargo-dist` で macOS(arm64/x64) / Linux(x64/arm64) / Windows(x64) のバイナリリリース
-- Homebrew tap、Docker image (ghcr.io)
-- crates.io 公開
-- ライセンス決定（MIT/Apache-2.0 dual を想定）
+- データ正しさに直結する OnLoss 経路の欠落修正 (Parquet / GeoJSON)
+- 新 driver の reader filtering 機能 (`--where` / `--select` / `--query`) を SpatiaLite に backport
+- 入力 CRS metadata の reader 側読み込み (Parquet GeoParquet / FlatGeobuf / GPKG 確認)
+- `shpx-rdb-common` の重複コード (`percent_decode` / `apply_on_loss` 呼び出しパターン) を全 RDB-ish driver で統一
+- Cross-driver roundtrip matrix を SpatiaLite scope から CLI scope に拡張
+- `docs/ON_LOSS.md` 新設、各 driver doc の Limitations / Future Work 章を統一形式に
 
 **完了基準**:
-- [ ] `cargo install shpx` で導入可能
-- [ ] `brew install <tap>/shpx` で導入可能
-- [ ] `docker run ghcr.io/.../shpx` で導入可能
-- [ ] チュートリアル形式の README / `examples/`
+- [ ] `cargo test --workspace` 緑 + 全 env-gated 統合テスト緑
+- [ ] `grep "fn percent_decode" crates/` がヒットするのは `crates/shpx-rdb-common/` のみ
+- [ ] CLI レベルの cross-driver matrix テスト (`crates/shpx-cli/tests/cross_driver_matrix.rs`) で主要 pair (PostGIS ↔ SQL Server / SpatiaLite、PostGIS ↔ Parquet / FGB / GeoJSON / SHP) が緑
+- [ ] `docs/ON_LOSS.md` 新設、driver × loss kind の表が網羅されている
+
+**サブ cycle 構成** (v0.3 以降と同じく cycle ごとに `/clear` して clean に再開する):
+
+- **cycle 1 — data-correctness 修正**: (1) `crates/shpx-driver-parquet/src/writer.rs` に OnLoss を実装 (`precision-on-parquet` / `nanosecond-truncation-on-parquet` / `z-on-parquet` / `m-on-parquet`)、(2) `crates/shpx-driver-geojson/src/writer.rs` の silent demotion (Decimal / Timestamp_tz) を `apply_on_loss` 経由に置換 (`decimal-on-geojson` / `timestamp-precision-on-geojson`)、(3) `crates/shpx-driver-spatialite/src/reader.rs` に PostGIS 同型の table mode / query mode 分岐を実装し `--where` / `--select` / `--query` を backport。`shpx_rdb_common::apply_on_loss` (`crates/shpx-rdb-common/src/on_loss.rs`) を Parquet / GeoJSON でも再利用 (RDB common は名前と裏腹に純粋ヘルパで、ファイル driver から呼んでも問題ない)。CSV driver の OnLoss クロージャ (`crates/shpx-driver-csv/src/util.rs`) を手本にする。
+- **cycle 2 — CRS metadata reader & refactor**: (1) Parquet reader で Arrow field metadata の `geo` JSON を `shpx_geom::projjson::decode` で parse、(2) FGB reader で header の `crs` field を parse、(3) GPKG reader の `gpkg_geometry_columns.srs_id` → `gpkg_spatial_ref_sys` 経路を確認し抜けがあれば補完、(4) GPKG / SpatiaLite / SQL Server の自前 `percent_decode` を `shpx_rdb_common::percent_decode` に統一、(5) GPKG `apply_on_loss` を直接 `tracing::warn!` 呼び出しから rdb-common closure パターンに変更、(6) `crates/shpx-cli/tests/cross_driver_matrix.rs` を新設し PostGIS ↔ SQL Server / SpatiaLite / Parquet / FGB / GeoJSON / SHP の主要往復を env-gate で網羅 (既存 `crates/shpx-driver-spatialite/tests/cross_driver_roundtrip.rs` は driver scope の回帰検出として残す)。
+- **cycle 3 — docs + ROADMAP 更新 + 0.7.0 release**: `docs/ROADMAP.md:128-129` の v0.5 完了基準チェック (`[ ]` → `[x]`、実体は v0.5 cycle 2a / 3 で実装済み) を訂正、`docs/ON_LOSS.md` を新設 (driver × loss kind 表 + 各 kind の発生条件 + `--on-loss=error|warn|skip` の動作仕様)、`docs/{CSV,GEOJSON,GPKG,FGB}.md` を `docs/{POSTGIS,SQLSERVER,SPATIALITE}.md` と同形 (Quick Start / Capabilities / Limitations / Future Work) に揃え、`CHANGELOG.md` に v0.7.0 セクション、workspace `Cargo.toml` を `0.7.0` へ bump、release commit + `v0.7.0` annotated tag。
+
+---
+
+## v1.0 — 仕上げと配布
+
+**スコープ** (v0.7 で parity を済ませた前提で、配布工程に集中):
+- v0.4 完了基準の SQL Server 10M 行ベンチ (Linux x86_64) を取り切り、ROADMAP v0.4 のチェックを `[x]` に
+- `LICENSE-MIT` / `LICENSE-APACHE` / `NOTICE` をリポジトリルートに配置 (MIT/Apache-2.0 dual)
+- `indicatif` で進捗バー (`shpx convert` 時)、`LayerReader::row_count_hint` の各 driver 実装を統一
+- `examples/*.sh` 新設、README をチュートリアル形式に再構成
+- `shpx schema` / `shpx drivers` に `--format=text|json` を追加
+- `cargo-dist` で macOS(arm64/x64) / Linux(x64/arm64) / Windows(x64) のバイナリリリース
+- macOS / Windows の `bundled-spatialite` smoke job を CI に追加 (Linux smoke は v0.6 cycle 4 で既存)
+- `1.0.0` tag + GitHub Releases 自動 publish
+
+**スコープ外 (v1.x 以降に後送り)**: crates.io 公開 / Homebrew tap / Docker image (ghcr.io) — それぞれ独立した整備工程が必要なため `1.0.0` 出荷後の追加マイルストーンに切り出す。
+
+**完了基準**:
+- [ ] SQL Server 10M 行ベンチが Linux x86_64 で `shpx_secs <= 1.667 * ogr_secs` を満たし、`docs/SQLSERVER.md` の Benchmark 節と `CHANGELOG.md` 0.4.0 Known Issues を訂正
+- [ ] `LICENSE-MIT` / `LICENSE-APACHE` / `NOTICE` がリポジトリルートに存在
+- [ ] `shpx convert` で進捗バー (確定行数なら ProgressBar、不明なら Spinner) が表示され、`--quiet` で抑止できる
+- [ ] `examples/01-shp-to-parquet.sh` ほか 5+ シナリオが実機で緑
+- [ ] `cargo dist build --target=x86_64-unknown-linux-gnu` で tarball 生成、CI で macOS / Linux / Windows smoke job が緑 (Windows は best-effort 許容)
+- [ ] `v1.0.0` tag push → cargo-dist が 5 target の release artifact を GitHub Releases に publish
+
+**サブ cycle 構成** (v0.3 以降と同じく cycle ごとに `/clear` して clean に再開する):
+
+- **cycle 1 — v0.4 ベンチ + LICENSE / NOTICE**: 既存 `crates/shpx-driver-sqlserver/benches/{bulk_insert,gen}.rs` + `scripts/bench-vs-ogr-mssql.sh` を Linux x86_64 (CI workflow_dispatch or 直接ホスト) で実行し 10M 行 × 3-run median を取得。`docs/SQLSERVER.md` Benchmark 節 / `CHANGELOG.md` 0.4.0 Known Issues / `docs/ROADMAP.md:95` を訂正。`/Users/masa/src/shpx/LICENSE-MIT` / `/Users/masa/src/shpx/LICENSE-APACHE` / `/Users/masa/src/shpx/NOTICE` を新設 (NOTICE は libspatialite / GEOS / PROJ / SQLite / arrow-rs 等の third-party listing を aggregate、既存 `crates/shpx-driver-spatialite/NOTICE` は driver scope のまま残す)。
+- **cycle 2 — 進捗バー + on-loss completeness**: workspace dep に `indicatif = "0.17"` 追加、`crates/shpx-cli/src/commands/convert.rs` に ProgressBar / Spinner 統合と `--quiet` フラグ追加。各 driver で `LayerReader::row_count_hint` の実装を確認・統一 (DB 系は table mode で `SELECT COUNT(*)`、Parquet は row group meta、SHP は header record count、FGB は `features_count`、GPKG / SpatiaLite-file は `SELECT COUNT(*)`、CSV / GeoJSON / NDJSON は `None`)。v0.7 cycle 3 で新設した `docs/ON_LOSS.md` の loss kind 表を完成させ、抜け落ちている driver × kind を埋める (例: timestamp ns 切り捨ては Parquet と FGB で同じ kind 名)。
+- **cycle 3 — examples + README + schema/drivers JSON**: `examples/01-shp-to-parquet.sh` / `02-shp-to-postgis.sh` / `03-postgis-to-fgb.sh` / `04-reproject.sh` / `05-on-loss.sh` / `06-bulk-load.sh` を新設 (test data は `examples/data/` に同梱 or scripts で生成)。`README.md` を再構成し「5 分チュートリアル」(SHP → GeoParquet → PostGIS → reproject) と examples へのリンクを追加。`crates/shpx-cli/src/commands/{schema,drivers}.rs` に `--format=text|json` を追加 (drivers は `[{ name, schemes, capabilities }]` 形式)。
+- **cycle 4 — cargo-dist + multi-platform CI**: workspace `Cargo.toml` に `[workspace.metadata.dist]` (targets: 5 OS、`installers = ["shell"]`、`bundled-spatialite` / `bundled-proj` 有効化)、`cargo-dist generate-ci github` で `.github/workflows/release.yml` を生成。`.github/workflows/ci.yml` に `bundled-smoke-macos` / `bundled-smoke-windows` job を追加 (macOS は `brew install cmake`、Windows は chocolatey で `cmake` / `clang`)。Linux smoke (`bundled-spatialite-smoke`) は既存。`docs/SPATIALITE.md` の bundled 節に「macOS arm64 + Linux のみ Release、Windows / macOS x64 は best-effort」の縮退方針を明記。
+- **cycle 5 — 1.0.0 release**: `docs/ROADMAP.md` v1.0 完了基準チェックを全部 `[x]`、`CHANGELOG.md` Unreleased → `[1.0.0] - YYYY-MM-DD` (compare URL も `1.0.0...HEAD` に更新)、workspace `Cargo.toml` `version` を `0.7.0` → `1.0.0`、`release: v1.0.0` 1 commit + `v1.0.0` annotated tag。`git push --tags` 後 cargo-dist が GitHub Release を自動生成、shell installer のダウンロード URL を `README.md` の「install 方法」節に反映。後送り項目 (crates.io / Homebrew / Docker / その他 UX) を `docs/ROADMAP.md` v1.x 候補に追記。
+
+**リスクと縮退判断**:
+- **macOS / Windows の bundled build**: cycle 4 で Windows の `cmake` / `clang` 経由 `bundled-spatialite` build がリンカ問題で詰まる可能性。詰まれば Windows を best-effort 扱いで Release から除外し、Linux + macOS arm64 のみで `1.0.0` 出荷。`docs/SPATIALITE.md` で対応 OS を明記する。
+- **SQL Server ベンチの環境**: cycle 1 で Linux x86_64 環境が手元になく CI 経由でも安定計測できない場合は、ベンチ取得を v1.x に分離して `1.0.0` を切ることを検討 (ただし v0.4 完了基準は引き続き `[ ]` のまま)。
 
 ---
 
 ## v1.x 以降（候補）
 
+- crates.io 公開 (`cargo publish` の metadata 整備とパスワード管理が独立工程のため v1.0 出荷後)
+- Homebrew tap (`jumboly/homebrew-shpx`) — formula は cargo-dist 出力に依存
+- Docker image (`ghcr.io/jumboly/shpx`) — bundled-spatialite で base image が膨らむため最適化込みで切り出し
 - MS-SSCLRT UDT エンコーダで SQL Server 真の bulk
 - 追加 RDB driver（MySQL / MariaDB / Oracle 等）— 既存 PostGIS / SQL Server で共通化済みの `shpx-rdb-common` を利用して URI/CRS/`OnLoss` 周りの boilerplate を共有する想定
 - 対話的 REPL モード（`shpx repl`）

@@ -6,13 +6,15 @@
 use std::sync::Arc;
 
 use arrow_array::{
-    builder::{BinaryBuilder, Int64Builder, StringBuilder},
+    builder::{
+        BinaryBuilder, Decimal128Builder, Int64Builder, StringBuilder, TimestampNanosecondBuilder,
+    },
     Array, ArrayRef, BinaryArray, RecordBatch,
 };
-use arrow_schema::{DataType, Field, Schema};
+use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use shpx_core::{
     schema::{GeometryMeta, GeometryType, GEOMETRY_META_KEY},
-    Crs, Driver, ReadOpts, Uri, WriteOpts,
+    Crs, Driver, Error, OnLoss, ReadOpts, Uri, WriteOpts,
 };
 use shpx_driver_geojson::GeoJsonDriver;
 use shpx_geom::wkb::{self, Geom};
@@ -715,4 +717,179 @@ fn feature_collection_writer_emits_correct_envelope() {
     );
     // Feature 文字列が 2 件あること。
     assert_eq!(raw.matches(r#""type":"Feature""#).count(), 2);
+}
+
+// ---- v0.7 cycle 1: OnLoss ポリシー回帰テスト ----
+//
+// `Decimal128` と `Timestamp(Nanosecond | Microsecond)` は writer 側で
+// per-column に on_loss を解決する。Skip → properties から列消失、
+// Warn → 値はそのまま (Decimal は文字列、Timestamp は 9 桁少数で lossless)、
+// Error → `open_write` が `Error::OnLoss` で abort、を確認する。
+
+fn write_opts_with_loss(loss: OnLoss) -> WriteOpts {
+    WriteOpts {
+        overwrite: true,
+        on_loss: loss,
+        ..Default::default()
+    }
+}
+
+fn schema_with_decimal() -> Arc<Schema> {
+    schema_with_geom(
+        vec![
+            Field::new("name", DataType::Utf8, true),
+            Field::new("amount", DataType::Decimal128(20, 5), true),
+        ],
+        GeometryType::Point,
+        None,
+    )
+}
+
+fn build_decimal_attrs() -> Vec<ArrayRef> {
+    let mut name = StringBuilder::new();
+    name.append_value("alpha");
+    let mut amount = Decimal128Builder::new().with_data_type(DataType::Decimal128(20, 5));
+    amount.append_value(123_456_789); // 1234.56789
+    vec![Arc::new(name.finish()), Arc::new(amount.finish())]
+}
+
+fn try_open_write(
+    path: &std::path::Path,
+    schema: Arc<Schema>,
+    opts: &WriteOpts,
+) -> Result<Box<dyn shpx_core::LayerWriter>, Error> {
+    let driver = GeoJsonDriver::new();
+    let uri = Uri::from_path(path.to_string_lossy().to_string());
+    driver.open_write(&uri, schema, None, opts)
+}
+
+#[test]
+fn decimal128_on_loss_error_aborts() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("dec_err.geojson");
+    let schema = schema_with_decimal();
+    match try_open_write(&p, schema, &write_opts_with_loss(OnLoss::Error)) {
+        Ok(_) => panic!("open_write must abort under OnLoss::Error for Decimal128"),
+        Err(Error::OnLoss { kind, .. }) => assert_eq!(kind, "decimal-on-geojson"),
+        Err(other) => panic!("expected Error::OnLoss(decimal-on-geojson), got {other:?}"),
+    }
+}
+
+#[test]
+fn decimal128_on_loss_skip_drops_column() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("dec_skip.geojson");
+    let schema = schema_with_decimal();
+    write_geoms(
+        &p,
+        schema,
+        &[Some(Geom::Point(0.0, 0.0))],
+        build_decimal_attrs(),
+        None,
+        &write_opts_with_loss(OnLoss::Skip),
+    );
+    let raw = std::fs::read_to_string(&p).unwrap();
+    assert!(raw.contains(r#""name":"alpha""#));
+    assert!(
+        !raw.contains("amount"),
+        "amount column must be dropped under OnLoss::Skip; got: {raw}"
+    );
+}
+
+#[test]
+fn decimal128_on_loss_warn_stringifies_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("dec_warn.geojson");
+    let schema = schema_with_decimal();
+    write_geoms(
+        &p,
+        schema,
+        &[Some(Geom::Point(0.0, 0.0))],
+        build_decimal_attrs(),
+        None,
+        &write_opts_with_loss(OnLoss::Warn),
+    );
+    let raw = std::fs::read_to_string(&p).unwrap();
+    assert!(
+        raw.contains(r#""amount":"1234.56789""#),
+        "amount must be stringified under OnLoss::Warn; got: {raw}"
+    );
+}
+
+fn schema_with_ts_ns() -> Arc<Schema> {
+    schema_with_geom(
+        vec![
+            Field::new("name", DataType::Utf8, true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+                true,
+            ),
+        ],
+        GeometryType::Point,
+        None,
+    )
+}
+
+fn build_ts_attrs() -> Vec<ArrayRef> {
+    let mut name = StringBuilder::new();
+    name.append_value("alpha");
+    let mut ts = TimestampNanosecondBuilder::new();
+    // 2026-04-25T01:23:45.123456789Z 相当 (sub-second 9 桁を確認するための値)。
+    ts.append_value(1_777_339_425_123_456_789);
+    vec![Arc::new(name.finish()), Arc::new(ts.finish())]
+}
+
+#[test]
+fn timestamp_nanosecond_on_loss_error_aborts() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("ts_err.geojson");
+    let schema = schema_with_ts_ns();
+    match try_open_write(&p, schema, &write_opts_with_loss(OnLoss::Error)) {
+        Ok(_) => panic!("open_write must abort under OnLoss::Error for Timestamp(ns)"),
+        Err(Error::OnLoss { kind, .. }) => assert_eq!(kind, "timestamp-precision-on-geojson"),
+        Err(other) => panic!("expected Error::OnLoss(timestamp-precision-on-geojson), got {other:?}"),
+    }
+}
+
+#[test]
+fn timestamp_nanosecond_on_loss_warn_outputs_lossless_9_digits() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("ts_warn.geojson");
+    let schema = schema_with_ts_ns();
+    write_geoms(
+        &p,
+        schema,
+        &[Some(Geom::Point(0.0, 0.0))],
+        build_ts_attrs(),
+        None,
+        &write_opts_with_loss(OnLoss::Warn),
+    );
+    let raw = std::fs::read_to_string(&p).unwrap();
+    // .123456789 が losslessly 出力されていること (frac_format = "%.9f")。
+    assert!(
+        raw.contains(".123456789"),
+        "Nanosecond precision must be preserved under OnLoss::Warn; got: {raw}"
+    );
+}
+
+#[test]
+fn timestamp_nanosecond_on_loss_skip_drops_column() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("ts_skip.geojson");
+    let schema = schema_with_ts_ns();
+    write_geoms(
+        &p,
+        schema,
+        &[Some(Geom::Point(0.0, 0.0))],
+        build_ts_attrs(),
+        None,
+        &write_opts_with_loss(OnLoss::Skip),
+    );
+    let raw = std::fs::read_to_string(&p).unwrap();
+    assert!(raw.contains(r#""name":"alpha""#));
+    assert!(
+        !raw.contains("\"ts\""),
+        "ts column must be dropped under OnLoss::Skip; got: {raw}"
+    );
 }

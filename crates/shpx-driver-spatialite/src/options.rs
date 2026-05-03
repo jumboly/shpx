@@ -118,6 +118,23 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
+/// `--query` の早期バリデーション。`;` 包含と空 query を弾く。
+///
+/// PostGIS の同名関数と完全同形（driver 名だけ差し替え）。`;` を含む SQL は
+/// サブクエリとして包めない（`SELECT * FROM (SELECT ...;) AS shpx_q` が構文エラーになる）。
+pub fn validate_user_query(q: &str) -> Result<()> {
+    let trimmed = q.trim();
+    if trimmed.is_empty() {
+        return Err(driver_msg(format!("{DRIVER_NAME}: --query is empty")));
+    }
+    if trimmed.contains(';') {
+        return Err(driver_msg(format!(
+            "{DRIVER_NAME}: --query must not contain `;` (semicolons cannot be wrapped in a subquery)"
+        )));
+    }
+    Ok(())
+}
+
 /// `Uri::path` が含む `?table=...` 部分と、`sqlite://` の URL prefix を切り落とし、
 /// SQLite が開けるファイルパスに整形する。
 #[must_use]
@@ -162,6 +179,15 @@ mod tests {
     fn parse_query_without_question_returns_none() {
         let v = parse_query_table("/tmp/a.sqlite").unwrap();
         assert!(v.is_none());
+    }
+
+    #[test]
+    fn validate_user_query_rejects_semicolon() {
+        assert!(validate_user_query("SELECT 1; SELECT 2").is_err());
+        assert!(validate_user_query("SELECT 1;").is_err());
+        assert!(validate_user_query("").is_err());
+        assert!(validate_user_query("   ").is_err());
+        assert!(validate_user_query("SELECT geom FROM t").is_ok());
     }
 
     #[test]
