@@ -62,7 +62,9 @@ jobs:
       - name: Install build deps and gdal-bin
         run: |
           set -euxo pipefail
-          sudo apt-get install -y libproj-dev pkg-config gdal-bin
+          # libgdal-arrow-parquet は Parquet driver が gdal-bin 本体ではなく別 plugin
+          # として配布されているため必須 (Ubuntu 24.04 / GDAL 3.8 以降)。
+          sudo apt-get install -y libproj-dev pkg-config gdal-bin libgdal-arrow-parquet
           # bench-vs-ogr-mssql.sh の sqlcmd 解決経路 (host PATH または `docker compose exec`) は
           # GitHub Actions services 上では後者が成立しないため、host PATH に出す必要がある。
           sudo ln -sf /opt/mssql-tools18/bin/sqlcmd /usr/local/bin/sqlcmd
