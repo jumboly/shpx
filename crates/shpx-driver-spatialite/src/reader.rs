@@ -129,8 +129,10 @@ impl SpatialiteReader {
     }
 
     fn open_query_mode(conn: &Connection, user_query: &str, opts: &ReadOpts) -> Result<Self> {
-        // ユーザ SQL を `LIMIT 1` でサブクエリ化し、(列名, 1 行目の値) から
-        // schema を推定する。0 行ヒット時は型推定不能のため明示エラー。
+        // ユーザ SQL を `LIMIT 1` でサブクエリ化し、(列名, 1 行目の値) から schema を
+        // 推定する。0 行ヒット時は型推定不能のため明示エラー。geometry 列は probe ループ内
+        // で「最初に spatialite_blob として decode できた BLOB 列」と判定し、SRID と
+        // geometry 型もこの 1 行から取り出して本番での再 decode を避ける。
         let probe_sql = format!("SELECT * FROM ({user_query}) AS shpx_q LIMIT 1");
         let mut stmt = conn.prepare(&probe_sql).map_err(|e| driver_err(&e))?;
         let names: Vec<String> = stmt
@@ -149,48 +151,43 @@ impl SpatialiteReader {
                 ))
             })?;
 
-        let mut probe_values: Vec<ProbeValue> = Vec::with_capacity(names.len());
+        let mut probe_kinds: Vec<ProbeKind> = Vec::with_capacity(names.len());
+        let mut geom_info: Option<(usize, i32, GeometryType)> = None;
         for i in 0..names.len() {
             let v = first_row.get_ref(i).map_err(|e| driver_err(&e))?;
-            probe_values.push(ProbeValue::from_value_ref(v));
+            // 最初の decodable BLOB を geometry 列として確定。bytes は ValueRef のスコープ
+            // 内で消費し、所有コピーは作らない (複数 BLOB 列がある場合のメモリ削減)。
+            if geom_info.is_none() {
+                if let ValueRef::Blob(b) = v {
+                    if let Ok((srid, wkb_bytes)) = shpx_geom::spatialite_blob::decode(b) {
+                        let gt = infer_geom_type_from_wkb(&wkb_bytes)
+                            .unwrap_or(GeometryType::Geometry);
+                        geom_info = Some((i, srid, gt));
+                    }
+                }
+            }
+            probe_kinds.push(ProbeKind::from(&v));
         }
         // probe stmt の borrow を切る。本番 SELECT は再 prepare する。
         drop(rows_iter);
         drop(stmt);
 
-        // 最初に SpatiaLite blob として decode できた BLOB 列を geometry とみなす。
-        let mut geom_idx_opt: Option<usize> = None;
-        let mut geom_srid: i32 = 0;
-        let mut geom_type = GeometryType::Geometry;
-        for (i, v) in probe_values.iter().enumerate() {
-            if let ProbeValue::Blob(b) = v {
-                if let Ok((srid, wkb_bytes)) = shpx_geom::spatialite_blob::decode(b) {
-                    geom_idx_opt = Some(i);
-                    geom_srid = srid;
-                    geom_type = infer_geom_type_from_wkb(&wkb_bytes).unwrap_or(GeometryType::Geometry);
-                    break;
-                }
-            }
-        }
-        let geom_idx = geom_idx_opt.ok_or_else(|| {
+        let (geom_idx, geom_srid, geom_type) = geom_info.ok_or_else(|| {
             driver_msg(format!(
                 "{DRIVER_NAME}: --query result does not contain a SpatiaLite geometry column"
             ))
         })?;
         let geom_column = names[geom_idx].clone();
 
-        // 属性 schema (geometry 列を除く)。geometry 列の存在しない位置取りは後続でも
-        // インデックスで参照する必要があるため、ColumnPlan の順序は names から geometry を
-        // 抜いた順 (= 元の SELECT 順) を維持する。
+        // 属性 schema (geometry 列を除く)。
         let mut columns: Vec<ColumnPlan> = Vec::with_capacity(names.len() - 1);
         for (i, name) in names.iter().enumerate() {
             if i == geom_idx {
                 continue;
             }
-            let arrow_type = probe_values[i].infer_arrow_type();
             columns.push(ColumnPlan {
                 name: name.clone(),
-                arrow_type,
+                arrow_type: probe_kinds[i].infer_arrow_type(),
             });
         }
 
@@ -200,7 +197,6 @@ impl SpatialiteReader {
         };
         let schema = build_schema(&columns, &geom_column, geom_type, crs.as_ref())?;
 
-        // 本番は `SELECT * FROM (user_query) AS shpx_q` で全件取得する。
         let real_sql = format!("SELECT * FROM ({user_query}) AS shpx_q");
         let rows = load_rows_query(conn, &real_sql, &columns, &geom_column, geom_idx)?;
         let row_count = rows.len();
@@ -457,35 +453,36 @@ fn filter_columns_by_select_with_geom(
     Ok(out)
 }
 
-/// query モード probe 時の 1 行目の値タグ。型推定 (Arrow 型) と geometry 列特定
-/// (Blob のとき bytes を保持して spatialite_blob::decode を試行) のみに使う。
-#[derive(Debug)]
-enum ProbeValue {
+/// query モード probe で取得した 1 行目の値タグ (Arrow 型推定用)。geometry 列の
+/// 特定と SRID 抽出は呼び出し側で ValueRef のスコープ内に終わらせるため、ここでは
+/// bytes を所有しない (複数 BLOB 列がある場合のメモリ削減)。
+#[derive(Debug, Clone, Copy)]
+enum ProbeKind {
     Null,
     Integer,
     Real,
     Text,
-    Blob(Vec<u8>),
+    Blob,
 }
 
-impl ProbeValue {
-    fn from_value_ref(v: ValueRef<'_>) -> Self {
+impl ProbeKind {
+    fn from(v: &ValueRef<'_>) -> Self {
         match v {
             ValueRef::Null => Self::Null,
             ValueRef::Integer(_) => Self::Integer,
             ValueRef::Real(_) => Self::Real,
             ValueRef::Text(_) => Self::Text,
-            ValueRef::Blob(b) => Self::Blob(b.to_vec()),
+            ValueRef::Blob(_) => Self::Blob,
         }
     }
 
-    /// 1 行目の値から Arrow 型を推定する。Null は推定不能のため Utf8 fallback。
-    fn infer_arrow_type(&self) -> DataType {
+    /// Null は推定不能のため Utf8 fallback。
+    fn infer_arrow_type(self) -> DataType {
         match self {
             Self::Null | Self::Text => DataType::Utf8,
             Self::Integer => DataType::Int64,
             Self::Real => DataType::Float64,
-            Self::Blob(_) => DataType::Binary,
+            Self::Blob => DataType::Binary,
         }
     }
 }

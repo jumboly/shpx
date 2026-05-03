@@ -1,4 +1,4 @@
-//! v0.7 cycle 1: SpatiaLite reader の `--where` / `--select` / `--query` 統合テスト。
+//! SpatiaLite reader の `--where` / `--select` / `--query` 統合テスト。
 //!
 //! `SHPX_TEST_SPATIALITE` 環境変数が設定されている場合のみ実行する (PostGIS の
 //! `tests/reader_filter.rs` と同型の env-gate)。`query_with_semicolon_errors` のみ
