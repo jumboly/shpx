@@ -24,9 +24,9 @@ use shpx_core::{
 
 use crate::conn;
 use crate::meta;
-use crate::options::{strip_to_filepath, ResolvedReadOpts};
+use crate::options::{strip_to_filepath, validate_user_query, ResolvedReadOpts};
 use crate::type_map;
-use crate::util::{driver_err, driver_msg, quote_ident};
+use crate::util::{driver_err, driver_msg, quote_ident, DRIVER_NAME};
 
 const READ_BATCH_SIZE: usize = 4096;
 
@@ -68,24 +68,141 @@ pub struct SpatialiteReader {
 
 impl SpatialiteReader {
     pub fn open(uri: &Uri, opts: &ReadOpts) -> Result<Self> {
-        let resolved = ResolvedReadOpts::resolve(uri, opts)?;
-        let path = PathBuf::from(strip_to_filepath(uri.path()));
+        if opts.query.is_some() && (opts.where_clause.is_some() || opts.select.is_some()) {
+            return Err(driver_msg(format!(
+                "{DRIVER_NAME}: --query is exclusive with --where / --select"
+            )));
+        }
+        // 接続前に SQL 形状だけ早期バリデーション（`;` 混入は実行不可なので即エラー）。
+        if let Some(q) = opts.query.as_deref() {
+            validate_user_query(q)?;
+        }
 
+        let path = PathBuf::from(strip_to_filepath(uri.path()));
         let conn = conn::open_read(&path)?;
 
-        let table = resolve_table_name(&conn, resolved.table.as_deref())?;
-        let (geom_column, geom_type_int, srid) = read_geometry_column(&conn, &table)?;
+        if let Some(query) = opts.query.as_deref() {
+            Self::open_query_mode(&conn, query, opts)
+        } else {
+            let resolved = ResolvedReadOpts::resolve(uri, opts)?;
+            Self::open_table_mode(&conn, &resolved, opts)
+        }
+    }
 
-        let crs = match resolved.src_crs {
-            Some(c) => Some(c),
-            None => read_crs_for_srid(&conn, srid)?,
+    fn open_table_mode(
+        conn: &Connection,
+        resolved: &ResolvedReadOpts,
+        opts: &ReadOpts,
+    ) -> Result<Self> {
+        let table = resolve_table_name(conn, resolved.table.as_deref())?;
+        let (geom_column, geom_type_int, srid) = read_geometry_column(conn, &table)?;
+
+        let crs = match &resolved.src_crs {
+            Some(c) => Some(c.clone()),
+            None => read_crs_for_srid(conn, srid)?,
         };
 
-        let columns = read_attribute_schema(&conn, &table, &geom_column)?;
+        let all_columns = read_attribute_schema(conn, &table, &geom_column)?;
+        let columns = match opts.select.as_deref() {
+            None => all_columns,
+            Some(names) => filter_columns_by_select_with_geom(&all_columns, names, &geom_column)?,
+        };
         let geom_type = meta::geom_type_from_int(geom_type_int);
         let schema = build_schema(&columns, &geom_column, geom_type, crs.as_ref())?;
 
-        let rows = load_all_rows(&conn, &table, &columns, &geom_column)?;
+        let rows = load_rows_table(
+            conn,
+            &table,
+            &columns,
+            &geom_column,
+            opts.where_clause.as_deref(),
+        )?;
+        let row_count = rows.len();
+
+        Ok(Self {
+            schema,
+            crs,
+            columns,
+            rows: rows.into(),
+            row_count,
+        })
+    }
+
+    fn open_query_mode(conn: &Connection, user_query: &str, opts: &ReadOpts) -> Result<Self> {
+        // ユーザ SQL を `LIMIT 1` でサブクエリ化し、(列名, 1 行目の値) から
+        // schema を推定する。0 行ヒット時は型推定不能のため明示エラー。
+        let probe_sql = format!("SELECT * FROM ({user_query}) AS shpx_q LIMIT 1");
+        let mut stmt = conn.prepare(&probe_sql).map_err(|e| driver_err(&e))?;
+        let names: Vec<String> = stmt
+            .column_names()
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+
+        let mut rows_iter = stmt.query([]).map_err(|e| driver_err(&e))?;
+        let first_row = rows_iter
+            .next()
+            .map_err(|e| driver_err(&e))?
+            .ok_or_else(|| {
+                driver_msg(format!(
+                    "{DRIVER_NAME}: --query returned 0 rows; cannot infer schema. Add a sample row or use a --where on the table"
+                ))
+            })?;
+
+        let mut probe_values: Vec<ProbeValue> = Vec::with_capacity(names.len());
+        for i in 0..names.len() {
+            let v = first_row.get_ref(i).map_err(|e| driver_err(&e))?;
+            probe_values.push(ProbeValue::from_value_ref(v));
+        }
+        // probe stmt の borrow を切る。本番 SELECT は再 prepare する。
+        drop(rows_iter);
+        drop(stmt);
+
+        // 最初に SpatiaLite blob として decode できた BLOB 列を geometry とみなす。
+        let mut geom_idx_opt: Option<usize> = None;
+        let mut geom_srid: i32 = 0;
+        let mut geom_type = GeometryType::Geometry;
+        for (i, v) in probe_values.iter().enumerate() {
+            if let ProbeValue::Blob(b) = v {
+                if let Ok((srid, wkb_bytes)) = shpx_geom::spatialite_blob::decode(b) {
+                    geom_idx_opt = Some(i);
+                    geom_srid = srid;
+                    geom_type = infer_geom_type_from_wkb(&wkb_bytes).unwrap_or(GeometryType::Geometry);
+                    break;
+                }
+            }
+        }
+        let geom_idx = geom_idx_opt.ok_or_else(|| {
+            driver_msg(format!(
+                "{DRIVER_NAME}: --query result does not contain a SpatiaLite geometry column"
+            ))
+        })?;
+        let geom_column = names[geom_idx].clone();
+
+        // 属性 schema (geometry 列を除く)。geometry 列の存在しない位置取りは後続でも
+        // インデックスで参照する必要があるため、ColumnPlan の順序は names から geometry を
+        // 抜いた順 (= 元の SELECT 順) を維持する。
+        let mut columns: Vec<ColumnPlan> = Vec::with_capacity(names.len() - 1);
+        for (i, name) in names.iter().enumerate() {
+            if i == geom_idx {
+                continue;
+            }
+            let arrow_type = probe_values[i].infer_arrow_type();
+            columns.push(ColumnPlan {
+                name: name.clone(),
+                arrow_type,
+            });
+        }
+
+        let crs = match &opts.src_crs {
+            Some(c) => Some(c.clone()),
+            None => read_crs_for_srid(conn, geom_srid)?,
+        };
+        let schema = build_schema(&columns, &geom_column, geom_type, crs.as_ref())?;
+
+        // 本番は `SELECT * FROM (user_query) AS shpx_q` で全件取得する。
+        let real_sql = format!("SELECT * FROM ({user_query}) AS shpx_q");
+        let rows = load_rows_query(conn, &real_sql, &columns, &geom_column, geom_idx)?;
         let row_count = rows.len();
 
         Ok(Self {
@@ -307,31 +424,162 @@ fn build_schema(
     Ok(Arc::new(Schema::new(fields)))
 }
 
-fn load_all_rows(
+/// `--select` で指定された列名を `read_attribute_schema` 結果から並べ替えて取り出す。
+/// 順序は **`--select` の順** を尊重する (PostGIS と同形)。
+/// `--select` には geometry 列名を含めて指定する必要がある。含まれない場合はエラー。
+fn filter_columns_by_select_with_geom(
+    all: &[ColumnPlan],
+    names: &[String],
+    geom_column: &str,
+) -> Result<Vec<ColumnPlan>> {
+    let mut found_geom = false;
+    let mut out = Vec::with_capacity(names.len());
+    for name in names {
+        if name.eq_ignore_ascii_case(geom_column) {
+            found_geom = true;
+            continue;
+        }
+        if let Some(c) = all.iter().find(|c| c.name == *name) {
+            out.push(c.clone());
+        } else {
+            let available: Vec<&str> = all.iter().map(|c| c.name.as_str()).collect();
+            return Err(driver_msg(format!(
+                "{DRIVER_NAME}: --select references unknown column `{name}` (available: {} + geometry `{geom_column}`)",
+                available.join(", ")
+            )));
+        }
+    }
+    if !found_geom {
+        return Err(driver_msg(format!(
+            "{DRIVER_NAME}: --select must include the geometry column `{geom_column}`; geometry-less extraction is not supported"
+        )));
+    }
+    Ok(out)
+}
+
+/// query モード probe 時の 1 行目の値タグ。型推定 (Arrow 型) と geometry 列特定
+/// (Blob のとき bytes を保持して spatialite_blob::decode を試行) のみに使う。
+#[derive(Debug)]
+enum ProbeValue {
+    Null,
+    Integer,
+    Real,
+    Text,
+    Blob(Vec<u8>),
+}
+
+impl ProbeValue {
+    fn from_value_ref(v: ValueRef<'_>) -> Self {
+        match v {
+            ValueRef::Null => Self::Null,
+            ValueRef::Integer(_) => Self::Integer,
+            ValueRef::Real(_) => Self::Real,
+            ValueRef::Text(_) => Self::Text,
+            ValueRef::Blob(b) => Self::Blob(b.to_vec()),
+        }
+    }
+
+    /// 1 行目の値から Arrow 型を推定する。Null は推定不能のため Utf8 fallback。
+    fn infer_arrow_type(&self) -> DataType {
+        match self {
+            Self::Null | Self::Text => DataType::Utf8,
+            Self::Integer => DataType::Int64,
+            Self::Real => DataType::Float64,
+            Self::Blob(_) => DataType::Binary,
+        }
+    }
+}
+
+/// WKB の geometry type code から `GeometryType` を逆引きする。SpatiaLite blob から
+/// `spatialite_blob::decode` で取り出した WKB のヘッダ (byte order + uint32) を読む。
+fn infer_geom_type_from_wkb(wkb: &[u8]) -> Option<GeometryType> {
+    if wkb.len() < 5 {
+        return None;
+    }
+    // byte 0: byte order (0 = big endian, 1 = little endian)
+    let little = wkb[0] == 1;
+    let bytes = [wkb[1], wkb[2], wkb[3], wkb[4]];
+    let code = if little {
+        u32::from_le_bytes(bytes)
+    } else {
+        u32::from_be_bytes(bytes)
+    };
+    // ベース geometry type のみ抽出 (XY / XYZ / XYM / XYZM の上位ビットを落とす)。
+    let base = code % 1000;
+    Some(match base {
+        1 => GeometryType::Point,
+        2 => GeometryType::LineString,
+        3 => GeometryType::Polygon,
+        4 => GeometryType::MultiPoint,
+        5 => GeometryType::MultiLineString,
+        6 => GeometryType::MultiPolygon,
+        7 => GeometryType::GeometryCollection,
+        _ => return None,
+    })
+}
+
+fn load_rows_table(
     conn: &Connection,
     table: &str,
     columns: &[ColumnPlan],
     geom_column: &str,
+    where_clause: Option<&str>,
 ) -> Result<Vec<Row>> {
     let mut select_cols: Vec<String> = columns.iter().map(|c| quote_ident(&c.name)).collect();
     select_cols.push(quote_ident(geom_column));
-    let sql = format!(
-        "SELECT {} FROM {}",
-        select_cols.join(", "),
-        quote_ident(table)
-    );
+    let sql = match where_clause.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(w) => format!(
+            "SELECT {} FROM {} WHERE {w}",
+            select_cols.join(", "),
+            quote_ident(table)
+        ),
+        None => format!(
+            "SELECT {} FROM {}",
+            select_cols.join(", "),
+            quote_ident(table)
+        ),
+    };
+    decode_all_rows(conn, &sql, columns, geom_column, columns.len())
+}
 
-    let mut stmt = conn.prepare(&sql).map_err(|e| driver_err(&e))?;
+/// query モード用: 本番 SQL `SELECT * FROM (user_query) AS shpx_q` から全件取得する。
+/// `geom_idx` は probe 時に確定した geometry 列のインデックス。
+fn load_rows_query(
+    conn: &Connection,
+    real_sql: &str,
+    columns: &[ColumnPlan],
+    geom_column: &str,
+    geom_idx: usize,
+) -> Result<Vec<Row>> {
+    decode_all_rows(conn, real_sql, columns, geom_column, geom_idx)
+}
+
+/// `sql` を実行し、`columns` (geometry を除く) を順序通りに decode、`geom_idx` の列を
+/// SpatiaLite blob として decode して `Row` のリストを返す。
+fn decode_all_rows(
+    conn: &Connection,
+    sql: &str,
+    columns: &[ColumnPlan],
+    geom_column: &str,
+    geom_idx: usize,
+) -> Result<Vec<Row>> {
+    let mut stmt = conn.prepare(sql).map_err(|e| driver_err(&e))?;
     let mut rows = stmt.query([]).map_err(|e| driver_err(&e))?;
 
     let mut out = Vec::new();
     while let Some(row) = rows.next().map_err(|e| driver_err(&e))? {
+        // ColumnPlan 側のインデックスは geometry 列を除いた順序、行の column_index は
+        // SQL 上の順序。geom_idx を境に attrs[i] と column_index を対応付ける。
         let mut attrs = Vec::with_capacity(columns.len());
-        for (i, c) in columns.iter().enumerate() {
-            let v = row.get_ref(i).map_err(|e| driver_err(&e))?;
+        for (col_pos, c) in columns.iter().enumerate() {
+            let row_idx = if col_pos < geom_idx {
+                col_pos
+            } else {
+                col_pos + 1
+            };
+            let v = row.get_ref(row_idx).map_err(|e| driver_err(&e))?;
             attrs.push(decode_value(v, &c.arrow_type, &c.name)?);
         }
-        let geom_idx = columns.len();
         let geom_v = row.get_ref(geom_idx).map_err(|e| driver_err(&e))?;
         let geom = match geom_v {
             ValueRef::Null => None,

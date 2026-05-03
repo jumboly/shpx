@@ -2518,6 +2518,7 @@ dependencies = [
  "serde_json",
  "shpx-core",
  "shpx-geom",
+ "shpx-rdb-common",
  "tempfile",
  "tracing",
  "tracing-subscriber",

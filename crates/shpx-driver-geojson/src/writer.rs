@@ -220,6 +220,13 @@ fn build_feature_json(
 }
 
 /// schema を走査して、出力できない型の列を `on_loss` に従って除外する。
+///
+/// `Decimal128` と `Timestamp(Nanosecond | Microsecond)` は per-row で発火すると
+/// バッチサイズ分だけ warn が氾濫するため、ここで per-column に解決する。
+/// `apply_on_loss` の戻り値:
+/// - `Err(_)` (`OnLoss::Error`) は即 abort
+/// - `Ok(true)` (`OnLoss::Warn`) は warn 後に列を残す → `arrow_value_to_json` で出力
+/// - `Ok(false)` (`OnLoss::Skip`) は列ごと properties から除外
 fn plan_skipped_columns(
     schema: &SchemaRef,
     geom_index: Option<usize>,
@@ -249,6 +256,16 @@ fn plan_skipped_columns(
                     )));
                 }
                 skipped.push(i);
+            }
+            DataType::Decimal128(_, _) => {
+                if !apply_on_loss(loss_kind::DECIMAL_ON_GEOJSON, f.name(), on_loss)? {
+                    skipped.push(i);
+                }
+            }
+            DataType::Timestamp(TimeUnit::Nanosecond | TimeUnit::Microsecond, _) => {
+                if !apply_on_loss(loss_kind::TIMESTAMP_PRECISION_ON_GEOJSON, f.name(), on_loss)? {
+                    skipped.push(i);
+                }
             }
             _ => {}
         }
@@ -289,7 +306,8 @@ fn arrow_value_to_json(
         ),
         DataType::Float64 => float_to_json(primitive::<Float64Type>(array, row), name, on_loss),
         DataType::Decimal128(_p, s) => {
-            apply_on_loss(loss_kind::DECIMAL_ON_GEOJSON, name, on_loss)?;
+            // plan_skipped_columns で per-column 解決済み (Error は abort、Skip は除外)。
+            // ここに来るのは Warn 経路だけなので一律に文字列化する。
             Ok(JsonValue::String(format_decimal128(
                 primitive::<Decimal128Type>(array, row),
                 *s,
