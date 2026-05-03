@@ -6,6 +6,7 @@
 //!
 //! 設計の詳細は `docs/DESIGN.md` を参照。
 
+pub mod bench_util;
 pub mod capabilities;
 pub mod crs;
 pub mod driver;
