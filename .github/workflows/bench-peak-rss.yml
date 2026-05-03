@@ -1,0 +1,196 @@
+# v0.8 reader streaming peak RSS bench (cycle 7d)。
+# workflow_dispatch only。1 driver × 1 job で計測する。**peak RSS = `/proc/self/status::VmHWM`
+# は単調増加かつリセット不可のため**、prepare phase (Parquet 入力 + native format 生成)
+# と read phase (reader streaming 計測) を別 process で実行する: 1 step 目で
+# `--prepare-only` で cache を作り、2 step 目で `--read-only` で reader だけ走らせて
+# clean な VmHWM を取得する。
+name: bench-peak-rss
+
+on:
+  workflow_dispatch:
+    inputs:
+      rows:
+        description: "Row count (smoke 100000、リリース判定は 10000000)"
+        required: false
+        default: "100000"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  file-drivers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        driver: [parquet, shp, fgb, csv, geojson-fc, geojson-ndjson, gpkg]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libproj-dev pkg-config
+      - name: Build
+        run: cargo build --release -p shpx-bench-rss --locked
+      - name: Prepare cache (separate process to keep VmHWM clean)
+        run: |
+          set -euxo pipefail
+          target/release/shpx-bench-rss \
+            --driver=${{ matrix.driver }} \
+            --rows=${{ github.event.inputs.rows }} \
+            --prepare-only
+      - name: Measure reader peak RSS
+        run: |
+          set -euxo pipefail
+          mkdir -p target/bench-output
+          target/release/shpx-bench-rss \
+            --driver=${{ matrix.driver }} \
+            --rows=${{ github.event.inputs.rows }} \
+            --read-only \
+            | tee target/bench-output/${{ matrix.driver }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: peak-rss-${{ matrix.driver }}-${{ github.event.inputs.rows }}
+          path: target/bench-output/${{ matrix.driver }}.json
+          if-no-files-found: error
+
+  spatialite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # libsqlite3-mod-spatialite を入れて動的 link で動かす。bundled-spatialite
+      # feature ではビルド時間が大きく増える (cmake+clang vendor build) ので、
+      # CI 計測用途は dynamic link で十分。
+      - run: |
+          sudo apt-get update && sudo apt-get install -y \
+            libproj-dev pkg-config libsqlite3-mod-spatialite
+      - name: Build
+        run: cargo build --release -p shpx-bench-rss --locked
+      - name: Prepare cache (separate process to keep VmHWM clean)
+        run: |
+          set -euxo pipefail
+          target/release/shpx-bench-rss \
+            --driver=spatialite \
+            --rows=${{ github.event.inputs.rows }} \
+            --prepare-only
+      - name: Measure reader peak RSS
+        run: |
+          set -euxo pipefail
+          mkdir -p target/bench-output
+          target/release/shpx-bench-rss \
+            --driver=spatialite \
+            --rows=${{ github.event.inputs.rows }} \
+            --read-only \
+            | tee target/bench-output/spatialite.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: peak-rss-spatialite-${{ github.event.inputs.rows }}
+          path: target/bench-output/spatialite.json
+          if-no-files-found: error
+
+  postgis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgis:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: shpx
+          POSTGRES_PASSWORD: shpx
+          POSTGRES_DB: shpx_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U shpx -d shpx_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      SHPX_TEST_PG_URL: pg://shpx:shpx@localhost:5432/shpx_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libproj-dev pkg-config
+      - name: Build
+        run: cargo build --release -p shpx-bench-rss --locked
+      - name: Prepare cache (separate process to keep VmHWM clean)
+        run: |
+          set -euxo pipefail
+          target/release/shpx-bench-rss \
+            --driver=postgis \
+            --rows=${{ github.event.inputs.rows }} \
+            --prepare-only
+      - name: Measure reader peak RSS
+        run: |
+          set -euxo pipefail
+          mkdir -p target/bench-output
+          target/release/shpx-bench-rss \
+            --driver=postgis \
+            --rows=${{ github.event.inputs.rows }} \
+            --read-only \
+            | tee target/bench-output/postgis.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: peak-rss-postgis-${{ github.event.inputs.rows }}
+          path: target/bench-output/postgis.json
+          if-no-files-found: error
+
+  sqlserver:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: "Shpx_test_pw1!"
+          MSSQL_PID: Developer
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P Shpx_test_pw1! -C -Q 'SELECT 1' || exit 1"
+          --health-interval 5s
+          --health-timeout 10s
+          --health-retries 30
+    env:
+      SHPX_TEST_SQLSERVER_URL: mssql://sa:Shpx_test_pw1!@localhost:1433/shpx_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libproj-dev pkg-config
+      - name: Create shpx_test database in mssql
+        run: |
+          set -euxo pipefail
+          docker exec ${{ job.services.mssql.id }} \
+            /opt/mssql-tools18/bin/sqlcmd \
+            -S localhost -U sa -P "Shpx_test_pw1!" -C \
+            -Q "IF DB_ID('shpx_test') IS NULL CREATE DATABASE shpx_test"
+      - name: Build
+        run: cargo build --release -p shpx-bench-rss --locked
+      - name: Prepare cache (separate process to keep VmHWM clean)
+        run: |
+          set -euxo pipefail
+          target/release/shpx-bench-rss \
+            --driver=sqlserver \
+            --rows=${{ github.event.inputs.rows }} \
+            --prepare-only
+      - name: Measure reader peak RSS
+        run: |
+          set -euxo pipefail
+          mkdir -p target/bench-output
+          target/release/shpx-bench-rss \
+            --driver=sqlserver \
+            --rows=${{ github.event.inputs.rows }} \
+            --read-only \
+            | tee target/bench-output/sqlserver.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: peak-rss-sqlserver-${{ github.event.inputs.rows }}
+          path: target/bench-output/sqlserver.json
+          if-no-files-found: error
