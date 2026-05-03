@@ -1,11 +1,14 @@
 //! `bundled-spatialite` feature 有効時に libspatialite を vendor から static link する build script。
 //!
-//! 現状のスコープは GEOS / PROJ / RTTOPO / libxml2 / freexl / iconv / minizip /
-//! geopackage を全 OFF にした最小構成。GeomFromWKB / AsBinary と R*Tree、
-//! `InitSpatialMetadata(1)` の WGS84 seed のみが利用可能。
+//! v0.6 cycle 2 時点のスコープ: GEOS は `geos-src` crate で同梱 (ON)。
+//! PROJ / RTTOPO / libxml2 / freexl / iconv / minizip / geopackage は OFF のまま。
+//! GeomFromWKB / AsBinary / R*Tree に加え、`ST_Buffer` 等の GEOS 依存関数も使える。
 //!
 //! sqlite3.h / sqlite3ext.h は libsqlite3-sys (`links = "sqlite3"`) が伝搬する
 //! `DEP_SQLITE3_INCLUDE` 経由で解決する。
+//! geos_c.h は `geos-src` 0.2.x が `DEP_GEOSSRC_*` を出さないため、本 build.rs から
+//! sibling の `target/<profile>/build/geos-src-<hash>/out/{include,lib}` を直接探す
+//! (`locate_geos_root` 参照)。
 
 #[cfg(not(feature = "bundled-spatialite"))]
 fn main() {
@@ -24,6 +27,20 @@ fn main() {
 
     let sqlite_include = std::env::var("DEP_SQLITE3_INCLUDE")
         .expect("DEP_SQLITE3_INCLUDE not set; libsqlite3-sys with `bundled` must be a direct dep");
+    // geos-src 0.2.x は include path を export せず、`cargo:lib=` / `cargo:search=`
+    // も build script を実行した crate 自身にしか効かない。`locate_geos_root` で
+    // sibling の OUT_DIR を解決し、include を `cc::Build` に feed、lib は消費側で
+    // 改めて `cargo:rustc-link-*` する。
+    let geos_root = locate_geos_root(&out_dir);
+    println!(
+        "cargo:rustc-link-search=native={}",
+        geos_root.join("lib").display()
+    );
+    // 順序が重要: libgeos_c は libgeos に依存。
+    println!("cargo:rustc-link-lib=static=geos_c");
+    println!("cargo:rustc-link-lib=static=geos");
+    // `gg_relations.c::evalGeosCache` が zlib の `crc32` を使う。OS 同梱の libz を動的リンク。
+    println!("cargo:rustc-link-lib=z");
 
     write_generated_headers(&out_dir);
 
@@ -34,6 +51,7 @@ fn main() {
         // baked in されていて ENABLE_RTTOPO=1 等になっている) を上書きする。
         .include(&out_dir)
         .include(&sqlite_include)
+        .include(geos_root.join("include"))
         .include(src_dir.join("headers"))
         .define("VERSION", "\"5.1.0\"")
         .warnings(false);
@@ -110,12 +128,55 @@ fn main() {
     build.compile("spatialite_bundled");
 }
 
+/// `target/<profile>/build/geos-src-<hash>/out` (= cmake install prefix) を探す。
+///
+/// 自分の OUT_DIR は `target/<profile>/build/shpx-driver-spatialite-<hash>/out` 形式。
+/// 親 (`build/`) を読んで `geos-src-` で始まり、配下に `out/include/geos_c.h` と
+/// `out/lib/libgeos_c.a` (Linux/macOS の cmake install) を持つディレクトリを返す。
+/// 複数バージョンが残っていた場合は mtime 最新を採用。
+#[cfg(feature = "bundled-spatialite")]
+fn locate_geos_root(out_dir: &std::path::Path) -> std::path::PathBuf {
+    let build_root = out_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("OUT_DIR has no <build_root> ancestor");
+
+    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    let entries = std::fs::read_dir(build_root)
+        .unwrap_or_else(|e| panic!("read_dir {} failed: {e}", build_root.display()));
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("geos-src-") {
+            continue;
+        }
+        let root = entry.path().join("out");
+        if !root.join("include/geos_c.h").exists() {
+            continue;
+        }
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        if best.as_ref().is_none_or(|(t, _)| mtime > *t) {
+            best = Some((mtime, root));
+        }
+    }
+    best.unwrap_or_else(|| {
+        panic!(
+            "could not locate geos-src OUT_DIR (expected {}/geos-src-*/out/include/geos_c.h). \
+             Make sure `geos-src` is declared as a build-dependency.",
+            build_root.display()
+        )
+    })
+    .1
+}
+
 /// libspatialite の OMIT_* スイッチ。`build.rs` から `cc::Build.define` する側と
-/// `OUT_DIR/spatialite/gaiaconfig.h` の `#define` 側で共有することで、cycle 2 以降
-/// (GEOS / PROJ を有効化していく際) の整合性ズレを防ぐ。
+/// `OUT_DIR/spatialite/gaiaconfig.h` の `#define` 側で共有することで、整合性ズレを防ぐ。
+/// v0.6 cycle 2 で `OMIT_GEOS` を解除 (`geos-src` 同梱)、PROJ は cycle 3 で解除予定。
 #[cfg(feature = "bundled-spatialite")]
 const OMIT_FEATURES: &[&str] = &[
-    "GEOS",
     "PROJ",
     "ICONV",
     "FREEXL",

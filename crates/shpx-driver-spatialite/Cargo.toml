@@ -14,7 +14,8 @@ workspace = true
 [features]
 # 配布バイナリ (cargo-dist) 用に libspatialite を vendor から `cc` で static link する。
 # 詳細スコープと cycle 構成は build.rs / docs/ROADMAP.md の v0.6 セクション参照。
-bundled-spatialite = []
+# bundle 経路は libgeos (geos-src) と C++ stdlib (link-cplusplus) を要求する。
+bundled-spatialite = ["dep:geos-src", "dep:link-cplusplus"]
 
 [dependencies]
 shpx-core       = { path = "../shpx-core" }
@@ -33,9 +34,13 @@ rusqlite     = { workspace = true, features = ["bundled", "blob", "chrono", "loa
 # build.rs が `DEP_SQLITE3_INCLUDE` (Cargo の `links = "sqlite3"` 伝搬) を読むため
 # rusqlite 経由ではなく direct dep として再宣言する (DEP_* env は直接依存にのみ渡る)。
 libsqlite3-sys = { version = "0.28", features = ["bundled"] }
+# C++ stdlib リンク (GEOS は C++)。`bundled-spatialite` 有効時のみ pull する。
+link-cplusplus = { workspace = true, optional = true }
 
 [build-dependencies]
 cc = { workspace = true }
+# libgeos の vendor build。`bundled-spatialite` 有効時のみ pull する。
+geos-src = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile           = { workspace = true }
