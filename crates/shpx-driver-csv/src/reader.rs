@@ -3,11 +3,26 @@
 //! 型推定は行わず、geometry 以外は **すべて `Utf8`** 列として読む。
 //! geometry 列は WKT を `shpx-geom::wkt::decode` でパースし、`shpx-geom::wkb::encode`
 //! で WKB に詰め直して `Binary` 列に格納する。
+//!
+//! # v0.8 cycle 1 — ストリーミング化
+//!
+//! eager-load (`body: Option<String>` で全行を文字列に展開) を廃止し、
+//! `csv::Reader<Box<dyn Read + Send>>` を field に保持して逐次読みに置き換えた。
+//! 巨大 CSV (10M 行) でも reader 開時のピーク RSS が batch サイズで頭打ちになる。
+//!
+//! geometry 型 sniff (最初の non-empty WKT 1 件から判定) はファイルを **2 回開く**
+//! 2-pass 方式で実装する。1 pass 目で header + 最初の non-empty geometry セルを取り、
+//! 2 pass 目で本番の streaming csv::Reader を構築する。CSV は通常そこまで巨大ではなく、
+//! 2 度 open する I/O オーバーヘッドは streaming 化の利点 (一定 RSS) に対して許容範囲。
+//!
+//! UTF-8 以外のエンコーディング (Shift_JIS など) は **暫定で eager に decode** したうえで
+//! `Cursor<String>` を `Box<dyn Read + Send>` として渡す (encoding_rs 単体に streaming
+//! Read アダプタがないため)。UTF-8 ファイル (実運用の大半) では真の streaming で動く。
 
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{BufReader, Read};
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, Cursor, Read};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow_array::{
@@ -25,8 +40,8 @@ use shpx_geom::{wkb, wkt};
 use crate::options::ResolvedReadOpts;
 use crate::util::{driver_err, driver_msg};
 
-/// 1 batch あたりの行数（hint）。CSV は per-row パース負荷が小さいので大きめに 4096。
-const READ_BATCH_SIZE: usize = 4096;
+/// 1 batch あたりの行数。
+const READ_BATCH_SIZE: usize = 65_536;
 
 /// geometry 列名の候補（同定優先順位、case-insensitive）。
 const GEOM_NAME_CANDIDATES: &[&str] = &["geometry", "geom", "wkt", "the_geom"];
@@ -36,10 +51,9 @@ pub struct CsvReader {
     schema: SchemaRef,
     crs: Option<Crs>,
     geom_index: usize,
-    /// 入力データ（UTF-8 復号済み）。`batches()` で 1 度だけ取り出す。
-    body: Option<String>,
-    delimiter: u8,
-    has_header: bool,
+    /// ストリーミング csv::Reader。`open()` で header を消費済みの状態。
+    /// `batches()` で `Option::take` して所有権を `BatchIter` に渡す。
+    inner: Option<csv::Reader<Box<dyn Read + Send>>>,
 }
 
 impl CsvReader {
@@ -47,38 +61,8 @@ impl CsvReader {
         let resolved = ResolvedReadOpts::resolve(uri, opts)?;
         let path = PathBuf::from(uri.path());
 
-        // UTF-8 はストリーム前提でも 1 度全読込で良い（CSV のサイズ感に対しては許容）。
-        // ただし非 UTF-8 はそもそも全読込してから encoding_rs で復号する必要があるため、
-        // どちらの経路でも `String` として保持してから `csv::Reader` に流す。
-        let body = read_decoded(&path, resolved.encoding)?;
-
-        // ヘッダ行 + 残データから schema を作る。
-        let mut rdr = csv::ReaderBuilder::new()
-            .delimiter(resolved.delimiter)
-            .has_headers(resolved.has_header)
-            .from_reader(body.as_bytes());
-
-        let header_names: Vec<String> = if resolved.has_header {
-            rdr.headers()
-                .map_err(|e| driver_err(&e))?
-                .iter()
-                .map(str::to_string)
-                .collect()
-        } else {
-            // ヘッダなし: 1 行目の列数から `c0..cN` を仮割当。
-            // v0.2 サイクル 1 では未対応として弾く（`docs/CSV.md` に明記）。
-            return Err(driver_msg(
-                "CSV without header is not supported in v0.2 cycle 1 (set SHPX_CSV_HAS_HEADER=true)",
-            ));
-        };
-
-        let geom_index = pick_geometry_column(&header_names, resolved.geometry_column.as_deref())?;
-
-        // 1 件目の non-empty WKT をスニフして geometry_type を決める。
-        // SHP writer のように単一型を要求する下流に変換する場合、`Geometry` は受け付けられない。
-        // 全行スキャンはしない（同じ列に複数型が混在する場合は最初の型を採用する近似）。
-        let geom_type =
-            sniff_geometry_type(&body, geom_index, resolved.delimiter, resolved.has_header)?;
+        // pass 1: header + sniff geometry type。
+        let (header_names, geom_index, geom_type) = sniff_pass(&path, &resolved)?;
 
         let schema = build_schema(
             &header_names,
@@ -87,27 +71,89 @@ impl CsvReader {
             resolved.src_crs.as_ref(),
         )?;
 
+        // pass 2: 本番 streaming reader。header は has_headers=true なら csv::Reader が
+        // 内部で消費するため batches() からは attribute 行のみが見える。
+        let inner = open_streaming_reader(&path, &resolved)?;
+
         Ok(Self {
             schema,
             crs: resolved.src_crs,
             geom_index,
-            body: Some(body),
-            delimiter: resolved.delimiter,
-            has_header: resolved.has_header,
+            inner: Some(inner),
         })
     }
 }
 
-fn read_decoded(path: &PathBuf, encoding: &'static Encoding) -> Result<String> {
-    if encoding == UTF_8 {
-        // ストリームでも良いが API シンプル化のため文字列で持つ。BOM は剥がす。
-        let mut s = String::new();
-        let mut f = BufReader::new(File::open(path).map_err(Error::from)?);
-        f.read_to_string(&mut s).map_err(Error::from)?;
-        if let Some(stripped) = s.strip_prefix('\u{feff}') {
-            return Ok(stripped.to_string());
+/// pass 1: ファイルを 1 度開いて header と最初の non-empty geometry セルから geom_type を sniff する。
+fn sniff_pass(
+    path: &Path,
+    resolved: &ResolvedReadOpts,
+) -> Result<(Vec<String>, usize, GeometryType)> {
+    let r = open_decoded_reader(path, resolved.encoding)?;
+    let mut rdr = csv::ReaderBuilder::new()
+        .delimiter(resolved.delimiter)
+        .has_headers(resolved.has_header)
+        .from_reader(r);
+
+    let header_names: Vec<String> = if resolved.has_header {
+        rdr.headers()
+            .map_err(|e| driver_err(&e))?
+            .iter()
+            .map(str::to_string)
+            .collect()
+    } else {
+        // ヘッダなし: v0.2 cycle 1 と同じく未対応として弾く。
+        return Err(driver_msg(
+            "CSV without header is not supported in v0.2 cycle 1 (set SHPX_CSV_HAS_HEADER=true)",
+        ));
+    };
+
+    let geom_index = pick_geometry_column(&header_names, resolved.geometry_column.as_deref())?;
+
+    // 1 件目の non-empty WKT セルから geometry_type を判定する。
+    // 全行は走査しない (混在 CSV では最初の型を採用する近似)。
+    let mut geom_type = GeometryType::Geometry;
+    for row in rdr.records() {
+        let row = row.map_err(|e| driver_err(&e))?;
+        if let Some(value) = row.get(geom_index) {
+            if !value.is_empty() {
+                geom_type = wkt_keyword_to_type(value);
+                break;
+            }
         }
-        Ok(s)
+    }
+
+    Ok((header_names, geom_index, geom_type))
+}
+
+/// pass 2: 本番 streaming csv::Reader。`has_headers=true` のとき先頭行は内部で skip される。
+fn open_streaming_reader(
+    path: &Path,
+    resolved: &ResolvedReadOpts,
+) -> Result<csv::Reader<Box<dyn Read + Send>>> {
+    let r = open_decoded_reader(path, resolved.encoding)?;
+    Ok(csv::ReaderBuilder::new()
+        .delimiter(resolved.delimiter)
+        .has_headers(resolved.has_header)
+        .from_reader(r))
+}
+
+/// path を開き、必要なら encoding を decode して `Box<dyn Read + Send>` を返す。
+///
+/// - **UTF-8**: 真の streaming (BufReader<File> + BOM strip)。
+/// - **その他**: 全件 read → `encoding_rs` で decode → `Cursor<Vec<u8>>` で wrap (eager)。
+///   encoding_rs 単体では Read アダプタが提供されないため。実運用ではほぼ UTF-8 なので
+///   この経路に入るのは稀。
+fn open_decoded_reader(path: &Path, encoding: &'static Encoding) -> Result<Box<dyn Read + Send>> {
+    if encoding == UTF_8 {
+        let f = File::open(path).map_err(Error::from)?;
+        let mut br = BufReader::new(f);
+        // BOM (EF BB BF) を fill_buf + consume(3) で剥がす。seek 不要なので Read の最小要件で動作。
+        let buf = br.fill_buf().map_err(Error::from)?;
+        if buf.starts_with(b"\xEF\xBB\xBF") {
+            br.consume(3);
+        }
+        Ok(Box::new(br))
     } else {
         let raw = fs::read(path).map_err(Error::from)?;
         let (cow, _, had_errors) = encoding.decode(&raw);
@@ -118,7 +164,8 @@ fn read_decoded(path: &PathBuf, encoding: &'static Encoding) -> Result<String> {
                 "encoding decode produced replacement characters"
             );
         }
-        Ok(cow.into_owned())
+        let bytes = cow.into_owned().into_bytes();
+        Ok(Box::new(Cursor::new(bytes)))
     }
 }
 
@@ -161,31 +208,6 @@ fn build_schema(
     Ok(Arc::new(Schema::new(fields)))
 }
 
-/// 最初の non-empty geometry セルから WKT keyword を抽出して [`GeometryType`] を決める。
-///
-/// 全件確定型ではなく「最初に出てきた型を採用」する近似スニフ。SHP のように単一型を要求する
-/// 下流向けに型注釈を付ける目的で、混在 CSV では型不一致のエラーが SHP 側で出る想定。
-fn sniff_geometry_type(
-    body: &str,
-    geom_index: usize,
-    delimiter: u8,
-    has_header: bool,
-) -> Result<GeometryType> {
-    let mut rdr = csv::ReaderBuilder::new()
-        .delimiter(delimiter)
-        .has_headers(has_header)
-        .from_reader(body.as_bytes());
-    for row in rdr.records() {
-        let row = row.map_err(|e| driver_err(&e))?;
-        if let Some(value) = row.get(geom_index) {
-            if !value.is_empty() {
-                return Ok(wkt_keyword_to_type(value));
-            }
-        }
-    }
-    Ok(GeometryType::Geometry)
-}
-
 fn wkt_keyword_to_type(s: &str) -> GeometryType {
     let trimmed = s.trim_start();
     let upper: String = trimmed
@@ -218,28 +240,20 @@ impl LayerReader for CsvReader {
     }
 
     fn batches(&mut self) -> Box<dyn Iterator<Item = Result<RecordBatch>> + Send + '_> {
-        let body = self.body.take();
+        let inner = self.inner.take();
         Box::new(BatchIter {
             schema: self.schema.clone(),
             geom_index: self.geom_index,
-            inner: body.map(|b| {
-                csv::ReaderBuilder::new()
-                    .delimiter(self.delimiter)
-                    .has_headers(self.has_header)
-                    .from_reader(std::io::Cursor::new(b.into_bytes()))
-            }),
-            done: false,
+            inner,
         })
     }
 }
 
-type BodyReader = csv::Reader<std::io::Cursor<Vec<u8>>>;
-
 struct BatchIter {
     schema: SchemaRef,
     geom_index: usize,
-    inner: Option<BodyReader>,
-    done: bool,
+    /// `None` = 全 streaming 完了。エラー後も None にして再呼び出しを停止させる。
+    inner: Option<csv::Reader<Box<dyn Read + Send>>>,
 }
 
 impl BatchIter {
@@ -249,10 +263,14 @@ impl BatchIter {
         };
         let n_cols = self.schema.fields().len();
         // geom_index の位置だけ `None` にしておき、attribute 列にだけ StringBuilder を割り当てる。
+        // capacity 予約で 65536 行 append 中の realloc を回避する。
         let mut string_builders: Vec<Option<StringBuilder>> = (0..n_cols)
-            .map(|i| (i != self.geom_index).then(StringBuilder::new))
+            .map(|i| {
+                (i != self.geom_index)
+                    .then(|| StringBuilder::with_capacity(READ_BATCH_SIZE, READ_BATCH_SIZE * 16))
+            })
             .collect();
-        let mut binary_builder = BinaryBuilder::new();
+        let mut binary_builder = BinaryBuilder::with_capacity(READ_BATCH_SIZE, READ_BATCH_SIZE * 32);
         let mut row_count = 0usize;
 
         for row in inner.records() {
@@ -311,17 +329,14 @@ impl Iterator for BatchIter {
     type Item = Result<RecordBatch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.done {
-            return None;
-        }
         match self.next_batch() {
             Ok(Some(batch)) => Some(Ok(batch)),
             Ok(None) => {
-                self.done = true;
+                self.inner = None;
                 None
             }
             Err(e) => {
-                self.done = true;
+                self.inner = None;
                 Some(Err(e))
             }
         }

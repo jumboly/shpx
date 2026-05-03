@@ -1,6 +1,15 @@
 //! SpatiaLite の `LayerReader` 実装。
 //!
-//! v0.5 cycle 1 では GPKG reader と同じ eager-load 方式 (`Vec<Row>`) を採用する。
+//! v0.8 cycle 2 で eager-load (`Vec<Row>`) をやめ、`shpx_rdb_common::streaming::{KeysetRowsIter,
+//! OffsetRowsIter}` 経由の真のストリーミング読みに置き換えた。
+//!
+//! - **table モード** (`?table=...` / `--where` / `--select`): rowid keyset pagination
+//!   (`SELECT ..., rowid FROM <table> WHERE rowid > ? ORDER BY rowid LIMIT ?`)。
+//!   WITHOUT ROWID テーブルは v0.8 では明示エラー (rowid を持たないため)。
+//! - **query モード** (`--query '<sql>'`): 任意 SQL を `LIMIT/OFFSET` でページングする
+//!   `OffsetRowsIter` fallback。大きい OFFSET でスキャンが遅くなるため、巨大テーブルは
+//!   table モードを推奨。
+//!
 //! geometry 列は生 BLOB を取り出して [`shpx_geom::spatialite_blob::decode`] で SRID と
 //! 標準 WKB を分離する。SRID は `geometry_columns` (列メタ) と `spatial_ref_sys` (CRS 定義)
 //! の 2 段で解決する。
@@ -16,11 +25,15 @@ use arrow_array::builder::{
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use chrono::NaiveDate;
-use rusqlite::{types::ValueRef, Connection};
+use rusqlite::{
+    types::{Value, ValueRef},
+    Connection,
+};
 use shpx_core::{
     schema::{GeometryMeta, GeometryType, GEOMETRY_META_KEY},
     Crs, Error, LayerReader, ReadOpts, Result, Uri, WktFlavor,
 };
+use shpx_rdb_common::streaming::{KeysetRowsIter, OffsetRowsIter, RowBatch};
 
 use crate::conn;
 use crate::meta;
@@ -28,7 +41,7 @@ use crate::options::{strip_to_filepath, validate_user_query, ResolvedReadOpts};
 use crate::type_map;
 use crate::util::{driver_err, driver_msg, quote_ident, DRIVER_NAME};
 
-const READ_BATCH_SIZE: usize = 4096;
+const READ_BATCH_SIZE: usize = 65_536;
 
 fn epoch() -> NaiveDate {
     NaiveDate::from_ymd_opt(1970, 1, 1).expect("1970-01-01 valid")
@@ -46,24 +59,36 @@ enum AttrValue {
     TimestampUs(i64),
 }
 
-#[derive(Debug)]
-struct Row {
-    attrs: Vec<AttrValue>,
-    geom: Option<Vec<u8>>,
-}
-
 #[derive(Debug, Clone)]
 struct ColumnPlan {
     name: String,
     arrow_type: DataType,
 }
 
+/// streaming pagination モード。`batches()` の分岐を表現する。
+enum StreamMode {
+    /// table モード: rowid keyset。SQL は `SELECT cols, geom, rowid FROM table WHERE ... AND rowid > ?1 ORDER BY rowid LIMIT ?2`。
+    /// `geom_idx_in_row` は `RowBatch.rows[i]` の中での geometry 列の位置 (= columns.len())。
+    Keyset {
+        sql_template: String,
+        geom_idx_in_row: usize,
+    },
+    /// query モード: LIMIT/OFFSET pagination。SQL は `SELECT * FROM (user_query) AS shpx_q LIMIT ?1 OFFSET ?2`。
+    /// `geom_idx_in_row` は probe で確定した geometry 列の位置。
+    Offset {
+        sql_template: String,
+        geom_idx_in_row: usize,
+    },
+}
+
 pub struct SpatialiteReader {
     schema: SchemaRef,
     crs: Option<Crs>,
     columns: Vec<ColumnPlan>,
-    rows: std::collections::VecDeque<Row>,
-    row_count: usize,
+    geom_column: String,
+    row_count: Option<usize>,
+    mode: StreamMode,
+    conn: Connection,
 }
 
 impl SpatialiteReader {
@@ -82,27 +107,34 @@ impl SpatialiteReader {
         let conn = conn::open_read(&path)?;
 
         if let Some(query) = opts.query.as_deref() {
-            Self::open_query_mode(&conn, query, opts)
+            Self::open_query_mode(conn, query, opts)
         } else {
             let resolved = ResolvedReadOpts::resolve(uri, opts)?;
-            Self::open_table_mode(&conn, &resolved, opts)
+            Self::open_table_mode(conn, &resolved, opts)
         }
     }
 
     fn open_table_mode(
-        conn: &Connection,
+        conn: Connection,
         resolved: &ResolvedReadOpts,
         opts: &ReadOpts,
     ) -> Result<Self> {
-        let table = resolve_table_name(conn, resolved.table.as_deref())?;
-        let (geom_column, geom_type_int, srid) = read_geometry_column(conn, &table)?;
+        let table = resolve_table_name(&conn, resolved.table.as_deref())?;
+        // WITHOUT ROWID テーブルは rowid を持たないため keyset pagination 不可。
+        // v0.8 streaming は明示エラーで弾く (LIMIT/OFFSET fallback はリスクが大きいので未採用)。
+        if is_without_rowid_table(&conn, &table)? {
+            return Err(driver_msg(format!(
+                "{DRIVER_NAME}: table `{table}` is WITHOUT ROWID; not supported by v0.8 streaming reader. Use --query for arbitrary SQL or rebuild the table with rowid"
+            )));
+        }
+        let (geom_column, geom_type_int, srid) = read_geometry_column(&conn, &table)?;
 
         let crs = match &resolved.src_crs {
             Some(c) => Some(c.clone()),
-            None => read_crs_for_srid(conn, srid)?,
+            None => read_crs_for_srid(&conn, srid)?,
         };
 
-        let all_columns = read_attribute_schema(conn, &table, &geom_column)?;
+        let all_columns = read_attribute_schema(&conn, &table, &geom_column)?;
         let columns = match opts.select.as_deref() {
             None => all_columns,
             Some(names) => filter_columns_by_select_with_geom(&all_columns, names, &geom_column)?,
@@ -110,25 +142,26 @@ impl SpatialiteReader {
         let geom_type = meta::geom_type_from_int(geom_type_int);
         let schema = build_schema(&columns, &geom_column, geom_type, crs.as_ref())?;
 
-        let rows = load_rows_table(
-            conn,
-            &table,
-            &columns,
-            &geom_column,
-            opts.where_clause.as_deref(),
-        )?;
-        let row_count = rows.len();
+        let row_count = count_rows_table(&conn, &table, opts.where_clause.as_deref())?;
+        let sql_template =
+            build_table_keyset_sql(&table, &columns, &geom_column, opts.where_clause.as_deref());
+        let geom_idx_in_row = columns.len();
 
         Ok(Self {
             schema,
             crs,
             columns,
-            rows: rows.into(),
-            row_count,
+            geom_column,
+            row_count: Some(row_count),
+            mode: StreamMode::Keyset {
+                sql_template,
+                geom_idx_in_row,
+            },
+            conn,
         })
     }
 
-    fn open_query_mode(conn: &Connection, user_query: &str, opts: &ReadOpts) -> Result<Self> {
+    fn open_query_mode(conn: Connection, user_query: &str, opts: &ReadOpts) -> Result<Self> {
         // ユーザ SQL を `LIMIT 1` でサブクエリ化し、(列名, 1 行目の値) から schema を
         // 推定する。0 行ヒット時は型推定不能のため明示エラー。geometry 列は probe ループ内
         // で「最初に spatialite_blob として decode できた BLOB 列」と判定し、SRID と
@@ -168,21 +201,21 @@ impl SpatialiteReader {
             }
             probe_kinds.push(ProbeKind::from(&v));
         }
-        // probe stmt の borrow を切る。本番 SELECT は再 prepare する。
+        // probe stmt の borrow を切る。本番 SELECT は OffsetRowsIter で再 prepare する。
         drop(rows_iter);
         drop(stmt);
 
-        let (geom_idx, geom_srid, geom_type) = geom_info.ok_or_else(|| {
+        let (geom_idx_in_row, geom_srid, geom_type) = geom_info.ok_or_else(|| {
             driver_msg(format!(
                 "{DRIVER_NAME}: --query result does not contain a SpatiaLite geometry column"
             ))
         })?;
-        let geom_column = names[geom_idx].clone();
+        let geom_column = names[geom_idx_in_row].clone();
 
         // 属性 schema (geometry 列を除く)。
         let mut columns: Vec<ColumnPlan> = Vec::with_capacity(names.len() - 1);
         for (i, name) in names.iter().enumerate() {
-            if i == geom_idx {
+            if i == geom_idx_in_row {
                 continue;
             }
             columns.push(ColumnPlan {
@@ -193,20 +226,24 @@ impl SpatialiteReader {
 
         let crs = match &opts.src_crs {
             Some(c) => Some(c.clone()),
-            None => read_crs_for_srid(conn, geom_srid)?,
+            None => read_crs_for_srid(&conn, geom_srid)?,
         };
         let schema = build_schema(&columns, &geom_column, geom_type, crs.as_ref())?;
 
-        let real_sql = format!("SELECT * FROM ({user_query}) AS shpx_q");
-        let rows = load_rows_query(conn, &real_sql, &columns, &geom_column, geom_idx)?;
-        let row_count = rows.len();
+        // query モードでは row_count は事前に取れない (任意 SQL の COUNT(*) は副作用化しうる)
+        let sql_template = format!("SELECT * FROM ({user_query}) AS shpx_q LIMIT ?1 OFFSET ?2");
 
         Ok(Self {
             schema,
             crs,
             columns,
-            rows: rows.into(),
-            row_count,
+            geom_column,
+            row_count: None,
+            mode: StreamMode::Offset {
+                sql_template,
+                geom_idx_in_row,
+            },
+            conn,
         })
     }
 }
@@ -221,38 +258,102 @@ impl LayerReader for SpatialiteReader {
     }
 
     fn row_count_hint(&self) -> Option<usize> {
-        Some(self.row_count)
+        self.row_count
     }
 
     fn batches(&mut self) -> Box<dyn Iterator<Item = Result<RecordBatch>> + Send + '_> {
-        Box::new(BatchIter {
-            reader: self,
-            done: false,
-        })
+        let columns = self.columns.clone();
+        let geom_column = self.geom_column.clone();
+        let schema = self.schema.clone();
+        match &self.mode {
+            StreamMode::Keyset {
+                sql_template,
+                geom_idx_in_row,
+            } => {
+                let inner = KeysetRowsIter::new(
+                    &mut self.conn,
+                    sql_template.clone(),
+                    READ_BATCH_SIZE,
+                    DRIVER_NAME,
+                );
+                Box::new(KeysetBatchIter {
+                    inner,
+                    columns,
+                    geom_column,
+                    schema,
+                    geom_idx_in_row: *geom_idx_in_row,
+                })
+            }
+            StreamMode::Offset {
+                sql_template,
+                geom_idx_in_row,
+            } => {
+                let inner = OffsetRowsIter::new(
+                    &mut self.conn,
+                    sql_template.clone(),
+                    READ_BATCH_SIZE,
+                    DRIVER_NAME,
+                );
+                Box::new(OffsetBatchIter {
+                    inner,
+                    columns,
+                    geom_column,
+                    schema,
+                    geom_idx_in_row: *geom_idx_in_row,
+                })
+            }
+        }
     }
 }
 
-struct BatchIter<'a> {
-    reader: &'a mut SpatialiteReader,
-    done: bool,
+struct KeysetBatchIter<'a> {
+    inner: KeysetRowsIter<'a>,
+    columns: Vec<ColumnPlan>,
+    geom_column: String,
+    schema: SchemaRef,
+    /// `RowBatch.rows[i]` の中で geometry 列が居るインデックス。table モードでは
+    /// columns.len() (末尾、rowid は KeysetRowsIter が内部消費)。
+    geom_idx_in_row: usize,
 }
 
-impl Iterator for BatchIter<'_> {
+impl Iterator for KeysetBatchIter<'_> {
     type Item = Result<RecordBatch>;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.done {
-            return None;
+        match self.inner.next_batch() {
+            Ok(Some(rb)) => Some(build_record_batch(
+                rb,
+                &self.columns,
+                &self.geom_column,
+                &self.schema,
+                self.geom_idx_in_row,
+            )),
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
         }
-        match build_one_batch(self.reader) {
-            Ok(Some(b)) => Some(Ok(b)),
-            Ok(None) => {
-                self.done = true;
-                None
-            }
-            Err(e) => {
-                self.done = true;
-                Some(Err(e))
-            }
+    }
+}
+
+struct OffsetBatchIter<'a> {
+    inner: OffsetRowsIter<'a>,
+    columns: Vec<ColumnPlan>,
+    geom_column: String,
+    schema: SchemaRef,
+    geom_idx_in_row: usize,
+}
+
+impl Iterator for OffsetBatchIter<'_> {
+    type Item = Result<RecordBatch>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.inner.next_batch() {
+            Ok(Some(rb)) => Some(build_record_batch(
+                rb,
+                &self.columns,
+                &self.geom_column,
+                &self.schema,
+                self.geom_idx_in_row,
+            )),
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
         }
     }
 }
@@ -314,6 +415,24 @@ fn read_geometry_column(conn: &Connection, table: &str) -> Result<(String, i32, 
         )));
     }
     Ok((geom_column, geom_type, srid))
+}
+
+/// CREATE TABLE SQL に `WITHOUT ROWID` 修飾子があるかを判定する。
+/// SQLite が sqlite_master.sql にユーザ宣言を保持しているため、文字列マッチで判定可能。
+///
+/// **既知の偽陽性**: CREATE TABLE 文中のコメント (`-- WITHOUT ROWID for ref`) や、
+/// 列名 / リテラルに `WITHOUT ROWID` 文字列が偶然含まれている場合に誤検出する。
+/// この場合 streaming reader は open() で reject されるが、SQLite には PRAGMA で
+/// WITHOUT ROWID を直接判定する API が無いため (`sqlite_master.sql` テキストマッチが
+/// 正攻法)、ユーザは該当の文字列を回避するか driver の table を再構築する必要がある。
+fn is_without_rowid_table(conn: &Connection, table: &str) -> Result<bool> {
+    let sql = "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1 AND UPPER(sql) LIKE '%WITHOUT ROWID%' LIMIT 1";
+    let n: std::result::Result<i64, _> = conn.query_row(sql, [table], |row| row.get(0));
+    match n {
+        Ok(_) => Ok(true),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+        Err(e) => Err(driver_err(&e)),
+    }
 }
 
 fn read_crs_for_srid(conn: &Connection, srid: i32) -> Result<Option<Crs>> {
@@ -515,88 +634,112 @@ fn infer_geom_type_from_wkb(wkb: &[u8]) -> Option<GeometryType> {
     })
 }
 
-fn load_rows_table(
-    conn: &Connection,
+/// table モード用 keyset SQL を構築する。`--where` がある場合は WHERE (user) AND rowid > ?1。
+/// SELECT の列順は columns 順 → geometry 列 → rowid (KeysetRowsIter が末尾を消費)。
+fn build_table_keyset_sql(
     table: &str,
     columns: &[ColumnPlan],
     geom_column: &str,
     where_clause: Option<&str>,
-) -> Result<Vec<Row>> {
+) -> String {
     let mut select_cols: Vec<String> = columns.iter().map(|c| quote_ident(&c.name)).collect();
     select_cols.push(quote_ident(geom_column));
-    let sql = match where_clause.map(str::trim).filter(|s| !s.is_empty()) {
+    select_cols.push("rowid".to_string());
+    match where_clause.map(str::trim).filter(|s| !s.is_empty()) {
         Some(w) => format!(
-            "SELECT {} FROM {} WHERE {w}",
+            "SELECT {} FROM {} WHERE ({w}) AND rowid > ?1 ORDER BY rowid LIMIT ?2",
             select_cols.join(", "),
             quote_ident(table)
         ),
         None => format!(
-            "SELECT {} FROM {}",
+            "SELECT {} FROM {} WHERE rowid > ?1 ORDER BY rowid LIMIT ?2",
             select_cols.join(", "),
             quote_ident(table)
         ),
+    }
+}
+
+fn count_rows_table(
+    conn: &Connection,
+    table: &str,
+    where_clause: Option<&str>,
+) -> Result<usize> {
+    let sql = match where_clause.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(w) => format!("SELECT COUNT(*) FROM {} WHERE ({w})", quote_ident(table)),
+        None => format!("SELECT COUNT(*) FROM {}", quote_ident(table)),
     };
-    decode_all_rows(conn, &sql, columns, geom_column, columns.len())
+    let n: i64 = conn
+        .query_row(&sql, [], |row| row.get(0))
+        .map_err(|e| driver_err(&e))?;
+    usize::try_from(n).map_err(|_| driver_msg(format!("row count {n} exceeds usize")))
 }
 
-/// query モード用: 本番 SQL `SELECT * FROM (user_query) AS shpx_q` から全件取得する。
-/// `geom_idx` は probe 時に確定した geometry 列のインデックス。
-fn load_rows_query(
-    conn: &Connection,
-    real_sql: &str,
+/// `RowBatch` (rusqlite::Value 配列) を Arrow RecordBatch に変換する。
+/// table / query モード共通: `geom_idx_in_row` で row 内の geometry 列位置を指す。
+///
+/// `rb` を所有権で受けて各 Value を move 消費することで、Text / Blob の double clone を回避する
+/// (`row.get::<_, Value>(i)` で 1 回 alloc 済みのため、再 clone は無駄)。
+fn build_record_batch(
+    rb: RowBatch,
     columns: &[ColumnPlan],
     geom_column: &str,
-    geom_idx: usize,
-) -> Result<Vec<Row>> {
-    decode_all_rows(conn, real_sql, columns, geom_column, geom_idx)
-}
+    schema: &SchemaRef,
+    geom_idx_in_row: usize,
+) -> Result<RecordBatch> {
+    let n_rows = rb.rows.len();
+    let mut attr_builders: Vec<AttrBuilder> = columns
+        .iter()
+        .map(|c| AttrBuilder::new(&c.arrow_type, n_rows))
+        .collect::<Result<Vec<_>>>()?;
+    let mut geom_builder = BinaryBuilder::with_capacity(n_rows, n_rows * 32);
 
-/// `sql` を実行し、`columns` (geometry を除く) を順序通りに decode、`geom_idx` の列を
-/// SpatiaLite blob として decode して `Row` のリストを返す。
-fn decode_all_rows(
-    conn: &Connection,
-    sql: &str,
-    columns: &[ColumnPlan],
-    geom_column: &str,
-    geom_idx: usize,
-) -> Result<Vec<Row>> {
-    let mut stmt = conn.prepare(sql).map_err(|e| driver_err(&e))?;
-    let mut rows = stmt.query([]).map_err(|e| driver_err(&e))?;
-
-    let mut out = Vec::new();
-    while let Some(row) = rows.next().map_err(|e| driver_err(&e))? {
-        // ColumnPlan 側のインデックスは geometry 列を除いた順序、行の column_index は
-        // SQL 上の順序。geom_idx を境に attrs[i] と column_index を対応付ける。
-        let mut attrs = Vec::with_capacity(columns.len());
-        for (col_pos, c) in columns.iter().enumerate() {
-            let row_idx = if col_pos < geom_idx {
-                col_pos
+    for row in rb.rows {
+        // row 中、geom_idx_in_row の Value だけ取り出して geometry に、残りの Value は
+        // 順序通り attrs に流し込む。Vec から個別 index で move out できないので、
+        // `into_iter` で順次取り出して enumerate で位置判定する。
+        let mut attr_pos = 0usize;
+        let mut geom_value: Option<Value> = None;
+        for (i, v) in row.into_iter().enumerate() {
+            if i == geom_idx_in_row {
+                geom_value = Some(v);
             } else {
-                col_pos + 1
-            };
-            let v = row.get_ref(row_idx).map_err(|e| driver_err(&e))?;
-            attrs.push(decode_value(v, &c.arrow_type, &c.name)?);
+                let c = &columns[attr_pos];
+                let attr = decode_value(v, &c.arrow_type, &c.name)?;
+                attr_builders[attr_pos].push_owned(attr, &c.name)?;
+                attr_pos += 1;
+            }
         }
-        let geom_v = row.get_ref(geom_idx).map_err(|e| driver_err(&e))?;
-        let geom = match geom_v {
-            ValueRef::Null => None,
-            ValueRef::Blob(b) => {
-                let (_srid, wkb_bytes) = shpx_geom::spatialite_blob::decode(b)?;
-                Some(wkb_bytes)
+        let geom_v = geom_value.ok_or_else(|| {
+            driver_msg(format!(
+                "row missing geometry column at index {geom_idx_in_row}"
+            ))
+        })?;
+        match geom_v {
+            Value::Null => geom_builder.append_null(),
+            Value::Blob(b) => {
+                let (_srid, wkb_bytes) = shpx_geom::spatialite_blob::decode(&b)?;
+                geom_builder.append_value(&wkb_bytes);
             }
             other => {
                 return Err(driver_msg(format!(
                     "geometry column `{geom_column}` is not BLOB ({other:?})"
                 )));
             }
-        };
-        out.push(Row { attrs, geom });
+        }
     }
-    Ok(out)
+
+    let mut out_columns: Vec<ArrayRef> = Vec::with_capacity(attr_builders.len() + 1);
+    for b in attr_builders {
+        out_columns.push(b.finish());
+    }
+    out_columns.push(Arc::new(geom_builder.finish()) as ArrayRef);
+
+    RecordBatch::try_new(schema.clone(), out_columns)
+        .map_err(|e| driver_msg(format!("RecordBatch::try_new failed: {e}")))
 }
 
-fn decode_value(v: ValueRef<'_>, target: &DataType, field: &str) -> Result<AttrValue> {
-    if matches!(v, ValueRef::Null) {
+fn decode_value(v: Value, target: &DataType, field: &str) -> Result<AttrValue> {
+    if matches!(v, Value::Null) {
         return Ok(AttrValue::Null);
     }
     match target {
@@ -607,89 +750,111 @@ fn decode_value(v: ValueRef<'_>, target: &DataType, field: &str) -> Result<AttrV
         DataType::Float32 | DataType::Float64 => Ok(AttrValue::Float(coerce_float(v, field)?)),
         DataType::Utf8 => Ok(AttrValue::Text(coerce_text(v))),
         DataType::Binary => match v {
-            ValueRef::Blob(b) => Ok(AttrValue::Blob(b.to_vec())),
+            Value::Blob(b) => Ok(AttrValue::Blob(b)),
             other => Err(driver_msg(format!(
                 "field `{field}`: expected BLOB, got {other:?}"
             ))),
         },
-        DataType::Date32 => match v {
-            ValueRef::Text(s) | ValueRef::Blob(s) => {
-                let txt = std::str::from_utf8(s).map_err(|e| driver_err(&e))?;
-                let nd = NaiveDate::parse_from_str(txt, "%Y-%m-%d").map_err(|e| {
-                    driver_msg(format!("field `{field}`: invalid DATE `{txt}`: {e}"))
-                })?;
-                let days = nd.signed_duration_since(epoch()).num_days();
-                let days32 = i32::try_from(days).map_err(|_| {
-                    driver_msg(format!("field `{field}`: DATE out of Date32 range: {txt}"))
-                })?;
-                Ok(AttrValue::Date(days32))
-            }
-            other => Err(driver_msg(format!(
-                "field `{field}`: expected DATE TEXT, got {other:?}"
-            ))),
-        },
-        DataType::Timestamp(TimeUnit::Microsecond, None) => match v {
-            ValueRef::Text(s) | ValueRef::Blob(s) => {
-                let txt = std::str::from_utf8(s).map_err(|e| driver_err(&e))?;
-                let micros = parse_iso_timestamp_micros(txt).map_err(|e| {
-                    driver_msg(format!("field `{field}`: invalid DATETIME `{txt}`: {e}"))
-                })?;
-                Ok(AttrValue::TimestampUs(micros))
-            }
-            other => Err(driver_msg(format!(
-                "field `{field}`: expected DATETIME TEXT, got {other:?}"
-            ))),
-        },
+        DataType::Date32 => decode_date32(v, field),
+        DataType::Timestamp(TimeUnit::Microsecond, None) => decode_timestamp_us(v, field),
         other => Err(Error::Schema(format!(
             "field `{field}`: unsupported target Arrow type {other:?}"
         ))),
     }
 }
 
-fn coerce_int(v: ValueRef<'_>, field: &str) -> Result<i64> {
+fn decode_date32(v: Value, field: &str) -> Result<AttrValue> {
+    let txt: String = match v {
+        Value::Text(s) => s,
+        Value::Blob(b) => {
+            String::from_utf8(b).map_err(|e| driver_msg(format!("field `{field}`: {e}")))?
+        }
+        other => {
+            return Err(driver_msg(format!(
+                "field `{field}`: expected DATE TEXT, got {other:?}"
+            )))
+        }
+    };
+    let nd = NaiveDate::parse_from_str(&txt, "%Y-%m-%d")
+        .map_err(|e| driver_msg(format!("field `{field}`: invalid DATE `{txt}`: {e}")))?;
+    let days = nd.signed_duration_since(epoch()).num_days();
+    let days32 = i32::try_from(days)
+        .map_err(|_| driver_msg(format!("field `{field}`: DATE out of Date32 range: {txt}")))?;
+    Ok(AttrValue::Date(days32))
+}
+
+fn decode_timestamp_us(v: Value, field: &str) -> Result<AttrValue> {
+    let txt: String = match v {
+        Value::Text(s) => s,
+        Value::Blob(b) => {
+            String::from_utf8(b).map_err(|e| driver_msg(format!("field `{field}`: {e}")))?
+        }
+        other => {
+            return Err(driver_msg(format!(
+                "field `{field}`: expected DATETIME TEXT, got {other:?}"
+            )))
+        }
+    };
+    let micros = parse_iso_timestamp_micros(&txt)
+        .map_err(|e| driver_msg(format!("field `{field}`: invalid DATETIME `{txt}`: {e}")))?;
+    Ok(AttrValue::TimestampUs(micros))
+}
+
+fn coerce_int(v: Value, field: &str) -> Result<i64> {
     match v {
-        ValueRef::Integer(i) => Ok(i),
+        Value::Integer(i) => Ok(i),
         #[allow(clippy::cast_possible_truncation)]
-        ValueRef::Real(f) => Ok(f as i64),
-        ValueRef::Text(s) | ValueRef::Blob(s) => {
-            let txt = std::str::from_utf8(s).map_err(|e| driver_err(&e))?;
+        Value::Real(f) => Ok(f as i64),
+        Value::Text(s) => s.parse::<i64>().map_err(|e| {
+            driver_msg(format!(
+                "field `{field}`: cannot coerce TEXT `{s}` to INTEGER: {e}"
+            ))
+        }),
+        Value::Blob(b) => {
+            let txt = std::str::from_utf8(&b).map_err(|e| driver_err(&e))?;
             txt.parse::<i64>().map_err(|e| {
                 driver_msg(format!(
                     "field `{field}`: cannot coerce TEXT `{txt}` to INTEGER: {e}"
                 ))
             })
         }
-        ValueRef::Null => Err(driver_msg(format!(
+        Value::Null => Err(driver_msg(format!(
             "field `{field}`: NULL passed to coerce_int"
         ))),
     }
 }
 
-fn coerce_float(v: ValueRef<'_>, field: &str) -> Result<f64> {
+fn coerce_float(v: Value, field: &str) -> Result<f64> {
     match v {
-        ValueRef::Real(f) => Ok(f),
+        Value::Real(f) => Ok(f),
         #[allow(clippy::cast_precision_loss)]
-        ValueRef::Integer(i) => Ok(i as f64),
-        ValueRef::Text(s) | ValueRef::Blob(s) => {
-            let txt = std::str::from_utf8(s).map_err(|e| driver_err(&e))?;
+        Value::Integer(i) => Ok(i as f64),
+        Value::Text(s) => s.parse::<f64>().map_err(|e| {
+            driver_msg(format!(
+                "field `{field}`: cannot coerce TEXT `{s}` to FLOAT: {e}"
+            ))
+        }),
+        Value::Blob(b) => {
+            let txt = std::str::from_utf8(&b).map_err(|e| driver_err(&e))?;
             txt.parse::<f64>().map_err(|e| {
                 driver_msg(format!(
                     "field `{field}`: cannot coerce TEXT `{txt}` to FLOAT: {e}"
                 ))
             })
         }
-        ValueRef::Null => Err(driver_msg(format!(
+        Value::Null => Err(driver_msg(format!(
             "field `{field}`: NULL passed to coerce_float"
         ))),
     }
 }
 
-fn coerce_text(v: ValueRef<'_>) -> String {
+fn coerce_text(v: Value) -> String {
     match v {
-        ValueRef::Text(s) | ValueRef::Blob(s) => String::from_utf8_lossy(s).into_owned(),
-        ValueRef::Integer(i) => i.to_string(),
-        ValueRef::Real(f) => f.to_string(),
-        ValueRef::Null => String::new(),
+        Value::Text(s) => s,
+        Value::Blob(b) => String::from_utf8_lossy(&b).into_owned(),
+        Value::Integer(i) => i.to_string(),
+        Value::Real(f) => f.to_string(),
+        Value::Null => String::new(),
     }
 }
 
@@ -706,41 +871,6 @@ fn parse_iso_timestamp_micros(s: &str) -> std::result::Result<i64, String> {
         }
     }
     Err(format!("unrecognized timestamp format: `{s}`"))
-}
-
-fn build_one_batch(r: &mut SpatialiteReader) -> Result<Option<RecordBatch>> {
-    if r.rows.is_empty() {
-        return Ok(None);
-    }
-    let n_rows = r.rows.len().min(READ_BATCH_SIZE);
-
-    let mut attr_builders: Vec<AttrBuilder> = r
-        .columns
-        .iter()
-        .map(|c| AttrBuilder::new(&c.arrow_type, n_rows))
-        .collect::<Result<Vec<_>>>()?;
-    let mut geom_builder = BinaryBuilder::with_capacity(n_rows, n_rows * 32);
-
-    for _ in 0..n_rows {
-        let row = r.rows.pop_front().expect("invariant: n_rows ≤ rows.len()");
-        for (i, b) in attr_builders.iter_mut().enumerate() {
-            b.push(&row.attrs[i], &r.columns[i].name)?;
-        }
-        match row.geom {
-            Some(bytes) => geom_builder.append_value(&bytes),
-            None => geom_builder.append_null(),
-        }
-    }
-
-    let mut columns: Vec<ArrayRef> = Vec::with_capacity(attr_builders.len() + 1);
-    for b in attr_builders {
-        columns.push(b.finish());
-    }
-    columns.push(Arc::new(geom_builder.finish()) as ArrayRef);
-
-    let batch = RecordBatch::try_new(r.schema.clone(), columns)
-        .map_err(|e| driver_msg(format!("RecordBatch::try_new failed: {e}")))?;
-    Ok(Some(batch))
 }
 
 enum AttrBuilder {
@@ -777,25 +907,26 @@ impl AttrBuilder {
         })
     }
 
-    fn push(&mut self, v: &AttrValue, field: &str) -> Result<()> {
+    /// `AttrValue` を所有権ごと受け取る (Text / Blob を move して clone を回避する経路)。
+    fn push_owned(&mut self, v: AttrValue, field: &str) -> Result<()> {
         match (self, v) {
             (Self::Bool(b), AttrValue::Null) => b.append_null(),
-            (Self::Bool(b), AttrValue::Bool(x)) => b.append_value(*x),
-            (Self::Bool(b), AttrValue::Int(i)) => b.append_value(*i != 0),
+            (Self::Bool(b), AttrValue::Bool(x)) => b.append_value(x),
+            (Self::Bool(b), AttrValue::Int(i)) => b.append_value(i != 0),
             (Self::Int(b), AttrValue::Null) => b.append_null(),
-            (Self::Int(b), AttrValue::Int(x)) => b.append_value(*x),
+            (Self::Int(b), AttrValue::Int(x)) => b.append_value(x),
             (Self::Float(b), AttrValue::Null) => b.append_null(),
-            (Self::Float(b), AttrValue::Float(x)) => b.append_value(*x),
+            (Self::Float(b), AttrValue::Float(x)) => b.append_value(x),
             #[allow(clippy::cast_precision_loss)]
-            (Self::Float(b), AttrValue::Int(x)) => b.append_value(*x as f64),
+            (Self::Float(b), AttrValue::Int(x)) => b.append_value(x as f64),
             (Self::Text(b), AttrValue::Null) => b.append_null(),
-            (Self::Text(b), AttrValue::Text(x)) => b.append_value(x),
+            (Self::Text(b), AttrValue::Text(x)) => b.append_value(&x),
             (Self::Binary(b), AttrValue::Null) => b.append_null(),
-            (Self::Binary(b), AttrValue::Blob(x)) => b.append_value(x),
+            (Self::Binary(b), AttrValue::Blob(x)) => b.append_value(&x),
             (Self::Date(b), AttrValue::Null) => b.append_null(),
-            (Self::Date(b), AttrValue::Date(d)) => b.append_value(*d),
+            (Self::Date(b), AttrValue::Date(d)) => b.append_value(d),
             (Self::Timestamp(b), AttrValue::Null) => b.append_null(),
-            (Self::Timestamp(b), AttrValue::TimestampUs(t)) => b.append_value(*t),
+            (Self::Timestamp(b), AttrValue::TimestampUs(t)) => b.append_value(t),
             (_, _) => {
                 return Err(driver_msg(format!(
                     "field `{field}`: builder/value type mismatch"

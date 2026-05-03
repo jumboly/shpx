@@ -1,9 +1,10 @@
 //! GeoPackage の `LayerReader` 実装。
 //!
-//! v0.2 では SHP/CSV と同じく、open() で全行を `Vec<Row>` に読み込み、`batches()` で
-//! チャンクとして取り出す eager-load 方式を採る。GPKG は典型的にギガバイト級になりにくく、
-//! rusqlite の `Statement`/`Rows` のライフタイムを `LayerReader::batches` の戻り値型に
-//! 載せるのが煩雑なため、cycle 3 では複雑度を上げない方針。完全 streaming は v0.3 以降で。
+//! v0.8 cycle 2 で eager-load (`Vec<Row>`) をやめ、`shpx_rdb_common::streaming::KeysetRowsIter`
+//! 経由の rowid keyset pagination で真のストリーミング読みに置き換えた。`open()` では
+//! schema と CRS の確定 + `SELECT COUNT(*)` による row_count_hint だけを行い、行データは
+//! `batches()` で 65536 行ずつ取り出す。`Statement` / `Rows` の lifetime は
+//! `KeysetRowsIter::next_batch()` のスコープ内に閉じ、self-referential を回避する。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -16,19 +17,20 @@ use arrow_array::builder::{
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use chrono::NaiveDate;
-use rusqlite::{types::ValueRef, Connection};
+use rusqlite::{types::Value, Connection};
 use shpx_core::{
     schema::{GeometryMeta, GeometryType, GEOMETRY_META_KEY},
     Crs, Error, LayerReader, ReadOpts, Result, Uri, WktFlavor,
 };
+use shpx_rdb_common::streaming::{KeysetRowsIter, RowBatch};
 
 use crate::conn;
 use crate::meta;
 use crate::options::{strip_query, ResolvedReadOpts};
 use crate::type_map;
-use crate::util::{driver_err, driver_msg, quote_ident};
+use crate::util::{driver_err, driver_msg, quote_ident, DRIVER_NAME};
 
-const READ_BATCH_SIZE: usize = 4096;
+const READ_BATCH_SIZE: usize = 65_536;
 
 /// epoch 1970-01-01 (Date32 起点)。
 fn epoch() -> NaiveDate {
@@ -49,12 +51,6 @@ enum AttrValue {
     TimestampUs(i64),
 }
 
-#[derive(Debug)]
-struct Row {
-    attrs: Vec<AttrValue>,
-    geom: Option<Vec<u8>>,
-}
-
 /// 列計画。属性列のみ（geometry 列は別管理）。
 #[derive(Debug, Clone)]
 struct ColumnPlan {
@@ -66,8 +62,12 @@ pub struct GpkgReader {
     schema: SchemaRef,
     crs: Option<Crs>,
     columns: Vec<ColumnPlan>,
-    rows: std::collections::VecDeque<Row>,
+    geom_column: String,
     row_count: usize,
+    /// SELECT 末尾に rowid を含む keyset pagination SQL テンプレート。
+    /// `?1` に最終 rowid、`?2` に LIMIT を bind する。
+    sql_template: String,
+    conn: Connection,
 }
 
 impl GpkgReader {
@@ -92,15 +92,21 @@ impl GpkgReader {
         let geom_type = type_map::geom_type_from_name(&geom_type_name);
         let schema = build_schema(&columns, &geom_column, geom_type, crs.as_ref())?;
 
-        let rows = load_all_rows(&conn, &table, &columns, &geom_column)?;
-        let row_count = rows.len();
+        // 行データは streaming で読むが、進捗バーのため row_count を 1 度だけ正確に算出する。
+        // SQLite の COUNT(*) は full-table scan だが、GPKG feature テーブルの典型サイズ
+        // (数万〜数千万行) では数 ms〜数百 ms で完了するため許容する。
+        let row_count = count_rows(&conn, &table)?;
+
+        let sql_template = build_keyset_sql(&table, &columns, &geom_column);
 
         Ok(Self {
             schema,
             crs,
             columns,
-            rows: rows.into(),
+            geom_column,
             row_count,
+            sql_template,
+            conn,
         })
     }
 }
@@ -119,34 +125,42 @@ impl LayerReader for GpkgReader {
     }
 
     fn batches(&mut self) -> Box<dyn Iterator<Item = Result<RecordBatch>> + Send + '_> {
+        // columns/geom_column/schema は BatchIter の lifetime 中固定なので clone で持つ
+        // (ColumnPlan は数十要素、SchemaRef は Arc なので cheap)。
+        let inner = KeysetRowsIter::new(
+            &mut self.conn,
+            self.sql_template.clone(),
+            READ_BATCH_SIZE,
+            DRIVER_NAME,
+        );
         Box::new(BatchIter {
-            reader: self,
-            done: false,
+            inner,
+            columns: self.columns.clone(),
+            geom_column: self.geom_column.clone(),
+            schema: self.schema.clone(),
         })
     }
 }
 
 struct BatchIter<'a> {
-    reader: &'a mut GpkgReader,
-    done: bool,
+    inner: KeysetRowsIter<'a>,
+    columns: Vec<ColumnPlan>,
+    geom_column: String,
+    schema: SchemaRef,
 }
 
 impl Iterator for BatchIter<'_> {
     type Item = Result<RecordBatch>;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.done {
-            return None;
-        }
-        match build_one_batch(self.reader) {
-            Ok(Some(b)) => Some(Ok(b)),
-            Ok(None) => {
-                self.done = true;
-                None
-            }
-            Err(e) => {
-                self.done = true;
-                Some(Err(e))
-            }
+        match self.inner.next_batch() {
+            Ok(Some(rb)) => Some(build_record_batch(
+                rb,
+                &self.columns,
+                &self.geom_column,
+                &self.schema,
+            )),
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
         }
     }
 }
@@ -358,57 +372,91 @@ fn build_schema(
     Ok(Arc::new(Schema::new(fields)))
 }
 
-fn load_all_rows(
-    conn: &Connection,
-    table: &str,
-    columns: &[ColumnPlan],
-    geom_column: &str,
-) -> Result<Vec<Row>> {
-    // 列順は `columns` の宣言順 + 末尾に geometry。geom 列を select 末尾に置くことで
-    // batch ビルダ側のループも単純化する。
+/// `SELECT COUNT(*) FROM <table>` を 1 度だけ実行して総行数を返す。進捗バーの分母用。
+fn count_rows(conn: &Connection, table: &str) -> Result<usize> {
+    let sql = format!("SELECT COUNT(*) FROM {}", quote_ident(table));
+    let n: i64 = conn
+        .query_row(&sql, [], |row| row.get(0))
+        .map_err(|e| driver_err(&e))?;
+    usize::try_from(n).map_err(|_| driver_msg(format!("row count {n} exceeds usize")))
+}
+
+/// `SELECT col1, col2, ..., geom, rowid FROM <table> WHERE rowid > ?1 ORDER BY rowid LIMIT ?2`
+/// を構築する。columns 順 → geometry 列 → rowid (KeysetRowsIter が末尾列を消費する慣習)。
+fn build_keyset_sql(table: &str, columns: &[ColumnPlan], geom_column: &str) -> String {
     let mut select_cols: Vec<String> = columns.iter().map(|c| quote_ident(&c.name)).collect();
     select_cols.push(quote_ident(geom_column));
-    let sql = format!(
-        "SELECT {} FROM {}",
+    select_cols.push("rowid".to_string());
+    format!(
+        "SELECT {} FROM {} WHERE rowid > ?1 ORDER BY rowid LIMIT ?2",
         select_cols.join(", "),
         quote_ident(table)
-    );
+    )
+}
 
-    let mut stmt = conn.prepare(&sql).map_err(|e| driver_err(&e))?;
-    let mut rows = stmt.query([]).map_err(|e| driver_err(&e))?;
+/// `RowBatch` (rusqlite::Value 配列) を Arrow RecordBatch に変換する。
+///
+/// `rb` を所有権で受けて `into_iter` で各 row / 各 Value を move 消費することで、
+/// Text / Blob の double clone を回避する (`row.get::<_, Value>(i)` で 1 回 alloc 済み)。
+fn build_record_batch(
+    rb: RowBatch,
+    columns: &[ColumnPlan],
+    geom_column: &str,
+    schema: &SchemaRef,
+) -> Result<RecordBatch> {
+    let n_rows = rb.rows.len();
+    let mut attr_builders: Vec<AttrBuilder> = columns
+        .iter()
+        .map(|c| AttrBuilder::new(&c.arrow_type, n_rows))
+        .collect::<Result<Vec<_>>>()?;
+    let mut geom_builder = BinaryBuilder::with_capacity(n_rows, n_rows * 32);
 
-    let mut out = Vec::new();
-    while let Some(row) = rows.next().map_err(|e| driver_err(&e))? {
-        let mut attrs = Vec::with_capacity(columns.len());
-        for (i, c) in columns.iter().enumerate() {
-            let v = row.get_ref(i).map_err(|e| driver_err(&e))?;
-            attrs.push(decode_value(v, &c.arrow_type, &c.name)?);
+    let expected_cols = columns.len() + 1;
+    for row in rb.rows {
+        if row.len() != expected_cols {
+            return Err(driver_msg(format!(
+                "row has {} columns, expected {}",
+                row.len(),
+                expected_cols
+            )));
         }
-        let geom_idx = columns.len();
-        let geom_v = row.get_ref(geom_idx).map_err(|e| driver_err(&e))?;
-        let geom = match geom_v {
-            ValueRef::Null => None,
-            ValueRef::Blob(b) => {
+        let mut values = row.into_iter();
+        for (i, c) in columns.iter().enumerate() {
+            let v = values.next().expect("column count verified above");
+            let attr = decode_value(v, &c.arrow_type, &c.name)?;
+            attr_builders[i].push_owned(attr, &c.name)?;
+        }
+        match values.next().expect("geometry column at end") {
+            Value::Null => geom_builder.append_null(),
+            Value::Blob(b) => {
                 // GPKG header を剥がして WKB 部分のみ Arrow Binary 列に格納する。
-                let (_h, wkb_bytes) = shpx_geom::gpkg_blob::decode(b)?;
-                Some(wkb_bytes.to_vec())
+                let (_h, wkb_bytes) = shpx_geom::gpkg_blob::decode(&b)?;
+                geom_builder.append_value(wkb_bytes);
             }
             other => {
                 return Err(driver_msg(format!(
                     "geometry column `{geom_column}` is not BLOB ({other:?})"
                 )));
             }
-        };
-        out.push(Row { attrs, geom });
+        }
     }
-    Ok(out)
+
+    let mut out_columns: Vec<ArrayRef> = Vec::with_capacity(attr_builders.len() + 1);
+    for b in attr_builders {
+        out_columns.push(b.finish());
+    }
+    out_columns.push(Arc::new(geom_builder.finish()) as ArrayRef);
+
+    RecordBatch::try_new(schema.clone(), out_columns)
+        .map_err(|e| driver_msg(format!("RecordBatch::try_new failed: {e}")))
 }
 
-/// SQLite の `ValueRef` を Arrow 型に合わせて `AttrValue` に変換する。
+/// SQLite の `Value` を Arrow 型に合わせて `AttrValue` に変換する。
 ///
 /// 値型と宣言型がずれた場合は文字列降格（GPKG の dynamic typing 救済）。
-fn decode_value(v: ValueRef<'_>, target: &DataType, field: &str) -> Result<AttrValue> {
-    if matches!(v, ValueRef::Null) {
+/// `v` を所有権で受け、Text / Blob は move で AttrValue へ流し込み、clone を回避する。
+fn decode_value(v: Value, target: &DataType, field: &str) -> Result<AttrValue> {
+    if matches!(v, Value::Null) {
         return Ok(AttrValue::Null);
     }
     match target {
@@ -419,93 +467,115 @@ fn decode_value(v: ValueRef<'_>, target: &DataType, field: &str) -> Result<AttrV
         DataType::Float32 | DataType::Float64 => Ok(AttrValue::Float(coerce_float(v, field)?)),
         DataType::Utf8 => Ok(AttrValue::Text(coerce_text(v))),
         DataType::Binary => match v {
-            ValueRef::Blob(b) => Ok(AttrValue::Blob(b.to_vec())),
+            Value::Blob(b) => Ok(AttrValue::Blob(b)),
             other => Err(driver_msg(format!(
                 "field `{field}`: expected BLOB, got {other:?}"
             ))),
         },
-        DataType::Date32 => match v {
-            ValueRef::Text(s) | ValueRef::Blob(s) => {
-                let txt = std::str::from_utf8(s).map_err(|e| driver_err(&e))?;
-                let nd = NaiveDate::parse_from_str(txt, "%Y-%m-%d").map_err(|e| {
-                    driver_msg(format!("field `{field}`: invalid DATE `{txt}`: {e}"))
-                })?;
-                let days = nd.signed_duration_since(epoch()).num_days();
-                let days32 = i32::try_from(days).map_err(|_| {
-                    driver_msg(format!("field `{field}`: DATE out of Date32 range: {txt}"))
-                })?;
-                Ok(AttrValue::Date(days32))
-            }
-            other => Err(driver_msg(format!(
-                "field `{field}`: expected DATE TEXT, got {other:?}"
-            ))),
-        },
-        DataType::Timestamp(TimeUnit::Microsecond, None) => match v {
-            ValueRef::Text(s) | ValueRef::Blob(s) => {
-                let txt = std::str::from_utf8(s).map_err(|e| driver_err(&e))?;
-                let micros = parse_iso_timestamp_micros(txt).map_err(|e| {
-                    driver_msg(format!("field `{field}`: invalid DATETIME `{txt}`: {e}"))
-                })?;
-                Ok(AttrValue::TimestampUs(micros))
-            }
-            other => Err(driver_msg(format!(
-                "field `{field}`: expected DATETIME TEXT, got {other:?}"
-            ))),
-        },
+        DataType::Date32 => decode_date32(v, field),
+        DataType::Timestamp(TimeUnit::Microsecond, None) => decode_timestamp_us(v, field),
         other => Err(Error::Schema(format!(
             "field `{field}`: unsupported target Arrow type {other:?}"
         ))),
     }
 }
 
-fn coerce_int(v: ValueRef<'_>, field: &str) -> Result<i64> {
+fn decode_date32(v: Value, field: &str) -> Result<AttrValue> {
+    let txt: String = match v {
+        Value::Text(s) => s,
+        Value::Blob(b) => {
+            String::from_utf8(b).map_err(|e| driver_msg(format!("field `{field}`: {e}")))?
+        }
+        other => {
+            return Err(driver_msg(format!(
+                "field `{field}`: expected DATE TEXT, got {other:?}"
+            )))
+        }
+    };
+    let nd = NaiveDate::parse_from_str(&txt, "%Y-%m-%d")
+        .map_err(|e| driver_msg(format!("field `{field}`: invalid DATE `{txt}`: {e}")))?;
+    let days = nd.signed_duration_since(epoch()).num_days();
+    let days32 = i32::try_from(days)
+        .map_err(|_| driver_msg(format!("field `{field}`: DATE out of Date32 range: {txt}")))?;
+    Ok(AttrValue::Date(days32))
+}
+
+fn decode_timestamp_us(v: Value, field: &str) -> Result<AttrValue> {
+    let txt: String = match v {
+        Value::Text(s) => s,
+        Value::Blob(b) => {
+            String::from_utf8(b).map_err(|e| driver_msg(format!("field `{field}`: {e}")))?
+        }
+        other => {
+            return Err(driver_msg(format!(
+                "field `{field}`: expected DATETIME TEXT, got {other:?}"
+            )))
+        }
+    };
+    let micros = parse_iso_timestamp_micros(&txt)
+        .map_err(|e| driver_msg(format!("field `{field}`: invalid DATETIME `{txt}`: {e}")))?;
+    Ok(AttrValue::TimestampUs(micros))
+}
+
+fn coerce_int(v: Value, field: &str) -> Result<i64> {
     match v {
-        ValueRef::Integer(i) => Ok(i),
+        Value::Integer(i) => Ok(i),
         // SQLite の REAL→INTEGER は明示降格。i64 範囲外は飽和されるが、shpx は
         // 「宣言型と値型のずれ」の救済としての降格に限るため、特別な丸め保証は不要。
         #[allow(clippy::cast_possible_truncation)]
-        ValueRef::Real(f) => Ok(f as i64),
-        ValueRef::Text(s) | ValueRef::Blob(s) => {
-            let txt = std::str::from_utf8(s).map_err(|e| driver_err(&e))?;
+        Value::Real(f) => Ok(f as i64),
+        Value::Text(s) => s.parse::<i64>().map_err(|e| {
+            driver_msg(format!(
+                "field `{field}`: cannot coerce TEXT `{s}` to INTEGER: {e}"
+            ))
+        }),
+        Value::Blob(b) => {
+            let txt = std::str::from_utf8(&b).map_err(|e| driver_err(&e))?;
             txt.parse::<i64>().map_err(|e| {
                 driver_msg(format!(
                     "field `{field}`: cannot coerce TEXT `{txt}` to INTEGER: {e}"
                 ))
             })
         }
-        ValueRef::Null => Err(driver_msg(format!(
+        Value::Null => Err(driver_msg(format!(
             "field `{field}`: NULL passed to coerce_int"
         ))),
     }
 }
 
-fn coerce_float(v: ValueRef<'_>, field: &str) -> Result<f64> {
+fn coerce_float(v: Value, field: &str) -> Result<f64> {
     match v {
-        ValueRef::Real(f) => Ok(f),
+        Value::Real(f) => Ok(f),
         // i64 → f64 は仮数 52 bits を超える整数で精度落ちが起こり得るが、
         // dynamic typing の救済経路として許容する（呼び出し側は宣言型 FLOAT/DOUBLE）。
         #[allow(clippy::cast_precision_loss)]
-        ValueRef::Integer(i) => Ok(i as f64),
-        ValueRef::Text(s) | ValueRef::Blob(s) => {
-            let txt = std::str::from_utf8(s).map_err(|e| driver_err(&e))?;
+        Value::Integer(i) => Ok(i as f64),
+        Value::Text(s) => s.parse::<f64>().map_err(|e| {
+            driver_msg(format!(
+                "field `{field}`: cannot coerce TEXT `{s}` to FLOAT: {e}"
+            ))
+        }),
+        Value::Blob(b) => {
+            let txt = std::str::from_utf8(&b).map_err(|e| driver_err(&e))?;
             txt.parse::<f64>().map_err(|e| {
                 driver_msg(format!(
                     "field `{field}`: cannot coerce TEXT `{txt}` to FLOAT: {e}"
                 ))
             })
         }
-        ValueRef::Null => Err(driver_msg(format!(
+        Value::Null => Err(driver_msg(format!(
             "field `{field}`: NULL passed to coerce_float"
         ))),
     }
 }
 
-fn coerce_text(v: ValueRef<'_>) -> String {
+fn coerce_text(v: Value) -> String {
     match v {
-        ValueRef::Text(s) | ValueRef::Blob(s) => String::from_utf8_lossy(s).into_owned(),
-        ValueRef::Integer(i) => i.to_string(),
-        ValueRef::Real(f) => f.to_string(),
-        ValueRef::Null => String::new(),
+        Value::Text(s) => s,
+        Value::Blob(b) => String::from_utf8_lossy(&b).into_owned(),
+        Value::Integer(i) => i.to_string(),
+        Value::Real(f) => f.to_string(),
+        Value::Null => String::new(),
     }
 }
 
@@ -526,41 +596,6 @@ fn parse_iso_timestamp_micros(s: &str) -> std::result::Result<i64, String> {
         }
     }
     Err(format!("unrecognized timestamp format: `{s}`"))
-}
-
-fn build_one_batch(r: &mut GpkgReader) -> Result<Option<RecordBatch>> {
-    if r.rows.is_empty() {
-        return Ok(None);
-    }
-    let n_rows = r.rows.len().min(READ_BATCH_SIZE);
-
-    let mut attr_builders: Vec<AttrBuilder> = r
-        .columns
-        .iter()
-        .map(|c| AttrBuilder::new(&c.arrow_type, n_rows))
-        .collect::<Result<Vec<_>>>()?;
-    let mut geom_builder = BinaryBuilder::with_capacity(n_rows, n_rows * 32);
-
-    for _ in 0..n_rows {
-        let row = r.rows.pop_front().expect("invariant: n_rows ≤ rows.len()");
-        for (i, b) in attr_builders.iter_mut().enumerate() {
-            b.push(&row.attrs[i], &r.columns[i].name)?;
-        }
-        match row.geom {
-            Some(bytes) => geom_builder.append_value(&bytes),
-            None => geom_builder.append_null(),
-        }
-    }
-
-    let mut columns: Vec<ArrayRef> = Vec::with_capacity(attr_builders.len() + 1);
-    for b in attr_builders {
-        columns.push(b.finish());
-    }
-    columns.push(Arc::new(geom_builder.finish()) as ArrayRef);
-
-    let batch = RecordBatch::try_new(r.schema.clone(), columns)
-        .map_err(|e| driver_msg(format!("RecordBatch::try_new failed: {e}")))?;
-    Ok(Some(batch))
 }
 
 enum AttrBuilder {
@@ -599,27 +634,28 @@ impl AttrBuilder {
         })
     }
 
-    fn push(&mut self, v: &AttrValue, field: &str) -> Result<()> {
+    /// `AttrValue` を所有権ごと受け取る (Text / Blob を move して clone を回避する経路)。
+    fn push_owned(&mut self, v: AttrValue, field: &str) -> Result<()> {
         match (self, v) {
             (Self::Bool(b), AttrValue::Null) => b.append_null(),
-            (Self::Bool(b), AttrValue::Bool(x)) => b.append_value(*x),
-            (Self::Bool(b), AttrValue::Int(i)) => b.append_value(*i != 0),
+            (Self::Bool(b), AttrValue::Bool(x)) => b.append_value(x),
+            (Self::Bool(b), AttrValue::Int(i)) => b.append_value(i != 0),
             (Self::Int(b), AttrValue::Null) => b.append_null(),
-            (Self::Int(b), AttrValue::Int(x)) => b.append_value(*x),
+            (Self::Int(b), AttrValue::Int(x)) => b.append_value(x),
             (Self::Float(b), AttrValue::Null) => b.append_null(),
-            (Self::Float(b), AttrValue::Float(x)) => b.append_value(*x),
+            (Self::Float(b), AttrValue::Float(x)) => b.append_value(x),
             // INTEGER → FLOAT 列の救済降格。i64 全域では精度落ちが起こり得るが、
             // dynamic typing で混在した値を読めるようにするための妥協。
             #[allow(clippy::cast_precision_loss)]
-            (Self::Float(b), AttrValue::Int(x)) => b.append_value(*x as f64),
+            (Self::Float(b), AttrValue::Int(x)) => b.append_value(x as f64),
             (Self::Text(b), AttrValue::Null) => b.append_null(),
-            (Self::Text(b), AttrValue::Text(x)) => b.append_value(x),
+            (Self::Text(b), AttrValue::Text(x)) => b.append_value(&x),
             (Self::Binary(b), AttrValue::Null) => b.append_null(),
-            (Self::Binary(b), AttrValue::Blob(x)) => b.append_value(x),
+            (Self::Binary(b), AttrValue::Blob(x)) => b.append_value(&x),
             (Self::Date(b), AttrValue::Null) => b.append_null(),
-            (Self::Date(b), AttrValue::Date(d)) => b.append_value(*d),
+            (Self::Date(b), AttrValue::Date(d)) => b.append_value(d),
             (Self::Timestamp(b), AttrValue::Null) => b.append_null(),
-            (Self::Timestamp(b), AttrValue::TimestampUs(t)) => b.append_value(*t),
+            (Self::Timestamp(b), AttrValue::TimestampUs(t)) => b.append_value(t),
             (_, _) => {
                 return Err(driver_msg(format!(
                     "field `{field}`: builder/value type mismatch"

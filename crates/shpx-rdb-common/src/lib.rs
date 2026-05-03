@@ -15,6 +15,7 @@ pub mod arrow;
 pub mod crs;
 pub mod on_loss;
 pub mod opts;
+pub mod streaming;
 pub mod table;
 pub mod uri;
 
