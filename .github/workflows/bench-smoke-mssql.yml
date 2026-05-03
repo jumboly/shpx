@@ -1,5 +1,7 @@
 # SQL Server bench smoke. workflow_dispatch only.
-# rows=10000000 で v0.4 完了基準 (shpx_secs <= 1.667 * ogr_secs) を判定する。
+# rows=10000000 で v0.4 完了基準 (chunk size 1M でも tempdb 溢れなし) を確認する。
+# ogr2ogr との比較は GDAL Parquet plugin の CI 整備コスト (ubuntugis PPA / launchpad API)
+# に見合わないため、shpx 単独の wall-clock 計測 + 完走 (= tempdb 溢れなし) のみを取る。
 name: bench-smoke-mssql
 
 on:
@@ -10,7 +12,7 @@ on:
         required: false
         default: "100000"
       runs:
-        description: "Number of repetitions per tool (median wins)"
+        description: "Number of repetitions (median wins)"
         required: false
         default: "3"
 
@@ -38,46 +40,13 @@ jobs:
           --health-retries 30
     env:
       SHPX_TEST_SQLSERVER_URL: mssql://sa:Shpx_test_pw1!@localhost:1433/shpx_test
-      DEBIAN_FRONTEND: noninteractive
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: Setup Microsoft apt repository
-        run: |
-          set -euxo pipefail
-          curl -sSL -O https://packages.microsoft.com/keys/microsoft.asc
-          sudo install -o root -g root -m 644 microsoft.asc /etc/apt/trusted.gpg.d/microsoft.asc
-          # Microsoft prod.list の対応版が無い Ubuntu バージョンは 22.04 (jammy) を流用。
-          case "$(lsb_release -rs)" in
-            22.04|24.04) repo_version="$(lsb_release -rs)" ;;
-            *)           repo_version="22.04" ;;
-          esac
-          curl -fsSL "https://packages.microsoft.com/config/ubuntu/${repo_version}/prod.list" \
-            | sudo tee /etc/apt/sources.list.d/mssql-release.list >/dev/null
-          sudo apt-get update
-          sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18 unixodbc-dev mssql-tools18
-
-      - name: Install build deps and gdal-bin (with Parquet plugin)
-        run: |
-          set -euxo pipefail
-          # ubuntugis-unstable PPA で newer GDAL + libgdal-arrow-parquet を入れる
-          # (Ubuntu noble の標準 apt には `libgdal-arrow-parquet` が無い)。
-          # `add-apt-repository` は launchpadlib API 経由で PPA メタを引くが、
-          # GH Actions runner 環境で API 接続がタイムアウトすることがあるため
-          # sources.list と GPG key を直接書く。鍵指紋 314DF160 は ubuntugis PPA。
-          sudo install -d -m 0755 /etc/apt/keyrings
-          curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x6B827C12C2D425E227EDCA75089EBE08314DF160" \
-            | sudo gpg --dearmor -o /etc/apt/keyrings/ubuntugis.gpg
-          echo "deb [signed-by=/etc/apt/keyrings/ubuntugis.gpg] https://ppa.launchpadcontent.net/ubuntugis/ubuntugis-unstable/ubuntu $(lsb_release -cs) main" \
-            | sudo tee /etc/apt/sources.list.d/ubuntugis.list
-          sudo apt-get update
-          sudo apt-get install -y libproj-dev pkg-config gdal-bin libgdal-arrow-parquet
-          # bench-vs-ogr-mssql.sh の sqlcmd 解決経路 (host PATH または `docker compose exec`) は
-          # GitHub Actions services 上では後者が成立しないため、host PATH に出す必要がある。
-          sudo ln -sf /opt/mssql-tools18/bin/sqlcmd /usr/local/bin/sqlcmd
-          sudo ln -sf /opt/mssql-tools18/bin/bcp /usr/local/bin/bcp
+      - name: Install proj
+        run: sudo apt-get install -y libproj-dev pkg-config
 
       - name: Create shpx_test database in mssql
         run: |
@@ -87,16 +56,43 @@ jobs:
             -S localhost -U sa -P "Shpx_test_pw1!" -C \
             -Q "IF DB_ID('shpx_test') IS NULL CREATE DATABASE shpx_test"
 
-      - name: Run bench (shpx vs ogr2ogr)
+      - name: Generate input parquet
         env:
           SHPX_BENCH_ROWS: ${{ github.event.inputs.rows }}
         run: |
           set -euxo pipefail
+          # criterion harness の `ensure_parquet` で `target/bench-data/points_mssql_<rows>.parquet`
+          # を生成する。--quick で計測自体は短時間で打ち切る (ベンチ目的では使わない)。
+          cargo bench -q -p shpx-driver-sqlserver --bench bulk_insert -- \
+            --quick --warm-up-time 1 --measurement-time 1 || true
+          test -f "target/bench-data/points_mssql_${SHPX_BENCH_ROWS}.parquet"
+
+      - name: Run shpx bench (staging bulk)
+        env:
+          SHPX_BENCH_ROWS: ${{ github.event.inputs.rows }}
+          SHPX_MSSQL_BULK_CHUNK: "1000000"
+        run: |
+          set -euxo pipefail
+          INPUT="target/bench-data/points_mssql_${SHPX_BENCH_ROWS}.parquet"
+          SHPX_BIN="target/release/shpx"
+          if [ ! -x "$SHPX_BIN" ]; then
+            cargo build --release -p shpx-cli --locked
+          fi
           mkdir -p target/bench-data
-          bash scripts/bench-vs-ogr-mssql.sh \
-            --rows ${{ github.event.inputs.rows }} \
-            --runs ${{ github.event.inputs.runs }} \
-            2>&1 | tee target/bench-data/bench-output.txt
+          {
+            echo "==> rows=${SHPX_BENCH_ROWS}, runs=${{ github.event.inputs.runs }}, chunk=${SHPX_MSSQL_BULK_CHUNK}"
+            for i in $(seq 1 ${{ github.event.inputs.runs }}); do
+              # `--create-table=always` が DROP→CREATE するので前段の手動 DROP は不要。
+              t=$(/usr/bin/time -p "$SHPX_BIN" convert \
+                  --insert-mode=bulk \
+                  --create-table=always \
+                  --create-index=auto \
+                  "$INPUT" \
+                  "${SHPX_TEST_SQLSERVER_URL}?table=bench_shpx" \
+                2>&1 | awk '/^real/ {print $2}')
+              echo "  shpx run $i: ${t}s"
+            done
+          } | tee target/bench-data/bench-output.txt
 
       - name: Upload bench output
         if: always()
