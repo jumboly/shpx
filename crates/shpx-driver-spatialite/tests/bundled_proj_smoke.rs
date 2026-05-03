@@ -66,7 +66,12 @@ fn transform_4326_to_3857_uses_bundled_proj() {
         .expect("Transform query should succeed");
 
     let wkb = buf.expect("Transform should not return NULL when PROJ is bundled");
-    assert_eq!(wkb.len(), 21, "Point WKB must be 21 bytes, got {}", wkb.len());
+    assert_eq!(
+        wkb.len(),
+        21,
+        "Point WKB must be 21 bytes, got {}",
+        wkb.len()
+    );
     assert_eq!(wkb[0], 0x01, "result must be little-endian WKB");
     assert_eq!(
         u32::from_le_bytes([wkb[1], wkb[2], wkb[3], wkb[4]]),

@@ -109,3 +109,27 @@ jobs:
             -S localhost -U sa -P "Shpx_test_pw1!" -C \
             -Q "IF DB_ID('shpx_test') IS NULL CREATE DATABASE shpx_test"
       - run: cargo test --workspace --locked
+
+  bundled-spatialite-smoke:
+    # `bundled-spatialite` feature が「システム libspatialite が不在の cleanroom 環境」で
+    # build / test を通せることを CI で常時担保する。test job との差分は
+    # `libsqlite3-mod-spatialite` を apt 導入しない点で、「bundled が本当に独立して動く」
+    # ことを陰性対照として示す。
+    name: bundled-spatialite-smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # GEOS の C++ ソース vendor build に cmake / clang が必要 (geos-src 経由)。
+      # libproj は bundled-proj が proj-sys 経由で C ソースから static link するため
+      # `libproj-dev` は導入しない。`libsqlite3-mod-spatialite` も意図的に未導入。
+      - run: sudo apt-get update && sudo apt-get install -y cmake clang
+      # CLI feature の bundled-spatialite は driver の bundled-spatialite と shpx-geom の
+      # bundled-proj を implies するため `--features bundled-spatialite` 単体で十分。
+      - run: cargo build -p shpx-cli --features bundled-spatialite --release
+      # SHPX_TEST_SPATIALITE=1 で env-gated 統合テストも skip させずに実行。
+      # SHPX_SPATIALITE_PATH は意図的に未設定 (bundled init 経路だけで動くことを確認するため)。
+      - run: cargo test -p shpx-driver-spatialite --features bundled-spatialite
+        env:
+          SHPX_TEST_SPATIALITE: "1"

@@ -136,13 +136,14 @@ SpatiaLite は独自の binary 形式で geometry 列を格納する。`shpx-geo
 
 ## スコープ外（v0.6 以降）
 
-v0.5 リリース時点で以下は未対応:
+以下は未対応:
 
-- **`bundled-spatialite` の本実装**（v0.5 では feature 宣言のみ、有効化しても no-op）。v0.6 で `build.rs` から libspatialite を `cc` で vendor して static link する予定。詳細は `docs/ROADMAP.md` の v0.6 節を参照
 - **reader filtering** (`--where` / `--select` / `--query`)。RDB driver 共通の v0.5+ 課題
 - **Z / M 座標**、`GeometryCollection`、`EMPTY`
 - **複数レイヤ append**（同一ファイルに複数 geometry テーブルを段階的に追加するワークフロー）
 - **bulk writer**（`Capabilities::bulk_load = false` 固定。SQLite 単体では行単位 INSERT が pragmatic な最速ルート）
+
+`bundled-spatialite` の本実装は v0.6.0 で対応済み（本ドキュメント「bundled-spatialite ビルド」節を参照）。
 
 ## 環境変数まとめ
 
@@ -153,13 +154,64 @@ v0.5 リリース時点で以下は未対応:
 | `SHPX_SPATIALITE_PATH` | `mod_spatialite` 共有ライブラリの絶対 / 相対パス上書き（macOS の `/opt/homebrew/lib/mod_spatialite.dylib` など） |
 | `SHPX_TEST_SPATIALITE` | integration test の有効化フラグ（未設定 / `0` / 空文字列なら test を skip） |
 
+## bundled-spatialite ビルド
+
+v0.6.0 で `crates/shpx-driver-spatialite/build.rs` に libspatialite / GEOS / PROJ の vendor + `cc` static link 経路が入った。`bundled-spatialite` feature を有効化することで「配布バイナリ受け取り側にシステム libspatialite を入れさせない」ユースケース（`cargo install shpx --features bundled-spatialite` / `cargo-dist`）に対応する。default ビルド（feature 未指定）はこれまで通りシステム libspatialite（apt の `libsqlite3-mod-spatialite` / brew の `libspatialite`）を `load_extension` で見る挙動のまま。
+
+### 有効化
+
+```sh
+cargo build -p shpx-cli --features bundled-spatialite --release
+```
+
+CLI の `bundled-spatialite` feature は driver の `bundled-spatialite` と `shpx-geom/bundled-proj` を implies するため、`--features bundled-spatialite,bundled-proj` のように両方を書く必要は無い。
+
+### vendor 範囲
+
+| 依存ライブラリ | 取得元 | 備考 |
+|---|---|---|
+| libspatialite 5.1.0 | `crates/shpx-driver-spatialite/vendor/libspatialite-5.1.0/` に in-tree commit | SHA256 は `vendor/SHA256SUMS` で再現性固定。release tarball を bit-identical に近い状態で保持（cycle 1-2 の局所 patch は cycle 2 末で物理削除済み） |
+| libgeos 3.x | `geos-src` crate (CMake build) | `[build-dependencies] geos-src = "0.2"` |
+| libproj | `proj-sys` crate (`shpx-geom/bundled-proj` 経由) | shpx-geom の `bundled-proj` と libspatialite で 1 つの libproj を共有（symbol の二重リンクを回避） |
+| libsqlite3 | `rusqlite` の `bundled` feature | v0.5 cycle 1 で既に有効化済み |
+
+### 必要なビルドツール
+
+- **CMake** （`geos-src` が要求）
+- **C++ コンパイラ** （clang or gcc / Apple LLVM、`link-cplusplus` で C++ stdlib を確実にリンク）
+- **C コンパイラ** （`cc` crate が解決、libspatialite 自体は純 C）
+- libsqlite3 / libproj / libsqlite3-mod-spatialite / libgeos の **システムインストールは不要**
+
+### ライセンス制約
+
+libspatialite は **MPL 1.1 / GPL 2.0 / LGPL 2.1** の triple-licensed。bundled で配布する shpx バイナリは LGPL 2.1 (or later) 適合のため、(a) 再リンク可能な `.o` ファイル提供 もしくは (b) MPL 1.1 / GPL 2.0 のいずれかを選択して配布する。詳細は `crates/shpx-driver-spatialite/NOTICE` を参照。
+
+### サポート OS
+
+- **Linux x86_64**: CI の `bundled-spatialite-smoke` job で常時検証（`.github/workflows/ci.yml`）。`cmake` / `clang` のみ apt 導入する cleanroom 状態で `cargo build -p shpx-cli --features bundled-spatialite --release` と `cargo test -p shpx-driver-spatialite --features bundled-spatialite` が緑であることを保証
+- **macOS (Apple Silicon / Intel)** / **Windows**: cycle 当初は best-effort。ローカルで cmake と C++ コンパイラ適合バージョンが揃っていれば動く想定だが、CI で常時検証していない。v1.0 の `cargo-dist` 配信タイミングで追加 OS の smoke job を整備予定
+
+### 静的初期化経路
+
+bundled feature 有効時は `extern "C" fn sqlite3_modspatialite_init` を `rusqlite::Connection::handle()` の raw pointer に直接呼ぶ（`load_extension` 経路は経由しない）。`SHPX_SPATIALITE_PATH` env は warn ログを出して無視される（bundled で static link されている前提のため）。手元の system mod_spatialite を読みたいケースは default ビルド（feature 未指定）を使う。
+
+### smoke test
+
+`crates/shpx-driver-spatialite/tests/` 以下に bundled feature gate 付きの smoke test が 2 件:
+
+- `bundled_geos_smoke.rs`: `SELECT ST_Buffer(GeomFromWKB(?, 4326), 0.1)` で GEOS リンクを確認
+- `bundled_proj_smoke.rs`: EPSG:4326 → 3857 の transform で PROJ リンクを確認
+
+両者とも `#![cfg(feature = "bundled-spatialite")]` で gate されるため、default ビルドでは test 数に出ない。CI の `bundled-spatialite-smoke` job がこれらを毎回検証する。
+
 ## 内部実装メモ
 
 - `Capabilities { read: true, write: true, bulk_load: false, supports_blob: true, supports_decimal: false, supports_timestamp_tz: true, string_encoding: Fixed("utf-8") }`
-- `mod_spatialite` ロード経路の優先順位:
-  1. `feature = "bundled-spatialite"` 時は static link した `spatialite_init` を直接呼ぶ（v0.6 で実装、v0.5 は動的 fallback）
-  2. `SHPX_SPATIALITE_PATH` env で指定された絶対 / 相対パスを `load_extension`
-  3. 既定: `mod_spatialite` を SQLite に渡し、OS のライブラリ検索パス (`LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH` / `/etc/ld.so.conf`) から dlopen
+- `mod_spatialite` ロード経路:
+  - `feature = "bundled-spatialite"` 有効時は static link した `sqlite3_modspatialite_init` を `rusqlite::Connection::handle()` の raw pointer に直接呼ぶ（v0.6.0 で実装。動的経路への fallback は無く、`SHPX_SPATIALITE_PATH` env は warn で無視）
+  - default ビルド（feature 未指定）時は以下の優先順:
+    1. `SHPX_SPATIALITE_PATH` env で指定された絶対 / 相対パスを `load_extension`
+    2. 既定: `mod_spatialite` を SQLite に渡し、OS のライブラリ検索パス (`LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH` / `/etc/ld.so.conf`) から dlopen
 - `open_write_new` は `journal_mode=WAL` / `synchronous=NORMAL` を pragma 設定して、空 DB で `InitSpatialMetadata(1)` を idempotent 発行する。`FastInit (=1)` は WGS84 系のみ seed する選択肢で、全 EPSG seed (`InitSpatialMetadata(0)`) は数秒かかるため空 DB を頻繁に作る用途では使わない
 - writer の `INSERT` は `GeomFromWKB(?, srid)` でジオメトリを SpatiaLite に encode してもらう。自前の `spatialite_blob::encode` で書く実装と差異があると検出が困難なため、I/O 整合性は SpatiaLite 自身の関数に揃える方針。reader 経路でも同様に `AsBinary(<geom>)` で標準 WKB を取り出す
 - `--create-table=Always` は `DROP TABLE IF EXISTS <table>` の前に `DELETE FROM geometry_columns WHERE f_table_name = ?` と `SELECT DiscardGeometryColumn(?, ?)` を発行して、SpatiaLite の管理テーブル / R\*Tree からも紐付き行を消してから DROP する

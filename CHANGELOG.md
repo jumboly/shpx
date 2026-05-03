@@ -4,6 +4,29 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-03
+
+v0.6 マイルストーン「bundled-spatialite + 配布バイナリ準備」のリリース。`crates/shpx-driver-spatialite/build.rs` で libspatialite 5.1.0 / libgeos / libproj を C ソースから vendor + `cc` static link する `bundled-spatialite` feature の本実装、`.github/workflows/ci.yml` への `bundled-spatialite-smoke` job 追加、`docs/SPATIALITE.md` の bundled 節新設までを含む。v0.5.0 で「Known Issues: bundled-spatialite は v0.6 で本実装」と書いた制限を解消する。CI で常時検証するのは Linux x86_64 のみで、macOS (Apple Silicon / Intel) / Windows は v1.0 の `cargo-dist` 配信時に拡張する best-effort 段階。詳細は `docs/SPATIALITE.md` の「bundled-spatialite ビルド」節を参照。
+
+### Added
+
+- **shpx-driver-spatialite (v0.6 cycle 1、build.rs 足場 + libspatialite vendor 最小構成)**: `crates/shpx-driver-spatialite/vendor/libspatialite-5.1.0/` に libspatialite 5.1.0 release tarball を in-tree commit (`vendor/SHA256SUMS` で再現性固定、download は build.rs では行わない)。`crates/shpx-driver-spatialite/build.rs` を新設し、`#[cfg(feature = "bundled-spatialite")]` 内でのみ `cc::Build` で C ソース 100+ ファイルを集めて `.compile("spatialite_bundled")`。GEOS / PROJ / RTTOPO / libxml2 / freexl / iconv / minizip を全て off にする `OMIT_*` define 群と、自動生成する `gaiaconfig.h` で純粋な geometry blob I/O + R\*Tree (R\*Tree は SQLite native) のみで build を通す。`crates/shpx-driver-spatialite/Cargo.toml` に `build = "build.rs"` と `[build-dependencies] cc` を追加。`crates/shpx-driver-spatialite/src/conn.rs` の cfg 分岐に FFI 実体投入 (`extern "C" fn sqlite3_modspatialite_init` を `rusqlite::Connection::handle()` の raw pointer に直接呼ぶ)。`crates/shpx-driver-spatialite/NOTICE` を新設し libspatialite triple license (MPL 1.1 / GPL 2.0 / LGPL 2.1) と vendor バージョンを明記。
+- **shpx-driver-spatialite (v0.6 cycle 2、GEOS リンク)**: `geos-src = "0.2"` (libgeos 3.x C++ ソース vendor + CMake build) を build-dep として workspace + driver Cargo.toml に追加。`geos-src` の build script が export する include path / link 命令を build.rs で受け取り、libspatialite ビルドの `cc::Build` に `.include(geos_include)` で feed。build.rs の `OMIT_FEATURES` から `"GEOS"` を削除し、GEOS 依存ファイルもコンパイル対象に追加。`tests/bundled_geos_smoke.rs` で `SELECT ST_Buffer(GeomFromWKB(?, 4326), 0.1)` を 1 件叩く feature-gated smoke test を追加。cycle 1 で入れた局所 patch (`#ifndef OMIT_GEOS` ガード 2 箇所) を物理削除し、vendor を upstream tarball に bit-identical な状態に復元。`NOTICE` の「shpx local modifications」から patch 項目も削除。
+- **shpx-driver-spatialite (v0.6 cycle 3、PROJ リンク + `spatialite_init()` 直接呼び)**: `shpx-geom` の `bundled-proj` (proj 0.28 / proj-sys) が同梱する libproj を libspatialite からも共有 (PROJ symbol の二重リンク回避)。proj-sys 0.25.0 が `cargo:include` / `cargo:root` を emit しないため、cycle 2 の `locate_geos_root` と同パターンで `target/<profile>/build/proj-sys-<hash>/out/include/proj.h` を sibling target で探索する `locate_proj_root` を実装し、`build.rs::locate_sibling_out` に共通化。`crates/shpx-driver-spatialite/Cargo.toml` の `[package]` に `links = "spatialite_bundled"` を宣言 (cargo の duplicate link 検出のため)。`crates/shpx-cli/Cargo.toml` の `bundled-spatialite` feature を `["shpx-driver-spatialite/bundled-spatialite", "shpx-geom/bundled-proj"]` に変更し、CLI レイヤで bundled-spatialite が必ず bundled-proj を implies する設計に。`load_mod_spatialite` の bundled feature 経路から `load_dynamic` への fallback を削除し、`SHPX_SPATIALITE_PATH` env は bundled feature 時 warn で無視。`tests/bundled_proj_smoke.rs` で EPSG:4326 → 3857 transform を 1 件叩く feature-gated smoke test を追加。実装メモ: 当初 ROADMAP では `DEP_PROJ_INCLUDE` / `DEP_PROJ_ROOT` 経由の include 共有を想定していたが、proj-sys 0.25.0 が `cargo:include` / `cargo:root` を emit しないため sibling target 探索に pivot した（cycle 2 の `locate_geos_root` と同パターン）。link 命令 (`cargo:rustc-link-lib=proj`) は proj-sys 側の `links = "proj"` に一本化し、本 driver の build.rs からは PROJ link を出さない。libspatialite 側は `gaiaconfig.h` で `#define PROJ_NEW 1` を出して PROJ 6+ API パス (`proj_create_crs_to_crs` 等) を選択する。
+- **shpx-driver-spatialite (v0.6 cycle 4、CI smoke job + docs + 0.6.0 release)**: `.github/workflows/ci.yml` に `bundled-spatialite-smoke` job を追加 (ubuntu-latest、`libsqlite3-mod-spatialite` を apt から除外、`cmake` / `clang` のみ apt 導入、`cargo build -p shpx-cli --features bundled-spatialite --release` 成功 + `cargo test -p shpx-driver-spatialite --features bundled-spatialite` 緑、`SHPX_TEST_SPATIALITE=1` で env-gated 統合テストも実行)。`docs/SPATIALITE.md` に「bundled-spatialite ビルド」節新設 (有効化方法 / vendor 範囲 / ビルドツール / ライセンス制約 / サポート OS / 静的初期化経路 / smoke test) と「内部実装メモ」の `mod_spatialite` ロード経路を bundled / default で 2 経路に分けて訂正。「スコープ外」節から bundled-spatialite 関連 bullet を削除。
+
+### Build
+
+- workspace MSRV は 1.85 据え置き。`bundled-spatialite` feature 経由で `geos-src 0.2` / `link-cplusplus 1` / `cc 1` が build-dep として引かれる (workspace dep として cycle 1-2 で追加済み)。default ビルド (feature 未指定) では追加依存なし。
+- workspace `Cargo.toml` の `[workspace.package].version` を `0.5.0` → `0.6.0` へ bump。全 driver / cli は `version.workspace = true` で追従。
+- CI (`.github/workflows/ci.yml`): `bundled-spatialite-smoke` job 追加（ubuntu-latest、`libsqlite3-mod-spatialite` apt 不在の cleanroom 環境で bundled CLI build + driver test を緑化することを保証）。既存 `fmt` / `clippy` / `test` job は変更なし。
+
+### Known Issues
+
+- **bundled-spatialite の OS サポートは Linux x86_64 のみ CI 検証**: macOS (Apple Silicon / Intel) / Windows は cycle 当初は best-effort。`cargo build --features bundled-spatialite` をローカルで叩いた場合、cmake と clang/gcc 適合バージョンが揃っていれば動くが、CI で常時検証はしていない。v1.0 の `cargo-dist` 配信時に追加 OS の smoke job を整備する予定。
+- **bundled feature 時に `SHPX_SPATIALITE_PATH` env は warn で無視**: bundled で static link されている前提のため、ユーザが手元の system mod_spatialite をロードしたい場合は default (feature 未指定) ビルドを使うか、env を立てずに bundled init に任せる。
+- **GEOS / PROJ の version pin は indirect**: `geos-src` / `proj-sys` の最新版が引かれるため、上流のメジャー bump で API 不整合が出る可能性がある。v1.0 までに version pin 戦略を確定する。
+
 ## [0.5.0] - 2026-05-03
 
 v0.5 マイルストーン「SpatiaLite」のリリース。`shpx-driver-spatialite` で SpatiaLite (`*.sqlite` / `*.db` / `*.spatialite` / `sqlite://`) の read/write を提供する。`rusqlite` (`bundled` SQLite) + `mod_spatialite` 動的ロード、自前 `shpx-geom::spatialite_blob` コーデック、`AddGeometryColumn` 経由の `geometry_columns` 登録、`GeomFromWKB(?, srid)` でのジオメトリ I/O、`--create-table` 3 種、`--create-index` 3 種 (`Always` / `Auto` で `SELECT CreateSpatialIndex(...)` の R\*Tree)、未登録 EPSG の `spatial_ref_sys` への best-effort `INSERT OR IGNORE`、SpatiaLite ↔ GPKG / SpatiaLite ↔ Shapefile の cross-driver 往復テストまでを含む。`bundled-spatialite` feature 宣言は driver / CLI の Cargo.toml に残るが、本実装は v0.6 に繰り延べ（workspace に `build.rs` の足場が無く、libspatialite が GEOS / PROJ にも依存して vendor 範囲が cycle 1 つに収まらないため）。詳細は `docs/SPATIALITE.md`。
@@ -134,7 +157,8 @@ v0.1 マイルストーン「コア骨格 / SHP ↔ GeoParquet PoC」のリリ�
 - PostGIS / SQL Server / SpatiaLite / GeoPackage / GeoJSON / FlatGeobuf / CSV は後続マイルストーン (v0.2–v0.5) で対応する。
 - ライセンスは v1.0 までに最終決定する（MIT / Apache-2.0 dual を想定）。
 
-[Unreleased]: https://github.com/jumboly/shpx/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/jumboly/shpx/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/jumboly/shpx/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jumboly/shpx/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jumboly/shpx/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jumboly/shpx/compare/v0.2.0...v0.3.0
