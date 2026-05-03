@@ -2790,9 +2790,10 @@ fnct_InitSpatialMetaData (sqlite3_context * context, int argc,
     if (ret != SQLITE_OK)
 	goto error;
 
-/* shpx-patch (v0.6 cycle 1): VirtualKNN2 module は OMIT_GEOS 時に登録されないため、
- * このまま CREATE VIRTUAL TABLE すると "no such module: VirtualKNN2" でロールバックされ、
- * spatial_ref_sys / geometry_columns まで失われる。OMIT_GEOS ビルドでは KNN2 をスキップ。 */
+/* shpx-patch: VirtualKNN2 module is wrapped in `#ifndef OMIT_GEOS` in
+ * src/spatialite/virtualknn2.c, so an unguarded `CREATE VIRTUAL TABLE KNN2`
+ * here would roll back the entire transaction (including spatial_ref_sys /
+ * geometry_columns) when shpx builds with OMIT_GEOS. */
 #ifndef OMIT_GEOS
 /* creating the KNN2 VIRTUAL TABLE */
     strcpy (sql, "CREATE VIRTUAL TABLE KNN2 ");
@@ -2894,7 +2895,7 @@ fnct_InitAdvancedMetaData (sqlite3_context * context, int argc,
     if (ret != SQLITE_OK)
 	goto error;
 
-/* shpx-patch (v0.6 cycle 1): InsertEpsgSrid 経路の KNN2 も OMIT_GEOS 時に skip。 */
+/* shpx-patch: same OMIT_GEOS guard as the KNN2 CREATE above. */
 #ifndef OMIT_GEOS
 /* creating the KNN VIRTUAL TABLE */
     strcpy (sql, "CREATE VIRTUAL TABLE IF NOT EXISTS KNN2 ");
