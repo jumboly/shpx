@@ -1,0 +1,12 @@
+# upstream tarball (vendor 元の SHA256)。再現性確認用。
+# 公式配布元: https://www.gaia-gis.it/gaia-sins/libspatialite-sources/
+# vendor/ 以下は in-tree commit してあるが、上流バイナリと bit-identical であることを示す。
+43be2dd349daffe016dd1400c5d11285828c22fea35ca5109f21f3ed50605080  libspatialite-5.1.0.tar.gz
+
+# 上流から in-tree vendor 時に除外したもの (理由は build.rs / NOTICE 参照):
+#  - test/                       (47MB、テストデータと test driver、shpx の build には不要)
+#  - examples/                   (108KB、サンプル C プログラム、build には不要)
+#  - aclocal.m4 / configure / config.* / Makefile.* など autotools 生成物 (build.rs で代替)
+#  - src/srsinit/epsg_inlined_{00..63,prussian}.c (12MB、OMIT_EPSG 時は不要、wgs84 と extra のみ残す)
+#  - src/srsinit/epsg_update/    (上流 maintainer 用のコード生成スクリプト)
+#  - src/connection_cache/generator/ / src/gaiageo/lemon/ / src/gaiageo/flex/ (同上)

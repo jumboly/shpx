@@ -2559,7 +2559,9 @@ version = "0.5.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
+ "cc",
  "chrono",
+ "libsqlite3-sys",
  "rusqlite",
  "serde",
  "serde_json",

@@ -124,6 +124,13 @@ tempfile      = "3"
 assert_cmd    = "2"
 predicates    = "3"
 
+# build.rs 用 C コンパイラ呼び出しラッパ。
+# v0.6 cycle 1 で `shpx-driver-spatialite` の `bundled-spatialite` feature 実装に
+# 初導入 (libspatialite C ソースを vendor から static link)。workspace に build.rs を
+# 持つ crate はこれが初なので、workspace dep として宣言しておく (将来 GEOS / freexl 等の
+# bundled 化で他 driver からも参照する可能性が高いため)。
+cc            = "1"
+
 [workspace.lints.rust]
 # `unsafe` は明示的に許可するモジュール以外で禁止。
 unsafe_code = "deny"
