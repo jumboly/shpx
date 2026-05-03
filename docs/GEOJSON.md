@@ -2,7 +2,7 @@
 
 `.geojson` (RFC 7946 FeatureCollection) と `.geojsonl` / `.ndjson` / `.jsonl` (1 行 1 Feature の NDJSON) を `shpx-driver-geojson` が担当する。
 
-## 対応範囲（v0.2 サイクル 2）
+## 対応範囲（v0.7 リリース時点）
 
 - 読み:
   - `.geojson` — `FeatureCollection` または単発 `Feature`
@@ -91,23 +91,28 @@ RFC 7946 §4 に従い出力は **EPSG:4326 のみ**。v0.2 cycle 5 から、非
 | `null` | `null` |
 | `Boolean` | `true` / `false` |
 | `Int8..Int64` / `UInt8..UInt32` | `Number` |
-| `UInt64` | `i64::MAX` 以下は `Number`、超過は `--on-loss=warn` で文字列、`error` で停止 |
-| `Float16` / `Float32` / `Float64` | `Number`（NaN / Infinity は `--on-loss=warn` で `null`、`error` で停止。RFC 8259 で禁止のため） |
-| `Decimal128(p, s)` | 文字列（精度保全のため。`--on-loss=warn` のみ許容、`error` は停止、`skip` は列除外） |
+| `UInt64` | `i64::MAX` 以下は `Number`、超過は `--on-loss` 経由で `uint64-overflow-on-geojson` |
+| `Float16` / `Float32` / `Float64` | `Number`（NaN / Infinity は `--on-loss` 経由で `nonfinite-float-on-geojson`、RFC 8259 で禁止のため `null` 化） |
+| `Decimal128(p, s)` | `--on-loss` 経由で `decimal-on-geojson`（列除外）。RFC 7946 で `number` への昇格に精度損失が起きうるため |
 | `Date32` / `Date64` | `"YYYY-MM-DD"` |
 | `Timestamp(unit, None)` | `"YYYY-MM-DDTHH:MM:SS[.fff...]"`（unit ごとに小数桁数を切替） |
 | `Timestamp(unit, "UTC"/"Z")` | 末尾 `Z` |
 | `Timestamp(unit, "+09:00")` | 末尾 `+09:00` |
 | `Utf8` / `LargeUtf8` | string |
-| `Binary` / `LargeBinary` (geometry 以外) | `--on-loss=error` 中断、`warn` で `null`、`skip` で列除外 |
+| `Binary` / `LargeBinary` (geometry 以外) | `--on-loss` 経由で `binary-on-geojson`（列除外） |
 | `Geometry` (Binary + `shpx:geometry` meta) | `{"type":"Point",...}` 等の Geometry オブジェクト |
-| `List` / `Struct` / `Map` | サポート外（`skip` で列除外、その他は中断） |
+| `List` / `Struct` / `Map` | `--on-loss` 経由で `structured-on-geojson`（warn でも書き出し時に拒否、skip のみ列除外） |
+| `Timestamp(Nanosecond \| Microsecond, _)` | `--on-loss` 経由で `timestamp-precision-on-geojson`（列除外）。RFC 7946 表現は ms 精度までしか保証できないため |
 
-## 制約と未対応事項
+## 損失変換
+
+`--on-loss=error|warn|skip` の挙動と、GeoJSON driver が発する loss kind 一覧 (`binary-on-geojson` / `structured-on-geojson` / `decimal-on-geojson` / `uint64-overflow-on-geojson` / `nonfinite-float-on-geojson` / `timestamp-precision-on-geojson`) は [`docs/ON_LOSS.md`](ON_LOSS.md) を参照。
+
+## スコープ外
 
 ### Z / M 座標（3D / 4D）
 
-`[x, y, z]` 形式の Point などは v0.2 サイクル 2 では未対応で、reader が `Error::Geometry("3D coordinates are not supported")` を返す。`shpx_geom::Geom` に Z/M を追加する v0.3 で同時に解禁する。
+`[x, y, z]` 形式の Point などは未対応で、reader が `Error::Geometry("3D coordinates are not supported")` を返す。`shpx_geom::Geom` に Z/M を追加するタイミングで同時に解禁する (Future work)。
 
 ### `GeometryCollection`
 
@@ -123,15 +128,7 @@ GeoJSON `Feature.id` は読み捨てる。v0.3 で `_id` 専用列としてラ�
 
 ### 巨大 FeatureCollection
 
-現サイクルでは FeatureCollection / GeoJSONL のいずれも全件メモリロードする（`Vec<geojson::Feature>`）。`struson` 等の streaming JSON parser を導入してインクリメンタル読みに切り替えるのは Future work。
-
-### Decimal の精度
-
-JSON `Number` は IEEE754 で精度欠落するため、Decimal128 は文字列降格 (`--on-loss=warn`) のみ許容する。`error` 経路では停止し、`skip` で列除外する。
-
-### NaN / Infinity
-
-RFC 8259 で `Number` 表現が禁じられているため、Float の NaN / Infinity は `--on-loss=warn` で `null`、`error` で停止する。
+FeatureCollection / GeoJSONL のいずれも全件メモリロードする（`Vec<geojson::Feature>`）。`struson` 等の streaming JSON parser でのインクリメンタル読みは Future work。
 
 ### RFC 7946 違反入力への寛容性
 
@@ -139,16 +136,31 @@ RFC 8259 で `Number` 表現が禁じられているため、Float の NaN / Inf
 
 ## GeoJSON 固有オプション（暫定: 環境変数）
 
-`WriteOpts` / `ReadOpts` に driver-specific 拡張機構が無いため、v0.2 サイクル 2 では下記の環境変数で受ける。
+`WriteOpts` / `ReadOpts` に driver-specific 拡張機構が無いため、現時点では下記の環境変数で受ける。
 
 | 環境変数 | 用途 | 既定 |
 |---|---|---|
 | `SHPX_GEOJSON_PRETTY` | FeatureCollection 出力時の pretty-print（`true`/`false`）。GeoJSONL では無視 | `false` |
 
-### Future work
+## 環境変数まとめ
+
+| 変数 | 役割 |
+|---|---|
+| `SHPX_GEOJSON_PRETTY` | FeatureCollection 出力時の pretty-print 切替 |
+
+## 内部実装メモ
+
+- `Capabilities { read: true, write: true, bulk_load: false, supports_blob: false, supports_decimal: false (列除外), supports_timestamp_tz: true (秒精度のみ), string_encoding: Fixed("utf-8") }`
+- 読み出しは `geojson::FeatureCollection` (`.geojson`) または行単位 `geojson::Feature` (`.geojsonl` 等) の 2 経路
+- 書き出しは `serde_json::Value` を組み立てて `serde_json::to_writer` で 1 行ずつ flush
+- 非 EPSG:4326 入力の自動 reproject は `shpx-geom::Reprojector` を経由 (`shpx-cli` の `--reproject` 経路と同実装を共有)
+- `apply_on_loss` ヘルパは `crates/shpx-driver-geojson/src/util.rs` で `shpx-rdb-common` の薄ラッパとして定義 (`tracing::warn!(target: "shpx::geojson", ...)` で driver target 固定)
+- `null` geometry の Feature は Arrow `Binary` 列の `null` セルに対応
+
+## Future work
 
 - `--geojson-crs-extension` で非標準 `crs` メンバの書き出し（PostGIS / Leaflet 互換用途）
 - `Feature.id` 専用列（`_id`）でのラウンドトリップ
 - foreign members の保全（属性カラムまたは driver-specific メタデータ経由）
 - `struson` 等での streaming JSON 読み出し
-- GeometryCollection / Z / M 座標の対応（`shpx_geom::Geom` の v0.3 拡張と同時）
+- GeometryCollection / Z / M 座標の対応（`shpx_geom::Geom` の拡張と同時）

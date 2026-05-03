@@ -2,7 +2,7 @@
 
 `.gpkg` (OGC GeoPackage 1.3) を `shpx-driver-gpkg` が担当する。GDAL 非依存方針に従い、`rusqlite` (`bundled` SQLite) と自前の GeoPackage Binary geometry コーデック (`shpx-geom::gpkg_blob`) で構成される。
 
-## 対応範囲（v0.2 サイクル 3）
+## 対応範囲（v0.7 リリース時点）
 
 - 読み:
   - `.gpkg` の feature テーブル（`gpkg_contents.data_type='features'`）
@@ -53,7 +53,7 @@ shpx は 1 つの GPKG ファイルに対して 1 つの feature テーブルを
    - それ以外 → `Crs { authority, wkt: Some(definition), wkt_flavor: V1, .. }`（`definition` は WKT1）
    - srs_id が `-1` または `0`（仕様必須の Undefined SRS）→ CRS 不明として扱う
 
-`gpkg_spatial_ref_sys` に存在しない srs_id を `gpkg_geometry_columns` が指している場合は `Error::Crs("dangling srs_id N")` で停止する。GPKG 1.3 拡張の `definition_12_063` 列（WKT2）は v0.2 では読まない。
+`gpkg_spatial_ref_sys` に存在しない srs_id を `gpkg_geometry_columns` が指している場合は `Error::Crs("dangling srs_id N")` で停止する。OGC 12-063 拡張で追加される `definition_12_063` 列（WKT2）は v0.7 から拾うようになり、列が存在し非空であれば `Crs.wkt2` に格納する (`definition` の WKT1 と並走)。
 
 ### 書き出し
 
@@ -116,13 +116,13 @@ offset size 内容
 
 ## 損失変換
 
-- `Decimal128/256` → `TEXT` は値の文字列表現で精度を保つが、表計算では再 parse が必要。`--on-loss` を尊重
-- `UInt64` の `i64::MAX` 超過値は warn で `i64::MAX` に飽和、skip で NULL
-- `Timestamp` の name 付き TZ（例: `"Asia/Tokyo"`）は UTC に変換して書き出し（offset で表せない）
+`--on-loss=error|warn|skip` の挙動と、GPKG driver が発する loss kind 一覧 (`decimal-on-gpkg` / `uint64-overflow-on-gpkg` / `missing-crs-on-gpkg`) は [`docs/ON_LOSS.md`](ON_LOSS.md) を参照。
 
-## マルチレイヤ・スコープ外
+なお、`Timestamp` の name 付き TZ（例: `"Asia/Tokyo"`）は UTC に変換して書き出す (offset で表せないため `--on-loss` 経路は経由せず固定動作)。
 
-v0.2 では以下が未対応。`docs/ROADMAP.md` の v0.3 以降で扱う:
+## スコープ外
+
+以下は未対応:
 
 - 複数 feature テーブルへの append/replace 書き出し
 - `gpkg_extensions` / `gpkg_metadata` / `gpkg_metadata_reference` などの拡張テーブル
@@ -151,7 +151,7 @@ URI クエリ `?table=<name>` を指定すると環境変数より優先され�
 ## Future work
 
 - 完全 streaming reader（現状は open() で全行を `Vec<Row>` に展開）
-- `definition_12_063` (WKT2) の読み出しを `definition` (WKT1) より優先する `--gpkg-prefer-wkt2` オプション
+- `definition_12_063` (WKT2) を `definition` (WKT1) より優先して `Crs::wkt2` に格納するか選択する `--gpkg-prefer-wkt2` オプション (現状は両方並走)
 - マルチレイヤ書き出しと `--gpkg-table` CLI フラグ
 - spatial index 自動生成（`--gpkg-create-spatial-index`）
 - Z/M 拡張（`shpx-geom::wkb` の Z/M 対応と同時）

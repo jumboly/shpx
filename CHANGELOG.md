@@ -4,6 +4,41 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-03
+
+v0.7 マイルストーン「Driver Feature Parity & Refactor」のリリース。3 並列 Explore 監査で発見した driver 間 parity ギャップ (`/Users/masa/.claude/plans/velvety-percolating-hinton.md` 参照) のうち data-correctness に直結する 3 項目 ((1) Parquet writer の OnLoss scaffold 整備、(2) GeoJSON writer の silent demotion を `apply_on_loss` 経由化、(3) SpatiaLite reader への `--where` / `--select` / `--query` backport) を塞ぎ、cycle 2 で reader 側の CRS metadata 経路 (Parquet PROJJSON / FGB header `crs` / GPKG `definition_12_063` WKT2) を完備、`crates/shpx-cli/tests/cross_driver_matrix.rs` で driver 横断 e2e roundtrip matrix を整備した。配布工程 (`cargo-dist`、追加 OS 対応) は v1.0 へ分離する。
+
+### Added
+
+- **shpx-driver-spatialite (v0.7 cycle 1、reader filtering backport)**: `crates/shpx-driver-spatialite/src/reader.rs` を PostGIS 同型の table mode / query mode 2 経路に分け、`ReadOpts.where_clause` / `select` / `query` を CLI から受け取れるようにした。table モードでは `?table=` で解決した名前に `WHERE` / 列絞り SQL を埋め、query モードでは任意 SQL をサブクエリ化して列メタを引き直す。geometry 列を含まない `--select` / `--query` と `--query` 末尾の `;` は `Error::Driver` で拒否 (PostGIS と同方針)。
+- **shpx-driver-geojson (v0.7 cycle 1、OnLoss 経由化)**: writer の silent demotion 経路を `apply_on_loss` 経由に置換した。Decimal128/256 列は `decimal-on-geojson` で列除外、`Timestamp(Nanosecond | Microsecond, _)` 列は `timestamp-precision-on-geojson` で列除外、`UInt64` の `i64::MAX` 超過値は `uint64-overflow-on-geojson` で文字列降格、`Float32/64` の NaN / Infinity は `nonfinite-float-on-geojson` で `null` 化。`Binary` / `LargeBinary` と `List` / `Struct` / `Map` の既存経路 (`binary-on-geojson` / `structured-on-geojson`) も `apply_on_loss` ヘルパに統一。
+- **shpx-driver-parquet (v0.7 cycle 1、OnLoss scaffold)**: `crates/shpx-driver-parquet/src/util.rs` に `apply_on_loss` ヘルパと空の `loss_kind` module を整備した。現状の Parquet writer は `coerce_types=false` 固定で `Timestamp(Nanosecond)` / `Decimal128(<= 38)` を完全保持し、shpx 中間表現も XY のみのため `precision-on-parquet` / `nanosecond-truncation-on-parquet` / `z-on-parquet` / `m-on-parquet` の発火経路は存在しない (テストでロスなしを裏付け)。`--parquet-coerce-types` 等のフラグを追加した時点で実定数を順次入れる想定。
+- **shpx-driver-parquet (v0.7 cycle 2、reader CRS metadata)**: Arrow field metadata の `geo` JSON (`columns.<geom>.crs`) を `shpx_geom::projjson::decode` で parse し、`Crs` の authority / wkt2 / projjson を復元する reader 経路を追加。
+- **shpx-driver-fgb (v0.7 cycle 2、reader CRS metadata)**: header の `crs` field (`org` / `code` / `wkt`) を parse し、authority + WKT2 を `Crs` に復元する reader 経路を追加 (それ以前は EPSG 整数のみ拾っていた)。
+- **shpx-driver-gpkg (v0.7 cycle 2、WKT2 reader 完備)**: `gpkg_spatial_ref_sys` の OGC 12-063 拡張列 `definition_12_063` (WKT2) を reader が拾うようになった。列が存在し非空であれば `Crs.wkt2` に格納し、`definition` (WKT1) と並走する (どちらを優先するかの `--gpkg-prefer-wkt2` フラグは Future work)。
+- **shpx-cli (v0.7 cycle 2、cross-driver matrix)**: `crates/shpx-cli/tests/cross_driver_matrix.rs` を新設し、PostGIS ↔ SQL Server / SpatiaLite / Parquet / FGB / GeoJSON / SHP の主要往復を env-gate で網羅。既存 `crates/shpx-driver-spatialite/tests/cross_driver_roundtrip.rs` は driver scope の回帰検出として残す。
+
+### Internal
+
+- **`shpx_rdb_common::percent_decode` 統一 (v0.7 cycle 2)**: GPKG / SpatiaLite / SQL Server の `options.rs` に重複していた自前 `percent_decode` を `shpx-rdb-common` の共通ヘルパに集約した。各 driver の挙動・エラーメッセージ・tracing target は不変で、CLI ユーザー視点の挙動には影響しない。
+- **GPKG `apply_on_loss` の rdb-common closure パターン化 (v0.7 cycle 2)**: GPKG driver で直接 `tracing::warn!` を呼んでいた経路を、他 driver と同じく `shpx_rdb_common::apply_on_loss(kind, field, on_loss, warn_fn)` の closure 経路に揃えた。
+
+### Docs
+
+- **`docs/ON_LOSS.md` 新設**: driver × loss kind の動作表 + driver 別の発火条件 + `--on-loss=error|warn|skip` の動作仕様 + 内部実装メモを 1 箇所に集約。各 driver docs の「損失変換」節は ON_LOSS.md への 1 行リンクへ短縮した。
+- **ファイル driver docs の体裁統一**: `docs/CSV.md` / `docs/GEOJSON.md` / `docs/GPKG.md` / `docs/FGB.md` を `docs/POSTGIS.md` / `docs/SQLSERVER.md` / `docs/SPATIALITE.md` と同型構造 (対応範囲 / サポート対象拡張子 / CRS の扱い / ジオメトリ / データ型マッピング / 損失変換 / 環境変数まとめ / スコープ外 / 内部実装メモ / Future work) に揃えた。各 driver 固有の章 (CSV「区切り文字」「エンコーディング」、GeoJSON「properties の型推論」など) は保持。
+- **`docs/CRS.md` reader 経路節を追加**: cycle 2 で実装された Parquet PROJJSON / FGB header `crs` / GPKG `definition_12_063` (WKT2) の reader 解決経路を「各フォーマットからの読み出しマッピング」表として追記。
+- **`docs/ROADMAP.md` の訂正**: v0.5 完了基準のチェックボックス 2 件 (L.128-129) を `[ ]` → `[x]` に訂正 (実体は v0.5 cycle 2a / 3 で実装済み)。v0.7 cycle 1 description (L.203) を Parquet OnLoss scaffold 実態 (実 LossKind 定数追加は v0.8+) に訂正。
+
+### Build
+
+- workspace MSRV は 1.85 据え置き。新規依存の追加なし。
+- workspace `Cargo.toml` の `[workspace.package].version` を `0.6.0` → `0.7.0` へ bump。全 driver / cli は `version.workspace = true` で追従。
+
+### Known Issues
+
+- **Parquet driver の OnLoss は scaffold のみ**: `crates/shpx-driver-parquet/src/util.rs` の `loss_kind` module は空で、実際の損失検出は発火しない。現状の writer が `coerce_types=false` 固定で発火経路を持たないためで、`--parquet-coerce-types` 等のフラグや Z/M 中間表現を導入した時点で `precision-on-parquet` / `nanosecond-truncation-on-parquet` / `z-on-parquet` / `m-on-parquet` を順次追加する。
+
 ## [0.6.0] - 2026-05-03
 
 v0.6 マイルストーン「bundled-spatialite + 配布バイナリ準備」のリリース。`crates/shpx-driver-spatialite/build.rs` で libspatialite 5.1.0 / libgeos / libproj を C ソースから vendor + `cc` static link する `bundled-spatialite` feature の本実装、`.github/workflows/ci.yml` への `bundled-spatialite-smoke` job 追加、`docs/SPATIALITE.md` の bundled 節新設までを含む。v0.5.0 で「Known Issues: bundled-spatialite は v0.6 で本実装」と書いた制限を解消する。CI で常時検証するのは Linux x86_64 のみで、macOS (Apple Silicon / Intel) / Windows は v1.0 の `cargo-dist` 配信時に拡張する best-effort 段階。詳細は `docs/SPATIALITE.md` の「bundled-spatialite ビルド」節を参照。
@@ -157,7 +192,8 @@ v0.1 マイルストーン「コア骨格 / SHP ↔ GeoParquet PoC」のリリ�
 - PostGIS / SQL Server / SpatiaLite / GeoPackage / GeoJSON / FlatGeobuf / CSV は後続マイルストーン (v0.2–v0.5) で対応する。
 - ライセンスは v1.0 までに最終決定する（MIT / Apache-2.0 dual を想定）。
 
-[Unreleased]: https://github.com/jumboly/shpx/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/jumboly/shpx/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/jumboly/shpx/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/jumboly/shpx/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jumboly/shpx/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jumboly/shpx/compare/v0.3.0...v0.4.0
