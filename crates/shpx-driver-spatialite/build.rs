@@ -43,8 +43,12 @@ fn main() {
     // 順序が重要: libgeos_c は libgeos に依存。
     println!("cargo:rustc-link-lib=static=geos_c");
     println!("cargo:rustc-link-lib=static=geos");
-    // `gg_relations.c::evalGeosCache` が zlib の `crc32` を使う。OS 同梱の libz を動的リンク。
-    println!("cargo:rustc-link-lib=z");
+    // `gg_relations.c::evalGeosCache` が zlib の `crc32` を要求する。libz-sys の
+    // `static` feature が vendored libz.a を build し search path (`out/lib`) を
+    // 通すが、Rust 側で symbol を参照しないため link directive は自動伝搬しない。
+    // 本 build.rs から明示的に `static=z` を発行する。Windows MSVC でも同経路で
+    // vendored zlib を static link する (3 OS で同一バージョン pin)。
+    println!("cargo:rustc-link-lib=static=z");
 
     // PROJ は proj-sys (`links = "proj"`) が `cargo:rustc-link-lib=proj` を出すため、
     // 本 build.rs からは link 命令を出さず Cargo に link 順解決を任せる。
@@ -65,7 +69,15 @@ fn main() {
         .include(geos_root.join("include"))
         .include(proj_root.join("include"))
         .include(src_dir.join("headers"))
-        .define("VERSION", "\"5.1.0\"")
+        .define("VERSION", "\"5.1.0\"");
+    // libz-sys (`links = "z"`) が `cargo:include=<path>` を emit するため、消費側の本
+    // build.rs に `DEP_Z_INCLUDE` 環境変数で渡される。spatialite_private.h が `<zlib.h>`
+    // を `#include` するために必要。Linux/macOS は system zlib も system include に居るが、
+    // libz-sys vendored を優先することで 3 OS で同一 zlib バージョン (Cargo.lock pin) を保証する。
+    if let Ok(zlib_include) = std::env::var("DEP_Z_INCLUDE") {
+        build.include(zlib_include);
+    }
+    build
         // `PROJ_NEW=1` は cc command line で渡す必要がある (gaiaconfig.h で defined しても、
         // 一部 .c (例: srid_aux.c) は `<spatialite/gaiaconfig.h>` を読む前に
         // `#ifdef PROJ_NEW ... #include <proj.h> #else #include <proj_api.h>` を評価する。
