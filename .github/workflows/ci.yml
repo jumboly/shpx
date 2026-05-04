@@ -132,6 +132,12 @@ jobs:
             install-cmd: brew install cmake
           - label: windows
             os: windows-latest
+            # libspatialite 5.1.0 の `gg_shape.c::gaia_win_fopen` 周辺の `GAIAGEO_DECLARE`
+            # parser が MSVC で通らず `error C2054` で落ちる問題は v1.0 cycle 4 から既知で
+            # 未解決。release から bundled-spatialite を除外する方針 (`dist-workspace.toml`)
+            # と整合させ、CI smoke 側も best-effort 扱いにして upstream が修正されたとき
+            # 自動的に green になる検知シグナルとしてのみ残す。
+            continue-on-error: true
             # Why sqlite: proj-sys 0.25.0 (libproj 9.4) の cmake configure が
             # sqlite3.exe を PATH 上に要求する (proj.db を build 時に生成するため)。
             # Linux/macOS は apt/brew が `sqlite3` バイナリを同梱、Windows runner image
