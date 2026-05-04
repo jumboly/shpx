@@ -11,12 +11,29 @@
 //! 3. 既定: `mod_spatialite` を SQLite に渡し、OS のライブラリ検索パスから dlopen。
 
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use rusqlite::{Connection, OpenFlags};
 use shpx_core::Result;
 
 use crate::meta::SQL_GEOMETRY_COLUMNS_EXISTS;
 use crate::util::{driver_err, driver_msg};
+
+/// Why: libspatialite (5.1.0) は extension load (`spatialite_init_ex` /
+/// `sqlite3_modspatialite_init`) と `InitSpatialMetadata()` の双方で global PROJ /
+/// GEOS context や allocator caches を変更するが、公式 docs はスレッドセーフを
+/// 保証していない。`cargo test` の並列実行で複数 connection が同時に load + init
+/// すると glibc malloc が `double free or corruption` で SIGABRT する flaky 失敗を
+/// CI で観測したため、process 単一の Mutex で load + init を serialize する。
+/// bundled / dynamic 両経路と open_read / open_write_new の双方で共通利用する。
+/// 実害は init 直後の数 ms ロックのみで、SQL 実行中は Mutex を握らない。
+static LIBSPATIALITE_INIT_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_libspatialite_init() -> MutexGuard<'static, ()> {
+    LIBSPATIALITE_INIT_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
 
 /// 環境変数: `mod_spatialite` 共有ライブラリのパス上書き。
 pub const ENV_SPATIALITE_PATH: &str = "SHPX_SPATIALITE_PATH";
@@ -25,6 +42,7 @@ pub const ENV_SPATIALITE_PATH: &str = "SHPX_SPATIALITE_PATH";
 pub fn open_read(path: &Path) -> Result<Connection> {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let conn = Connection::open_with_flags(path, flags).map_err(|e| driver_err(&e))?;
+    let _guard = lock_libspatialite_init();
     load_mod_spatialite(&conn)?;
     verify_geometry_columns(&conn)?;
     Ok(conn)
@@ -39,6 +57,7 @@ pub fn open_write_new(path: &Path) -> Result<Connection> {
         .map_err(|e| driver_err(&e))?;
     conn.pragma_update(None, "synchronous", "NORMAL")
         .map_err(|e| driver_err(&e))?;
+    let _guard = lock_libspatialite_init();
     load_mod_spatialite(&conn)?;
     init_spatial_metadata(&conn)?;
     Ok(conn)
@@ -72,7 +91,7 @@ fn load_mod_spatialite(conn: &Connection) -> Result<()> {
 #[cfg(feature = "bundled-spatialite")]
 #[allow(unsafe_code)]
 fn load_bundled(conn: &Connection) -> Result<()> {
-    use std::sync::{Mutex, Once};
+    use std::sync::Once;
 
     // libspatialite を `-DLOADABLE_EXTENSION` なし (ordinary lib モード) で link しており、
     // `sqlite3_modspatialite_init` は build されない。代わりに static-link API を呼ぶ。
@@ -92,14 +111,6 @@ fn load_bundled(conn: &Connection) -> Result<()> {
     // 誤解されがちなので、最初の load 時に 1 回だけ警告する。
     static WARN_ENV: Once = Once::new();
     static GLOBAL_INIT: Once = Once::new();
-    // Why: libspatialite の `spatialite_alloc_connection` / `spatialite_init_ex` は
-    // 内部で global PROJ / GEOS context や allocator caches を変更するが、
-    // 公式 docs はスレッドセーフを保証していない (5.1.0 時点)。`cargo test` の
-    // 並列実行で複数 connection を同時 init すると glibc malloc が `double free
-    // or corruption (fasttop)` で SIGABRT する flaky 失敗を CI で観測したため、
-    // process 単一の Mutex で alloc + init を serialize する。実害は init 直後の
-    // 数 ms ロックのみで、SQL 実行中は Mutex を握らない。
-    static INIT_LOCK: Mutex<()> = Mutex::new(());
 
     WARN_ENV.call_once(|| {
         if std::env::var_os(ENV_SPATIALITE_PATH).is_some() {
@@ -115,9 +126,8 @@ fn load_bundled(conn: &Connection) -> Result<()> {
     // libspatialite 側に extension data として登録され、`sqlite3_close` 時に
     // libspatialite の destructor 経由で自動解放される (`spatialite_cleanup_ex` を
     // shpx 側から明示的に呼んではならない、二重解放になる)。
-    let _guard = INIT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // 並列スレッド競合は呼び出し側 (`open_read` / `open_write_new`) で
+    // `LIBSPATIALITE_INIT_LOCK` を握っているのでここでは Mutex 不要。
     unsafe {
         GLOBAL_INIT.call_once(|| spatialite_initialize());
         let cache = spatialite_alloc_connection();
