@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### Fixed (v1.x SQL Server 戦略 — 中期)
+
+- **shpx-driver-sqlserver: `Daten` COLMETADATA length バイトの bulk insert bug を修正**: `tiberius 0.12.3` の `bulk_insert` 経路で `DataType::Date32` 列を含む schema を送ると、`Daten` の COLMETADATA に length バイトが余分に 1 個書かれて後続列の type info を破壊し、SQL Server が `Invalid column type from bcp client for colid N` (error 4816) を返していた。**最小再現は 3 列 / 1 行** (`id Int64 + created Date32 + geom`)、含意は `bench-rss` SQL Server prepare の 1h+ 待ちと `bulk_all_types_together` の `#[ignore]` 化。修正方針として upstream の closed PR #346 (`Daten` 分岐で `dst.put_u8(self.len())` を発行しない) を `jumboly/tiberius` の `shpx-patches` branch に backport し、workspace `Cargo.toml` の `tiberius` dep を `crates.io` 0.12 から git fork 参照に切り替えた。`bulk_all_types_together` の `#[ignore]` も解除済み (`tests/bulk_roundtrip.rs:343`)。詳細は `docs/SQLSERVER_BULK_BUG_REPRO.md` および `docs/ROADMAP.md` v1.x の SQL Server 戦略節。
+
+### Performance (v1.x SQL Server 戦略 — 中期)
+
+- **shpx-driver-sqlserver: TDS LOGIN7 packet_size を 32767 にして bulk insert throughput を改善**: tiberius default の 4KB packet では BCP packet ごとに 1 round-trip 発生し bulk throughput が頭打ちになる。upstream PR #400 (closed-unmerged, [Add packet_size configuration for LOGIN7](https://github.com/prisma/tiberius/pull/400)) を `jumboly/tiberius#shpx-patches` に backport し、`crates/shpx-driver-sqlserver/src/conn.rs::build_config` で `Config::packet_size(32767)` を呼ぶ。SQL Server 側で 16KB あたりに negotiate-down される想定。upstream のベンチで 19.3M 行 bulk が 4KB → 16KB で 186s → 108s (**+42% throughput**) を実証済み。`bench-rss` SQL Server prepare の所要時間も短縮見込み。
+
 ### Added (v1.0 cycle 1 完了確認)
 
 - **v1.0 cycle 1 完了基準を再定義**: ogr2ogr 比較 (`shpx_secs <= 1.667 * ogr_secs`) を完了基準から外し、`bench-smoke-mssql.yml` で取得した shpx 単独 wall-clock を絶対値として公開する形に変更し `docs/ROADMAP.md` v1.0 完了基準を `[x]` 化。`scripts/bench-vs-ogr-mssql.sh` はローカル開発者向けの参考 utility として温存 (CI では使わない)。実測値と詳細は `docs/SQLSERVER.md` Benchmark 節を参照。
