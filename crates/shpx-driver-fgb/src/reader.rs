@@ -629,7 +629,12 @@ fn parse_timestamp_micros(s: &str, field: &str) -> Result<i64> {
         return Ok(naive.and_utc().timestamp() * 1_000_000);
     }
     if let Ok(date) = chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
-        return Ok(date.and_hms_opt(0, 0, 0).expect("midnight").and_utc().timestamp() * 1_000_000);
+        return Ok(date
+            .and_hms_opt(0, 0, 0)
+            .expect("midnight")
+            .and_utc()
+            .timestamp()
+            * 1_000_000);
     }
     Err(driver_msg(format!(
         "invalid DateTime `{s}` in field `{field}`"

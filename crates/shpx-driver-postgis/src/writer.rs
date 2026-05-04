@@ -208,13 +208,8 @@ impl LayerWriter for PostgisWriter {
             while row < total {
                 let n = (total - row).min(chunk_rows);
                 if n != last_n {
-                    sql_cache = build_insert_sql_chunk(
-                        schema,
-                        attr_indices,
-                        *geom_index,
-                        qualified,
-                        n,
-                    );
+                    sql_cache =
+                        build_insert_sql_chunk(schema, attr_indices, *geom_index, qualified, n);
                     last_n = n;
                 }
                 let mut owned: Vec<Box<dyn ToSql + Sync>> = Vec::with_capacity(n * params_per_row);

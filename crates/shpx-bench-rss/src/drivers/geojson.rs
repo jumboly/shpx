@@ -66,6 +66,9 @@ impl BenchDriver for GeoJsonBench {
 
     fn open_read(&self, native: &NativeInput) -> Result<Box<dyn LayerReader>> {
         let path = file_path(native, self.0.driver_name())?;
-        GeoJsonDriver.open_read(&Uri::from_path(path.display().to_string()), &ReadOpts::default())
+        GeoJsonDriver.open_read(
+            &Uri::from_path(path.display().to_string()),
+            &ReadOpts::default(),
+        )
     }
 }

@@ -409,8 +409,9 @@ fn build_insert_sql_chunk(
     let mut tuples: Vec<String> = Vec::with_capacity(chunk_rows);
     for r in 0..chunk_rows {
         let base = r * params_per_row; // 行 r の最初の @P 番号は base+1
-        let mut value_parts: Vec<String> =
-            (1..=attr_count).map(|i| format!("@P{}", base + i)).collect();
+        let mut value_parts: Vec<String> = (1..=attr_count)
+            .map(|i| format!("@P{}", base + i))
+            .collect();
         let wkb_param = format!("@P{}", base + attr_count + 1);
         let srid_param = format!("@P{}", base + attr_count + 2);
         value_parts.push(format!(
@@ -692,8 +693,7 @@ mod tests {
     fn build_insert_sql_chunk_one_row_matches_legacy_shape() {
         // chunk_rows=1 は従来の 1 行 INSERT と同じ output になるべき (regression guard)
         let schema = sample_schema();
-        let sql =
-            build_insert_sql_chunk(&schema, &[0, 1], 2, "[dbo].[t]", GeomKind::Geometry, 1);
+        let sql = build_insert_sql_chunk(&schema, &[0, 1], 2, "[dbo].[t]", GeomKind::Geometry, 1);
         assert_eq!(
             sql,
             "INSERT INTO [dbo].[t] ([id], [name], [geom]) \
@@ -704,8 +704,7 @@ mod tests {
     #[test]
     fn build_insert_sql_chunk_two_rows_increments_param_numbers() {
         let schema = sample_schema();
-        let sql =
-            build_insert_sql_chunk(&schema, &[0, 1], 2, "[dbo].[t]", GeomKind::Geometry, 2);
+        let sql = build_insert_sql_chunk(&schema, &[0, 1], 2, "[dbo].[t]", GeomKind::Geometry, 2);
         assert_eq!(
             sql,
             "INSERT INTO [dbo].[t] ([id], [name], [geom]) VALUES \
@@ -717,8 +716,7 @@ mod tests {
     #[test]
     fn build_insert_sql_chunk_geography_changes_udt_only() {
         let schema = sample_schema();
-        let sql =
-            build_insert_sql_chunk(&schema, &[0, 1], 2, "[dbo].[t]", GeomKind::Geography, 1);
+        let sql = build_insert_sql_chunk(&schema, &[0, 1], 2, "[dbo].[t]", GeomKind::Geography, 1);
         assert!(sql.contains("geography::STGeomFromWKB(@P3, @P4)"));
     }
 

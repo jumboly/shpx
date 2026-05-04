@@ -297,9 +297,9 @@ impl<R: BufRead> Iterator for NdjsonStream<R> {
             // BOM は先頭行のみ。trim() は BOM を含まないため明示除去する。
             let body = trimmed.strip_prefix('\u{feff}').unwrap_or(trimmed);
             let parsed: std::result::Result<Feature, _> = serde_json::from_str(body);
-            return Some(parsed.map_err(|e| {
-                driver_msg(format!("GeoJSONL line {}: {e}", self.lineno))
-            }));
+            return Some(
+                parsed.map_err(|e| driver_msg(format!("GeoJSONL line {}: {e}", self.lineno))),
+            );
         }
     }
 }
@@ -431,7 +431,9 @@ impl<'a> HeadScanner<'a> {
         let key = self.read_json_string()?;
         self.skip_ws();
         if self.peek() != Some(b':') {
-            return Err(driver_msg("GeoJSON FeatureCollection: expected `:` after key"));
+            return Err(driver_msg(
+                "GeoJSON FeatureCollection: expected `:` after key",
+            ));
         }
         self.pos += 1;
         self.skip_ws();
@@ -462,7 +464,9 @@ impl<'a> HeadScanner<'a> {
             }
             i += 1;
         }
-        Err(driver_msg("GeoJSON FeatureCollection: unterminated string in head"))
+        Err(driver_msg(
+            "GeoJSON FeatureCollection: unterminated string in head",
+        ))
     }
 
     /// 現在位置の値を `Value` にパースして返す (head 完結前提)。
@@ -515,9 +519,7 @@ mod tests {
     #[test]
     fn extract_crs_from_head_handles_bom() {
         let mut head = vec![0xef, 0xbb, 0xbf];
-        head.extend_from_slice(
-            br#"{"type":"FeatureCollection","crs":null,"features":[]}"#,
-        );
+        head.extend_from_slice(br#"{"type":"FeatureCollection","crs":null,"features":[]}"#);
         let v = extract_crs_from_head_bytes(&head).unwrap();
         assert_eq!(v, Some(JsonValue::Null));
     }

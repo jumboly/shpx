@@ -719,5 +719,4 @@ mod tests {
                                          // target_scale=2 → 123 (truncate to 1.23)
         assert_eq!(decimal_to_i128(d, 2, "x").unwrap(), 123);
     }
-
 }

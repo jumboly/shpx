@@ -85,7 +85,9 @@ mod tests {
         assert!(s.contains(r#""read":true"#));
         assert!(s.contains(r#""bulk_load":true"#));
         assert!(s.contains(r#""max_decimal_precision":38"#));
-        assert!(s.contains(r#""string_encoding":{"kind":"configurable","value":["utf-8","cp932"]}"#));
+        assert!(
+            s.contains(r#""string_encoding":{"kind":"configurable","value":["utf-8","cp932"]}"#)
+        );
 
         let fixed = StringEncoding::Fixed("utf-8");
         let s = serde_json::to_string(&fixed).unwrap();

@@ -134,12 +134,7 @@ impl PostgisReader {
         Self::spawn_streaming(url, &select_sql, schema, crs, columns, geom_idx)
     }
 
-    fn open_query_mode(
-        client: &Client,
-        query: &str,
-        opts: &ReadOpts,
-        url: &str,
-    ) -> Result<Self> {
+    fn open_query_mode(client: &Client, query: &str, opts: &ReadOpts, url: &str) -> Result<Self> {
         // ユーザ SQL を LIMIT 0 でサブクエリ化し、列メタだけ先取り。geometry 列は
         // PostGIS の動的 OID で発行されるが、tokio-postgres は pg_catalog から
         // typname を解決済みなので `Type::name()` で判定できる。
@@ -201,10 +196,7 @@ impl PostgisReader {
 
         thread::spawn(move || {
             rt.block_on(async move {
-                let stream = match bg_client
-                    .query_raw(&sql, std::iter::empty::<i32>())
-                    .await
-                {
+                let stream = match bg_client.query_raw(&sql, std::iter::empty::<i32>()).await {
                     Ok(s) => s,
                     Err(e) => {
                         let _ = tx.send(Err(driver_err(&e)));
@@ -957,5 +949,4 @@ mod tests {
         let p5_s10 = ((5_i32) << 16) | 0xA;
         assert_eq!(numeric_typmod_to_p_s(p5_s10 + 4), (38, 0));
     }
-
 }
