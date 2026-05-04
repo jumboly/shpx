@@ -115,7 +115,9 @@ fn load_bundled(conn: &Connection) -> Result<()> {
     // libspatialite 側に extension data として登録され、`sqlite3_close` 時に
     // libspatialite の destructor 経由で自動解放される (`spatialite_cleanup_ex` を
     // shpx 側から明示的に呼んではならない、二重解放になる)。
-    let _guard = INIT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = INIT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     unsafe {
         GLOBAL_INIT.call_once(|| spatialite_initialize());
         let cache = spatialite_alloc_connection();
