@@ -156,7 +156,9 @@ driver 固有の補助動作: 未登録 EPSG の SRID 解決時には `spatial_r
 
 ## bundled-spatialite ビルド
 
-v0.6.0 で `crates/shpx-driver-spatialite/build.rs` に libspatialite / GEOS / PROJ の vendor + `cc` static link 経路が入った。`bundled-spatialite` feature を有効化することで「配布バイナリ受け取り側にシステム libspatialite を入れさせない」ユースケース（`cargo install shpx --features bundled-spatialite` / `cargo-dist`）に対応する。default ビルド（feature 未指定）はこれまで通りシステム libspatialite（apt の `libsqlite3-mod-spatialite` / brew の `libspatialite`）を `load_extension` で見る挙動のまま。
+v0.6.0 で `crates/shpx-driver-spatialite/build.rs` に libspatialite / GEOS / PROJ の vendor + `cc` static link 経路が入った。`bundled-spatialite` feature を有効化することで「配布バイナリ受け取り側にシステム libspatialite を入れさせない」ユースケース（`cargo install shpx --features bundled-spatialite`）に対応する。default ビルド（feature 未指定）はこれまで通りシステム libspatialite（apt の `libsqlite3-mod-spatialite` / brew の `libspatialite`）を `load_extension` で見る挙動のまま。
+
+**v1.0 cargo-dist 配布バイナリでは `bundled-spatialite` を有効化していない**。理由は本ページ末尾「v1.0 配布バイナリでの方針」節を参照。`shpx convert spatialite://...` を v1.0 リリースバイナリで使うには、各 OS の package manager で `mod_spatialite` を別途 install する必要がある (Linux: `apt install libsqlite3-mod-spatialite`、macOS: `brew install libspatialite`、Windows: 後述)。完全な single binary が必要な利用者は `cargo install --path crates/shpx-cli --features bundled-spatialite` でソースから build してほしい。
 
 ### 有効化
 
@@ -186,21 +188,29 @@ CLI の `bundled-spatialite` feature は driver の `bundled-spatialite` と `sh
 
 libspatialite は **MPL 1.1 / GPL 2.0 / LGPL 2.1** の triple-licensed。bundled で配布する shpx バイナリは LGPL 2.1 (or later) 適合のため、(a) 再リンク可能な `.o` ファイル提供 もしくは (b) MPL 1.1 / GPL 2.0 のいずれかを選択して配布する。詳細は `crates/shpx-driver-spatialite/NOTICE` を参照。
 
-### サポート OS
+### v1.0 配布バイナリでの方針
 
-v1.0 cycle 4 で `cargo-dist` 配布対象 OS と CI smoke の対応を以下に整理した。`○` は GitHub Releases の Release artifact 対象、`△` は build を試みるが失敗時は当該 OS の artifact のみ欠落させて他 OS の publish を継続する best-effort 扱い。
+v1.0 cycle 4 で `cargo-dist` ベースの 5 target × 3 OS Release を整備したが、**`bundled-spatialite` 経由の libspatialite 同梱は Release バイナリには含めない**運用とした。
 
-| Target triple                  | Release artifact | CI smoke job (`.github/workflows/ci.yml`)              | system dep                         |
-| ------------------------------ | ---------------- | ------------------------------------------------------ | ---------------------------------- |
-| `x86_64-unknown-linux-gnu`     | ○                | `bundled-spatialite-smoke (linux)`                     | apt: `cmake`, `clang`              |
-| `aarch64-unknown-linux-gnu`    | ○                | (cargo-dist 側 cross compile のみ、ci.yml smoke なし)  | cargo-dist が cross 環境を準備     |
-| `aarch64-apple-darwin`         | ○                | `bundled-spatialite-smoke (macos-arm64)` (`macos-14`)  | brew: `cmake`、Apple LLVM 同梱     |
-| `x86_64-apple-darwin`          | △ best-effort    | (smoke job なし、cargo-dist 側で build のみ)           | brew: `cmake`、Apple LLVM 同梱     |
-| `x86_64-pc-windows-msvc`       | △ best-effort    | `bundled-spatialite-smoke (windows)` (`continue-on-error: true`) | choco: `llvm` (clang)、MSVC 同梱  |
+**経緯**: cycle 4 で 3 OS bundled smoke の整備を試み、Linux + macOS arm64 は緑にしたが、Windows MSVC build が次の 4 段の修正 (cmake 確保 / proj-sys が要求する sqlite3.exe / libz-sys vendor / `config-msvc.h` + `YY_NO_UNISTD_H`) を経た後に **libspatialite 5.1.0 の `gg_shape.c::gaia_win_fopen` 周辺で `GAIAGEO_DECLARE` macro 展開時に MSVC parser C2054 を踏む**地点で停止した。vendored libspatialite ソースの patch (上流 fork レベル) が必要な領域で、本 PR の範囲を大きく超える。3 OS バイナリ提供を優先するため `bundled-spatialite` を Release から外し、Spatialite を使うユーザーは各 OS の package manager で `mod_spatialite` を別途 install する運用に切り替えた。`bundled-proj` (PROJ の vendor static link) は Release で有効化を継続する (3 OS とも build 通過済み)。
 
-縮退判断: Windows / macOS x64 で `bundled-spatialite` build が安定しないことが確定した場合は、`Cargo.toml` の `[workspace.metadata.dist] targets` から該当 triple を外し、本表でも `× (build from source)` に格下げする。詳細は `docs/ROADMAP.md` v1.0 リスク節参照。
+**v1.0 Release バイナリの bundle / system dep 対応表**:
 
-best-effort target を必要とする利用者は当面 `cargo install --path crates/shpx-cli --features bundled-spatialite` でソースから build してほしい。`bundled-spatialite` feature は driver の `bundled-spatialite` と `shpx-geom/bundled-proj` を implies するため、`--features bundled-spatialite,bundled-proj` のように両方を書く必要は無い。
+| Target triple                  | Release artifact | bundled-proj | mod_spatialite (要 system install)                                  |
+| ------------------------------ | ---------------- | ------------ | ------------------------------------------------------------------- |
+| `x86_64-unknown-linux-gnu`     | ○                | static link  | `sudo apt install libsqlite3-mod-spatialite`                        |
+| `aarch64-unknown-linux-gnu`    | ○                | static link  | `sudo apt install libsqlite3-mod-spatialite`                        |
+| `aarch64-apple-darwin`         | ○                | static link  | `brew install libspatialite`                                        |
+| `x86_64-apple-darwin`          | ○                | static link  | `brew install libspatialite`                                        |
+| `x86_64-pc-windows-msvc`       | ○                | static link  | OSGeo4W 経由 (mod_spatialite.dll を取得し `SHPX_SPATIALITE_PATH` で指定) |
+
+`shpx convert spatialite://...` 実行時に `mod_spatialite` が見つからない場合は driver から `failed to load mod_spatialite at \`...\`: ...` 形式の明示エラーが出るので、その案内に従って install + 必要なら `SHPX_SPATIALITE_PATH` env で path を指定する。
+
+**完全な single binary を求める利用者**: `cargo install --path crates/shpx-cli --features bundled-spatialite` でソースから build する。Linux/macOS は確実に動作する (CI smoke green)。Windows は best-effort (上記 GAIAGEO_DECLARE 問題のため詰まる可能性あり)。
+
+### CI smoke job
+
+v1.0 配布バイナリでは `bundled-spatialite` を使わないが、上流 libspatialite の Windows 互換が改善した時点で再導入できるよう `bundled-spatialite-smoke` job (3 OS matrix、Windows のみ `continue-on-error: true`) は regression detection 用に残す (`.github/workflows/ci.yml`)。Linux / macOS arm64 は緑必須で `bundled-spatialite` の動作保証を継続する。
 
 ### 静的初期化経路
 
