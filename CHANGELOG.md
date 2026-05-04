@@ -20,6 +20,17 @@
 
 - **v1.0 cycle 1 完了基準を再定義**: ogr2ogr 比較 (`shpx_secs <= 1.667 * ogr_secs`) を完了基準から外し、`bench-smoke-mssql.yml` で取得した shpx 単独 wall-clock を絶対値として公開する形に変更し `docs/ROADMAP.md` v1.0 完了基準を `[x]` 化。`scripts/bench-vs-ogr-mssql.sh` はローカル開発者向けの参考 utility として温存 (CI では使わない)。実測値と詳細は `docs/SQLSERVER.md` Benchmark 節を参照。
 
+### Added (v1.0 cycle 4 — cargo-dist + multi-platform CI)
+
+- **`dist-workspace.toml` 新設 + `dist init` で配布工程整備**: cargo-dist 0.31 (binary 名は `dist`) を `.scratch/cargo-dist/bin/dist` に user-local install し、`dist init --yes --hosting github --installer shell` で `dist-workspace.toml` を生成。targets は `aarch64-apple-darwin` / `aarch64-unknown-linux-gnu` / `x86_64-apple-darwin` / `x86_64-unknown-linux-gnu` / `x86_64-pc-windows-msvc` の 5 triples。`features = ["bundled-spatialite"]` を明示し、Release artifact は libspatialite / GEOS / libproj / SQLite を C ソースから static link した単一バイナリで配布する。`Cargo.toml` に `[profile.dist]` (`inherits = "release"`、`lto = "thin"`) も自動追加。`shpx-bench-rss` は `[package.metadata.dist] dist = false` で Release 対象外に。
+- **`.github/workflows/release.yml` 新設**: `dist generate` で生成された tag-driven workflow。tag push (`v*.*.*`) で plan → build matrix → host (artifact upload) → announce の 5 phase。手で編集せず、metadata 変更時は再 generate する運用。
+- **`.github/workflows/ci.yml` に bundled smoke を 3 OS に拡張**: 既存の `bundled-spatialite-smoke` を `bundled-spatialite-smoke (linux)` に rename し、`bundled-spatialite-smoke (macos-arm64)` (`runs-on: macos-14`、`brew install cmake`) と `bundled-spatialite-smoke (windows)` (`runs-on: windows-latest`、`choco install llvm`、`continue-on-error: true`) を対称に追加。Windows のみ best-effort 扱いで CI red を許容し mainline merge をブロックしない。
+- **`docs/SPATIALITE.md` サポート OS 表 (v1.0 縮退方針)**: Release artifact / CI smoke / system dep の 3 列表で 5 target triples を整理。`aarch64-apple-darwin` / `x86_64-unknown-linux-gnu` / `aarch64-unknown-linux-gnu` を `○` (Release 対象、緑必須)、`x86_64-apple-darwin` / `x86_64-pc-windows-msvc` を `△ best-effort` (build を試みるが失敗時は当該 OS の artifact のみ欠落させて他 OS の publish を継続) と明示。詳細縮退手順は `docs/ROADMAP.md` v1.0 リスク節参照。
+
+### Fixed (v1.0 cycle 4)
+
+- **shpx-driver-spatialite/build.rs: `--target` 指定時に geos-src OUT_DIR を見失う問題を修正**: `cargo build --target=<triple>` (cargo-dist の Release build など) では、`[build-dependencies]` である `geos-src` の OUT_DIR は host build dir (`target/<profile>/build/`) に出力されるが、shpx-driver-spatialite 自身は target build dir (`target/<triple>/<profile>/build/`) で動くため、既存の `locate_sibling_out` (sibling 走査のみ) では `geos_c.h` を見失い `could not locate geos-src OUT_DIR ...` で panic していた。`host_build_root_from_target_out_dir` ヘルパを追加し、primary build_root に sibling が居なければ host build_root も走査するフォールバックを入れた。`cargo build` (`--target` なし) の従来経路は primary 走査だけで成立するため挙動変化なし。`dist build --target=aarch64-apple-darwin --artifacts=local` で 6.5 MB の bundled tarball 生成を確認 (`otool -L` で libspatialite / libgeos / libproj への動的依存ゼロ)。
+
 ### Added (v1.0 cycle 3)
 
 - **examples/*.sh ×6 + `examples/data/`**: SHP → GeoParquet (01) / SHP → PostGIS (02) / PostGIS → FGB (03) / `--reproject` (04) / `--on-loss=error|warn|skip` 比較 (05) / `--insert-mode=bulk` vs `batch` (06) の 1-shot シナリオを新設。test data は `cities.shp` (5 都市 / WGS84) / `cities-3857.shp` (Web Mercator 派生) / `lossy.csv` (DBF 10-byte 制限に引っ掛かる長い列名) を `examples/data/` にコミットし cold で `bash examples/01-*.sh` が走る。共通環境変数は `SHPX_BIN` (実行コマンド)、`OUT` (出力先 `/tmp/shpx-examples`)、`PG_URL` (PostGIS 接続)。再生成手順は `examples/data/REGENERATE.md`。
