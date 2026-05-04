@@ -306,8 +306,10 @@ fn gist_index_always_creates_even_for_existing_table() {
 
 #[test]
 fn register_unknown_epsg_inserts_into_spatial_ref_sys() {
-    // 仮想 SRID。実在 EPSG コードと衝突しない範囲の番号にする。
-    const TEST_SRID: i32 = 999_999;
+    // 仮想 SRID。PostGIS 3.x の `spatial_ref_sys_srid_check`
+    // (`srid > 0 AND srid <= 998999`) に収まる範囲で、実在 EPSG コードや PROJ 予約レンジ
+    // (1-989999) と衝突しない 990000-998999 のユーザ定義レンジ末尾を使う。
+    const TEST_SRID: i32 = 998_999;
     let Some(url) = pg_url() else {
         eprintln!("SHPX_TEST_PG_URL unset; skipping integration test");
         return;
