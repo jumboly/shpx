@@ -288,6 +288,78 @@ fn binary_and_date_roundtrip() {
     cleanup(&url, &table);
 }
 
+/// multi-row VALUES の chunk 境界を跨ぐ batch 投入で全行が roundtrip することを確認する。
+///
+/// `chunk_rows` を実測してから「`chunk_rows + 1` 行」を投入することで、
+/// 「full chunk + 末尾 remainder 1 行」のパスを通す。chunk loop の境界バグや
+/// $N placeholder 番号の連番ズレを検出する。multi-row 化の効果として 1 RPC で
+/// 16k 行を流し込むため、行数の割にテスト時間は短い。
+#[test]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::redundant_closure_for_method_calls
+)]
+fn multirow_values_chunk_boundary_roundtrip() {
+    let Some(url) = pg_url() else {
+        eprintln!("SHPX_TEST_PG_URL unset; skipping integration test");
+        return;
+    };
+    let table = unique_table("shpx_chunk");
+    let uri = uri_with_table(&url, &table);
+
+    let schema = schema_with_geom(
+        vec![Field::new("idx", DataType::Int32, false)],
+        GeometryType::Point,
+        Some(Crs::from_epsg(4326)),
+    );
+
+    // params_per_row = 1 (idx) + 1 (EWKB) = 2。i16::MAX = 32767 / margin 16 から
+    // chunk_rows = floor(32751 / 2) = 16375。`chunk_rows + 1` = 16376 行を投入。
+    let chunk_rows = shpx_rdb_common::multirow_chunk_rows(2, i16::MAX as usize, 16);
+    let total = chunk_rows + 1;
+
+    let mut idx_b = Int32Builder::new();
+    let mut geom_b = BinaryBuilder::new();
+    for i in 0..total {
+        idx_b.append_value(i as i32);
+        // Arrow 列は素の WKB を保持する規約。writer 内部で `ewkb::encode_with_srid` が
+        // SRID を埋めて bind するため、テスト側は plain WKB を流すだけで良い。
+        geom_b.append_value(wkb::encode(&Geom::Point(i as f64, -(i as f64))).unwrap());
+    }
+    let cols: Vec<ArrayRef> = vec![Arc::new(idx_b.finish()), Arc::new(geom_b.finish())];
+    let batch = RecordBatch::try_new(schema.clone(), cols).unwrap();
+
+    let driver = PostgisDriver::new();
+    let mut w = driver
+        .open_write(
+            &uri,
+            schema.clone(),
+            Some(Crs::from_epsg(4326)),
+            &write_opts(),
+        )
+        .expect("open_write");
+    w.write_batch(&batch).expect("write_batch");
+    w.finish().expect("finish");
+
+    let mut r = driver
+        .open_read(&uri, &ReadOpts::default())
+        .expect("open_read");
+    let batches: Vec<_> = r.batches().collect::<Result<_, _>>().expect("read");
+    let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(row_count, total, "all rows must roundtrip across chunk boundary");
+
+    // 末尾 remainder 行 (chunk 境界の +1 行) を検証して param 番号ズレが無いことを確認する。
+    let last_batch = batches.last().expect("at least one batch");
+    let last_row = last_batch.num_rows() - 1;
+    let idx_back = last_batch.column(0).as_primitive::<Int32Type>();
+    assert_eq!(idx_back.value(last_row), (total - 1) as i32);
+
+    drop(r);
+    cleanup(&url, &table);
+}
+
 #[test]
 fn missing_table_param_errors() {
     // CRUD は走らないので env 不要。URI に ?table が無いと open_read が即エラー。

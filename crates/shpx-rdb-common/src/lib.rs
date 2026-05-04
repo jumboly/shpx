@@ -13,6 +13,7 @@
 
 pub mod arrow;
 pub mod crs;
+pub mod multirow;
 pub mod on_loss;
 pub mod opts;
 pub mod streaming;
@@ -21,6 +22,7 @@ pub mod uri;
 
 pub use arrow::primitive;
 pub use crs::{merge_crs, resolve_epsg_srid};
+pub use multirow::multirow_chunk_rows;
 pub use on_loss::apply_on_loss;
 pub use opts::validate_overwrite_compat;
 pub use table::{resolve_table_name, split_qualified};
