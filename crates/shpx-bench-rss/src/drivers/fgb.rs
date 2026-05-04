@@ -30,6 +30,9 @@ impl BenchDriver for FgbBench {
 
     fn open_read(&self, native: &NativeInput) -> Result<Box<dyn LayerReader>> {
         let path = file_path(native, "fgb")?;
-        FgbDriver.open_read(&Uri::from_path(path.display().to_string()), &ReadOpts::default())
+        FgbDriver.open_read(
+            &Uri::from_path(path.display().to_string()),
+            &ReadOpts::default(),
+        )
     }
 }

@@ -267,7 +267,8 @@ impl BatchIter {
                     .then(|| StringBuilder::with_capacity(READ_BATCH_SIZE, READ_BATCH_SIZE * 16))
             })
             .collect();
-        let mut binary_builder = BinaryBuilder::with_capacity(READ_BATCH_SIZE, READ_BATCH_SIZE * 32);
+        let mut binary_builder =
+            BinaryBuilder::with_capacity(READ_BATCH_SIZE, READ_BATCH_SIZE * 32);
         let mut row_count = 0usize;
 
         for row in inner.records() {

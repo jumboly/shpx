@@ -659,11 +659,7 @@ fn build_table_keyset_sql(
     }
 }
 
-fn count_rows_table(
-    conn: &Connection,
-    table: &str,
-    where_clause: Option<&str>,
-) -> Result<usize> {
+fn count_rows_table(conn: &Connection, table: &str, where_clause: Option<&str>) -> Result<usize> {
     let sql = match where_clause.map(str::trim).filter(|s| !s.is_empty()) {
         Some(w) => format!("SELECT COUNT(*) FROM {} WHERE ({w})", quote_ident(table)),
         None => format!("SELECT COUNT(*) FROM {}", quote_ident(table)),

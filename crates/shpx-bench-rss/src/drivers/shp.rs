@@ -37,15 +37,18 @@ impl BenchDriver for ShpBench {
 
     fn open_read(&self, native: &NativeInput) -> Result<Box<dyn LayerReader>> {
         let path = file_path(native, "shp")?;
-        ShpDriver.open_read(&Uri::from_path(path.display().to_string()), &ReadOpts::default())
+        ShpDriver.open_read(
+            &Uri::from_path(path.display().to_string()),
+            &ReadOpts::default(),
+        )
     }
 }
 
 pub(super) fn file_path<'a>(native: &'a NativeInput, driver: &'static str) -> Result<&'a Path> {
     match native {
         NativeInput::File(p) => Ok(p.as_path()),
-        NativeInput::DbTable { .. } => Err(Error::Format(format!(
-            "{driver} driver expects file input"
-        ))),
+        NativeInput::DbTable { .. } => {
+            Err(Error::Format(format!("{driver} driver expects file input")))
+        }
     }
 }

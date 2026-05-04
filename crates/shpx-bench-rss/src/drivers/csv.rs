@@ -29,6 +29,9 @@ impl BenchDriver for CsvBench {
 
     fn open_read(&self, native: &NativeInput) -> Result<Box<dyn LayerReader>> {
         let path = file_path(native, "csv")?;
-        CsvDriver.open_read(&Uri::from_path(path.display().to_string()), &ReadOpts::default())
+        CsvDriver.open_read(
+            &Uri::from_path(path.display().to_string()),
+            &ReadOpts::default(),
+        )
     }
 }

@@ -267,11 +267,12 @@ fn run_bulk(case: &str, cols: &[Col], n_rows: usize) -> Outcome {
 
     let driver = SqlServerDriver::new();
     let outcome = (|| -> Outcome {
-        let mut w = match driver.open_bulk_write(&uri, schema.clone(), Some(Crs::from_epsg(4326)), &opts) {
-            Ok(Some(w)) => w,
-            Ok(None) => return Outcome::Err("bulk_load=false unexpected".into()),
-            Err(e) => return classify_err(&e.to_string()),
-        };
+        let mut w =
+            match driver.open_bulk_write(&uri, schema.clone(), Some(Crs::from_epsg(4326)), &opts) {
+                Ok(Some(w)) => w,
+                Ok(None) => return Outcome::Err("bulk_load=false unexpected".into()),
+                Err(e) => return classify_err(&e.to_string()),
+            };
         let mut iter = std::iter::once(Ok(batch));
         if let Err(e) = BulkLoadWriter::bulk_write(w.as_mut(), &mut iter) {
             return classify_err(&e.to_string());
@@ -299,10 +300,7 @@ fn run_bulk(case: &str, cols: &[Col], n_rows: usize) -> Outcome {
 
     cleanup(&url, &table);
 
-    eprintln!(
-        "[bulk_repro/{case}] {} → {outcome:?}",
-        schema_summary(cols)
-    );
+    eprintln!("[bulk_repro/{case}] {} → {outcome:?}", schema_summary(cols));
     outcome
 }
 

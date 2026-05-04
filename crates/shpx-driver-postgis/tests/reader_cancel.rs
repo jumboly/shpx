@@ -47,7 +47,9 @@ fn reader_drop_releases_select_promptly() {
     let mut geom_b = BinaryBuilder::new();
     for i in 0..n {
         id_b.append_value(i32::try_from(i).unwrap());
-        geom_b.append_value(wkb::encode(&Geom::Point(f64::from(i32::try_from(i).unwrap()), 0.0)).unwrap());
+        geom_b.append_value(
+            wkb::encode(&Geom::Point(f64::from(i32::try_from(i).unwrap()), 0.0)).unwrap(),
+        );
     }
     let cols: Vec<ArrayRef> = vec![Arc::new(id_b.finish()), Arc::new(geom_b.finish())];
     let batch = RecordBatch::try_new(schema.clone(), cols).unwrap();
@@ -114,7 +116,12 @@ fn reader_full_consume_drops_cleanly() {
 
     let driver = PostgisDriver::new();
     let mut w = driver
-        .open_write(&uri, schema.clone(), Some(Crs::from_epsg(4326)), &write_opts())
+        .open_write(
+            &uri,
+            schema.clone(),
+            Some(Crs::from_epsg(4326)),
+            &write_opts(),
+        )
         .expect("open_write");
     w.write_batch(&batch).expect("write_batch");
     w.finish().expect("finish");
@@ -122,10 +129,7 @@ fn reader_full_consume_drops_cleanly() {
     let mut r = driver
         .open_read(&uri, &ReadOpts::default())
         .expect("open_read");
-    let total: usize = r
-        .batches()
-        .map(|b| b.expect("batch ok").num_rows())
-        .sum();
+    let total: usize = r.batches().map(|b| b.expect("batch ok").num_rows()).sum();
     assert_eq!(total, n);
 
     cleanup(&url, &table);
