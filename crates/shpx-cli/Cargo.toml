@@ -35,6 +35,16 @@ windows-auth = ["shpx-driver-sqlserver/windows-auth"]
 name = "shpx"
 path = "src/main.rs"
 
+# v1.0 cycle 4: cargo-dist (`dist 0.31`) の Release build に有効化する shpx-cli
+# の cargo feature。`bundled-spatialite` は driver の bundled-spatialite と
+# shpx-geom/bundled-proj を implies するため、libspatialite / GEOS / libproj /
+# SQLite を全て C ソースから static link した単一バイナリになる。配布先ホストへの
+# system dep install を不要にするのが配布フェーズの主目的。dist-workspace.toml
+# 側の `[dist] features` は cargo-dist 0.31 では package metadata 側を見るので、
+# こちらを真の source of truth にする。
+[package.metadata.dist]
+features = ["bundled-spatialite"]
+
 [dependencies]
 shpx-core           = { path = "../shpx-core" }
 shpx-driver-shp     = { path = "../shpx-driver-shp" }

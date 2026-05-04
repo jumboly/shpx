@@ -8,6 +8,13 @@ repository.workspace = true
 description = "v0.8 reader streaming peak RSS bench harness (workspace-internal, not published)"
 publish = false
 
+# Why: shpx-bench-rss は RSS 計測用の workspace-internal binary なので、
+# v1.0 cycle 4 で導入した cargo-dist の Release artifact 候補から外す。
+# `dist = false` を明示しないと cargo-dist が `[[bin]]` を持つ全 crate を
+# 配布対象にしてしまう。
+[package.metadata.dist]
+dist = false
+
 [lints]
 workspace = true
 

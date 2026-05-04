@@ -182,21 +182,48 @@ fn locate_proj_root(out_dir: &std::path::Path) -> std::path::PathBuf {
 
 /// 自分の OUT_DIR の sibling として `<prefix><hash>/out/<sentinel>` を持つ build dir を
 /// 見つけ、`out/` までのパスを返す。複数候補があれば mtime 最新を採用する。
-/// 見つからない場合は build_root を `Err` で返し、呼び出し側でメッセージを組み立てる。
+/// 見つからない場合は (primary) build_root を `Err` で返し、呼び出し側でメッセージを組み立てる。
+///
+/// `cargo build --target=<triple>` 経由 (cargo-dist の Release build など) では
+/// `[build-dependencies]` の OUT_DIR が host build dir (`target/<profile>/build/`) に出力される
+/// 一方、自分自身は target build dir (`target/<triple>/<profile>/build/`) で動くため、
+/// 同 build_root に sibling が居ない。primary search で見つからなければ host build dir も
+/// 走査することで、`--target` あり (cargo-dist) / なし (通常 cargo build) の双方を吸収する。
 #[cfg(feature = "bundled-spatialite")]
 fn locate_sibling_out(
     out_dir: &std::path::Path,
     prefix: &str,
     sentinel_rel: &str,
 ) -> std::result::Result<std::path::PathBuf, std::path::PathBuf> {
-    let build_root = out_dir
+    let primary_root = out_dir
         .parent()
         .and_then(std::path::Path::parent)
         .expect("OUT_DIR has no <build_root> ancestor");
 
+    if let Some(found) = scan_build_root_for_sibling(primary_root, prefix, sentinel_rel) {
+        return Ok(found);
+    }
+
+    if let Some(host_root) = host_build_root_from_target_out_dir(out_dir) {
+        if host_root != primary_root {
+            if let Some(found) = scan_build_root_for_sibling(&host_root, prefix, sentinel_rel) {
+                return Ok(found);
+            }
+        }
+    }
+
+    Err(primary_root.to_path_buf())
+}
+
+/// 単一の `build/` ディレクトリ配下から `<prefix>...` を探し、最新 mtime の `out/` を返す。
+#[cfg(feature = "bundled-spatialite")]
+fn scan_build_root_for_sibling(
+    build_root: &std::path::Path,
+    prefix: &str,
+    sentinel_rel: &str,
+) -> Option<std::path::PathBuf> {
     let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
-    let entries = std::fs::read_dir(build_root)
-        .unwrap_or_else(|e| panic!("read_dir {} failed: {e}", build_root.display()));
+    let entries = std::fs::read_dir(build_root).ok()?;
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -215,7 +242,33 @@ fn locate_sibling_out(
             best = Some((mtime, root));
         }
     }
-    best.map(|(_, p)| p).ok_or_else(|| build_root.to_path_buf())
+    best.map(|(_, p)| p)
+}
+
+/// `target/<triple>/<profile>/build/<crate>-<hash>/out` 形式の OUT_DIR から、
+/// `target/<profile>/build/` (host build dir) を構築する。`--target` 未指定 (= primary == host)
+/// の場合は `None` を返す。
+#[cfg(feature = "bundled-spatialite")]
+fn host_build_root_from_target_out_dir(out_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    // out_dir = .../target/<triple>/<profile>/build/<crate>/out
+    //                ^anchor                   ^build (rposition)
+    let mut components: Vec<_> = out_dir.components().collect();
+    let build_pos = components.iter().rposition(|c| c.as_os_str() == "build")?;
+    if build_pos < 3 {
+        return None;
+    }
+    let profile = components[build_pos - 1];
+    // build_pos - 2 が <triple> 候補、build_pos - 3 が "target" であることを確認。
+    if components[build_pos - 3].as_os_str() != "target" {
+        return None;
+    }
+    let mut host_root = std::path::PathBuf::new();
+    for c in components.drain(..build_pos - 2) {
+        host_root.push(c.as_os_str());
+    }
+    host_root.push(profile.as_os_str());
+    host_root.push("build");
+    Some(host_root)
 }
 
 /// libspatialite の OMIT_* スイッチ。`build.rs` から `cc::Build.define` する側と
