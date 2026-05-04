@@ -67,6 +67,13 @@ pub(crate) fn build_config(parsed: &ParsedUrl) -> shpx_core::Result<Config> {
     // 拡張を v0.5+ で検討する。
     cfg.trust_cert();
 
+    // tiberius default は LOGIN7 で 4096 バイトを request し、SQL Server がその値で
+    // negotiate する。bulk insert では packet ごとに 1 round-trip 発生するため、4KB だと
+    // BCP throughput が頭打ちになる (upstream PR #400 のベンチで 19.3M 行 bulk が 4KB →
+    // 16KB で 186s → 108s、+42% に高速化を実証)。max 32767 を request しておけば SQL
+    // Server 側で 16KB あたりに negotiate-down するので overshoot しても害はない。
+    cfg.packet_size(32767);
+
     Ok(cfg)
 }
 

@@ -102,12 +102,15 @@ postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }
 bytes          = "1"
 futures-util   = { version = "0.3", default-features = false }
 
-# SQL Server driver の async クライアント。`tds73` (SQL Server 2008+) と `rustls`
-# (macOS の native TLS は SQL Server 2019+ で TLS handshake が失敗する既知問題があるため
-# pure rustls を強制)、`rust_decimal` (tiberius の Numeric write 経路の scale 0 以外で
-# のバグ回避)、`chrono` (NaiveDateTime/DateTime<Utc> を datetime2/datetimeoffset へ
-# ネイティブ bind) を有効化。`default-features = false` で OS-specific TLS backend を排除。
-tiberius       = { version = "0.12", default-features = false, features = ["tds73", "rustls", "chrono", "rust_decimal"] }
+# SQL Server driver の async クライアント。`tds73` / `rustls` (macOS native TLS は
+# SQL Server 2019+ で TLS handshake 失敗) / `rust_decimal` (Numeric write の scale != 0
+# バグ回避) / `chrono` (NaiveDateTime / DateTime<Utc> を直接 bind) を有効化。
+# fork 参照: `jumboly/tiberius#shpx-patches` (`docs/SQLSERVER_BULK_BUG_REPRO.md`)。
+# 取り込み済み patch は (1) upstream PR #346 の backport (Daten COLMETADATA bug)、
+# (2) upstream PR #400 (LOGIN7 packet_size、bulk insert 4KB→16KB で +42% throughput)。
+# `branch` ではなく `rev` で固定し、fork side の force-push でも CI が静かに別コードを
+# 走らない reproducibility を得る。
+tiberius       = { git = "https://github.com/jumboly/tiberius", rev = "338e83ae178be1763992316fdf234dc816392925", default-features = false, features = ["tds73", "rustls", "chrono", "rust_decimal"] }
 # tiberius は futures-io ベースの AsyncRead/Write を要求するため、tokio TcpStream を
 # `compat()` でブリッジする。
 tokio-util     = { version = "0.7", features = ["compat"] }
