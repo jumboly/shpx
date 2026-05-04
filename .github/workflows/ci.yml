@@ -111,62 +111,34 @@ jobs:
       - run: cargo test --workspace --locked
 
   bundled-spatialite-smoke:
-    # `bundled-spatialite` feature が「システム libspatialite が不在の cleanroom 環境」で
-    # build / test を通せることを CI で常時担保する。test job との差分は
-    # `libsqlite3-mod-spatialite` を apt 導入しない点で、「bundled が本当に独立して動く」
-    # ことを陰性対照として示す。
-    name: bundled-spatialite-smoke (linux)
-    runs-on: ubuntu-latest
+    # `bundled-spatialite` が「システム libspatialite 不在の cleanroom 環境」で build / test
+    # を通せることを 3 OS で常時担保する。test job との差分は libsqlite3-mod-spatialite を
+    # 入れない点で、bundled init 経路 (sqlite3_modspatialite_init を直接呼ぶ) が動くことを
+    # 陰性対照として示す。Windows は GEOS C++ vendor build (MSVC + clang) のリンカ問題が
+    # 出やすいため best-effort 扱い (continue-on-error: true)。docs/SPATIALITE.md サポート
+    # OS 表 / ROADMAP.md v1.0 リスク節 参照。
+    name: bundled-spatialite-smoke (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.continue-on-error || false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux
+            os: ubuntu-latest
+            install-cmd: sudo apt-get update && sudo apt-get install -y cmake clang
+          - label: macos-arm64
+            os: macos-14
+            install-cmd: brew install cmake
+          - label: windows
+            os: windows-latest
+            install-cmd: choco install llvm -y --no-progress
+            continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # GEOS の C++ ソース vendor build に cmake / clang が必要 (geos-src 経由)。
-      # libproj は bundled-proj が proj-sys 経由で C ソースから static link するため
-      # `libproj-dev` は導入しない。`libsqlite3-mod-spatialite` も意図的に未導入。
-      - run: sudo apt-get update && sudo apt-get install -y cmake clang
-      # CLI feature の bundled-spatialite は driver の bundled-spatialite と shpx-geom の
-      # bundled-proj を implies するため `--features bundled-spatialite` 単体で十分。
-      - run: cargo build -p shpx-cli --features bundled-spatialite --release
-      # SHPX_TEST_SPATIALITE=1 で env-gated 統合テストも skip させずに実行。
-      # SHPX_SPATIALITE_PATH は意図的に未設定 (bundled init 経路だけで動くことを確認するため)。
-      - run: cargo test -p shpx-driver-spatialite --features bundled-spatialite
-        env:
-          SHPX_TEST_SPATIALITE: "1"
-
-  bundled-smoke-macos:
-    # v1.0 cycle 4 で追加。Linux smoke と対称な内容で、macOS arm64 (Apple Silicon)
-    # ランナーで `bundled-spatialite` が cleanroom build / test できることを確認する。
-    # Release artifact 対象 OS なので緑必須 (continue-on-error は付けない)。
-    name: bundled-spatialite-smoke (macos-arm64)
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # macOS-14 runner image は cmake / Apple LLVM clang を pre-install 済みだが、
-      # Homebrew 版の最新 cmake を明示確保しておく (geos-src の最低要件 3.13+)。
-      - run: brew install cmake
-      - run: cargo build -p shpx-cli --features bundled-spatialite --release
-      - run: cargo test -p shpx-driver-spatialite --features bundled-spatialite
-        env:
-          SHPX_TEST_SPATIALITE: "1"
-
-  bundled-smoke-windows:
-    # v1.0 cycle 4 で追加。Windows での bundled build は GEOS の C++ vendor build が
-    # MSVC + clang ハイブリッド経路で詰まる可能性があるため best-effort 扱いとする
-    # (`continue-on-error: true`)。ROADMAP.md v1.0 リスク節 / docs/SPATIALITE.md
-    # サポート OS 表参照。Release artifact が落ちても他 OS の publish は継続する。
-    name: bundled-spatialite-smoke (windows)
-    runs-on: windows-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # windows-latest image は cmake / Visual Studio Build Tools 同梱だが、
-      # geos-src が要求する clang は別途 LLVM 配布版を chocolatey で導入する。
-      - run: choco install llvm -y --no-progress
+      - run: ${{ matrix.install-cmd }}
       - run: cargo build -p shpx-cli --features bundled-spatialite --release
       - run: cargo test -p shpx-driver-spatialite --features bundled-spatialite
         env:
