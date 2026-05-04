@@ -311,10 +311,7 @@ const MSVC_STUB: &str = "/* shpx: non-MSVC build, intentionally empty */\n";
 /// cc-rs の incremental 判定 (timestamp 比較) と相性が悪くなるため。
 #[cfg(feature = "bundled-spatialite")]
 fn write_if_changed(path: &std::path::Path, body: &str) {
-    if std::fs::read_to_string(path)
-        .map(|cur| cur == body)
-        .unwrap_or(false)
-    {
+    if std::fs::read_to_string(path).is_ok_and(|cur| cur == body) {
         return;
     }
     std::fs::write(path, body).unwrap_or_else(|e| panic!("write {} failed: {e}", path.display()));
