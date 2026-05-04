@@ -6,6 +6,14 @@ GDAL 非依存・Rust 製の空間データ相互変換 CLI。Arrow RecordBatch 
 
 ### 1. インストール
 
+shell installer (Linux / macOS / Windows、推奨):
+
+```bash
+curl -LsSf https://github.com/jumboly/shpx/releases/download/v1.0.0/shpx-cli-installer.sh | sh
+```
+
+`cargo-dist` で生成された installer がアーキを判定し、`$CARGO_HOME/bin` に `shpx` バイナリを展開する。`aarch64-apple-darwin` / `x86_64-apple-darwin` / `aarch64-unknown-linux-gnu` / `x86_64-unknown-linux-gnu` / `x86_64-pc-windows-msvc` の 5 triples を配布。
+
 ローカルビルド (libproj が host に必要):
 
 ```bash
