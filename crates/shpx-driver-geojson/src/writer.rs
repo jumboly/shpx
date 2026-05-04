@@ -263,7 +263,11 @@ fn plan_skipped_columns(
                 skipped.push(i);
             }
             DataType::Timestamp(TimeUnit::Nanosecond | TimeUnit::Microsecond, _)
-                if !apply_on_loss(loss_kind::TIMESTAMP_PRECISION_ON_GEOJSON, f.name(), on_loss)? =>
+                if !apply_on_loss(
+                    loss_kind::TIMESTAMP_PRECISION_ON_GEOJSON,
+                    f.name(),
+                    on_loss,
+                )? =>
             {
                 skipped.push(i);
             }
