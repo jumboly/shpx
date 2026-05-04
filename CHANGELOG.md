@@ -2,7 +2,9 @@
 
 本プロジェクトの変更履歴。フォーマットは [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) に準拠し、バージョン番号は [Semantic Versioning](https://semver.org/spec/v2.0.0.html) に従う。
 
-## [Unreleased]
+## [1.0.0] - 2026-05-04
+
+v1.0 マイルストーン「仕上げと配布」のリリース。`cargo-dist` ベースの 5 target × 3 OS 配布工程 (`aarch64-apple-darwin` / `aarch64-unknown-linux-gnu` / `x86_64-apple-darwin` / `x86_64-unknown-linux-gnu` / `x86_64-pc-windows-msvc`) を整備し、shell installer と GitHub Releases から単一バイナリで shpx を入手できる体制が整った。同梱するのは 0.8.0 以降に積まれた v1.0 cycle 1〜4 (LICENSE / NOTICE / 進捗バー / examples / README 5 分チュートリアル / `--format=json` / cargo-dist + multi-OS smoke) と v1.x 系の中期改善 (SQL Server tiberius fork で bulk insert bug 修正 + LOGIN7 packet_size 引き上げ + RDB writer batch 経路の multi-row VALUES 化)。9 driver (SHP / Parquet / GPKG / GeoJSON+NDJSON / CSV / FGB / PostGIS / SQL Server / SpatiaLite) のすべてが reader streaming + 統一 OnLoss + LICENSE 整備済みの状態で 1.0 を切る。
 
 ### Performance (v1.x RDB writer batch 経路の multi-row VALUES 化)
 
@@ -261,7 +263,9 @@ v0.1 マイルストーン「コア骨格 / SHP ↔ GeoParquet PoC」のリリ�
 - PostGIS / SQL Server / SpatiaLite / GeoPackage / GeoJSON / FlatGeobuf / CSV は後続マイルストーン (v0.2–v0.5) で対応する。
 - ライセンスは v1.0 までに最終決定する（MIT / Apache-2.0 dual を想定）。
 
-[Unreleased]: https://github.com/jumboly/shpx/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/jumboly/shpx/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/jumboly/shpx/compare/v0.8.0...v1.0.0
+[0.8.0]: https://github.com/jumboly/shpx/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/jumboly/shpx/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/jumboly/shpx/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jumboly/shpx/compare/v0.4.0...v0.5.0
