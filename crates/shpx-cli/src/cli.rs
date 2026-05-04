@@ -7,7 +7,7 @@ use shpx_core::{CreateIndex, CreateTable, OnLoss};
 #[command(
     name = "shpx",
     version,
-    about = "ジオ空間データ変換 CLI（v0.3: SHP / GeoParquet / CSV / GeoJSON / GPKG / FlatGeobuf / PostGIS + --reproject）"
+    about = "ジオ空間データ変換 CLI（SHP / GeoParquet / CSV / GeoJSON / GPKG / FlatGeobuf / PostGIS / SQL Server / SpatiaLite + --reproject）"
 )]
 pub struct Cli {
     #[command(subcommand)]

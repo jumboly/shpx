@@ -2763,7 +2763,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "shpx-bench-rss"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2785,7 +2785,7 @@ dependencies = [
 
 [[package]]
 name = "shpx-cli"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2814,7 +2814,7 @@ dependencies = [
 
 [[package]]
 name = "shpx-core"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2826,7 +2826,7 @@ dependencies = [
 
 [[package]]
 name = "shpx-driver-csv"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2842,7 +2842,7 @@ dependencies = [
 
 [[package]]
 name = "shpx-driver-fgb"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2860,7 +2860,7 @@ dependencies = [
 
 [[package]]
 name = "shpx-driver-geojson"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2877,7 +2877,7 @@ dependencies = [
 
 [[package]]
 name = "shpx-driver-gpkg"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2895,7 +2895,7 @@ dependencies = [
 
 [[package]]
 name = "shpx-driver-parquet"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -2913,7 +2913,7 @@ dependencies = [
 
 [[package]]
 name = "shpx-driver-postgis"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2936,7 +2936,7 @@ dependencies = [
 
 [[package]]
 name = "shpx-driver-shp"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2952,7 +2952,7 @@ dependencies = [
 
 [[package]]
 name = "shpx-driver-spatialite"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -2977,7 +2977,7 @@ dependencies = [
 
 [[package]]
 name = "shpx-driver-sqlserver"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -3002,7 +3002,7 @@ dependencies = [
 
 [[package]]
 name = "shpx-geom"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -3015,7 +3015,7 @@ dependencies = [
 
 [[package]]
 name = "shpx-rdb-common"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "arrow-array",
  "rusqlite",

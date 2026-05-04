@@ -128,6 +128,7 @@ shpx drivers --format=json | jq '.[].name'  # CI / scripting 向け
 - [docs/ON_LOSS.md](docs/ON_LOSS.md) — 損失検出 (`--on-loss`) のドライバ × kind マトリクス
 - [docs/STREAMING.md](docs/STREAMING.md) — driver 別ストリーミング戦略とピーク RSS
 - [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — 新しいドライバの追加方法
+- [docs/EMBEDDING.md](docs/EMBEDDING.md) — 派生バイナリで `shpx_cli::run()` を再利用する手順 (v1.1.0+)
 - [docs/CSV.md](docs/CSV.md) — CSV / TSV ドライバ仕様
 - [docs/GEOJSON.md](docs/GEOJSON.md) — GeoJSON / GeoJSON Lines ドライバ仕様
 - [docs/GPKG.md](docs/GPKG.md) — GeoPackage ドライバ仕様
