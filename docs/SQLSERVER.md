@@ -119,6 +119,10 @@ shpx convert in.shp 'mssql://DOMAIN%5Calice:Pw@host/db?auth=windows&table=t'
 
 未対応型: Int8 / UInt 系 / Date64 / 他 TZ / xml / hierarchyid / sql_variant / Decimal256。
 
+## batch 経路の multi-row VALUES 化
+
+`--insert-mode=batch` (および `--insert-mode=auto` でドライバが bulk 非対応にフォールバックした場合) の `LayerWriter::write_batch` は `INSERT INTO t (...) VALUES (?,?,...), (?,?,...), ...` の multi-row 形式で 1 RPC に複数行を詰める。SQL Server は 1 RPC あたり 2100 param が上限のため、1 行あたりの param 数 (属性数 + WKB + SRID) から `chunk_rows = floor((2100 - safety) / params_per_row)` を schema 確定時に算出し、`write_batch` 内で `chunks(chunk_rows)` ループする。属性 6 列 + Point の典型 schema (`params_per_row = 8`) では `chunk_rows ≈ 260` で動き、1 行 1 RPC だった旧実装と比較して round-trip が ~175× 削減される。トランザクション境界は 1 batch = 1 トランザクションを維持し、chunk 境界では COMMIT しない。
+
 ## 損失変換
 
 `--on-loss=error|warn|skip` の挙動と、SQL Server driver が発する loss kind (`missing-crs-on-sqlserver`) は [`docs/ON_LOSS.md`](ON_LOSS.md) を参照。`geometry` 列は CRS 不明時に SRID 0 へフォールバックするが、`geography` 列は valid な geographic CRS が必須のため SRID 4326 へフォールバックする (`STGeomFromWKB` が SRID 0 では失敗するため)。

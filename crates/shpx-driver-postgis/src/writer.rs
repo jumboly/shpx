@@ -26,7 +26,7 @@ use shpx_core::{
     WriteOpts,
 };
 use shpx_geom::ewkb;
-use tokio_postgres::{types::ToSql, Client, Statement};
+use tokio_postgres::{types::ToSql, Client};
 
 use crate::conn;
 use crate::copy_binary::{write_copy_header, write_copy_trailer, BulkRowEncoder, PgNumeric};
@@ -42,14 +42,21 @@ use crate::util::{
 /// reuse するため allocation は溜まらない。
 const COPY_FLUSH_THRESHOLD_BYTES: usize = 64 * 1024;
 
+/// PostgreSQL extended protocol の Bind message は param 数を `Int16` (signed 16-bit) で
+/// 送る。`postgres-protocol` 0.6 は wire 上 u16 で書き出すが、サーバ側は `pq_getmsgint(buf, 2)`
+/// で signed 解釈するため 32768+ は negative として reject される。実用上限は `i16::MAX = 32767`。
+const POSTGRES_MAX_PARAMS_PER_RPC: usize = i16::MAX as usize;
+
+/// 上限への defensive な余白。tokio_postgres / postgres-protocol が将来内部で param を予約する
+/// 余地として確保。現状 0 でも動くが 16 程度なら chunk 行数への影響は微小。
+const POSTGRES_PARAM_SAFETY_MARGIN: usize = 16;
+
 pub struct PostgisWriter {
     client: Option<Client>,
     schema: SchemaRef,
     geom_index: usize,
     /// geometry 列を除く属性列の Arrow インデックス。
     attr_indices: Vec<usize>,
-    /// open() で 1 度だけ prepare した INSERT。`Statement` は内部 Arc なので Clone は安価。
-    insert_stmt: Statement,
     qualified: String,
     srid: i32,
     /// GIST index 作成戦略（`finish()` で参照）。
@@ -62,6 +69,9 @@ pub struct PostgisWriter {
     geom_col_name: String,
     /// テーブル名（quote 前）。GIST index 名 `idx_<table>_<geom>` に使う。
     table_name: String,
+    /// multi-row VALUES INSERT で 1 RPC に詰める行数。schema 確定時に 1 回算出する。
+    /// PostgreSQL の `i16::MAX` param 上限と attrs+1 (EWKB) から決まる定数。
+    chunk_rows: usize,
 }
 
 impl PostgisWriter {
@@ -118,21 +128,27 @@ impl PostgisWriter {
             }
         };
 
-        let insert_sql = build_insert_sql(&schema, &attr_indices, geom_index, &qualified);
-        let insert_stmt = conn::prepare(&client, &insert_sql)?;
+        // attrs + EWKB = attr_indices.len() + 1 param/row。SRID は EWKB に埋め込まれる。
+        // PostgreSQL の Bind 上限 32767 param から chunk 行数を 1 回だけ算出する。
+        let params_per_row = attr_indices.len() + 1;
+        let chunk_rows = shpx_rdb_common::multirow_chunk_rows(
+            params_per_row,
+            POSTGRES_MAX_PARAMS_PER_RPC,
+            POSTGRES_PARAM_SAFETY_MARGIN,
+        );
 
         Ok(Self {
             client: Some(client),
             schema,
             geom_index,
             attr_indices,
-            insert_stmt,
             qualified,
             srid,
             create_index: resolved.create_index,
             table_was_created,
             geom_col_name: geom_field_name,
             table_name: resolved.table,
+            chunk_rows,
         })
     }
 
@@ -170,10 +186,12 @@ impl LayerWriter for PostgisWriter {
             schema,
             geom_index,
             attr_indices,
-            insert_stmt,
+            qualified,
             srid,
+            chunk_rows,
             ..
         } = self;
+        let chunk_rows = *chunk_rows;
         let client = client
             .as_mut()
             .ok_or_else(|| driver_msg("write_batch called after finish"))?;
@@ -181,14 +199,38 @@ impl LayerWriter for PostgisWriter {
 
         rt.block_on(async {
             let tx = client.transaction().await.map_err(|e| driver_err(&e))?;
-            for row in 0..batch.num_rows() {
-                let owned = build_row_params(schema, batch, attr_indices, *geom_index, row, *srid)?;
+
+            let total = batch.num_rows();
+            let params_per_row = attr_indices.len() + 1;
+            let mut row = 0;
+            let mut sql_cache = String::new();
+            let mut last_n: usize = 0;
+            while row < total {
+                let n = (total - row).min(chunk_rows);
+                if n != last_n {
+                    sql_cache = build_insert_sql_chunk(
+                        schema,
+                        attr_indices,
+                        *geom_index,
+                        qualified,
+                        n,
+                    );
+                    last_n = n;
+                }
+                let mut owned: Vec<Box<dyn ToSql + Sync>> = Vec::with_capacity(n * params_per_row);
+                for r in row..row + n {
+                    let mut params =
+                        build_row_params(schema, batch, attr_indices, *geom_index, r, *srid)?;
+                    owned.append(&mut params);
+                }
                 let refs: Vec<&(dyn ToSql + Sync)> =
                     owned.iter().map(|b| &**b as &(dyn ToSql + Sync)).collect();
-                tx.execute(insert_stmt, &refs)
+                tx.execute(sql_cache.as_str(), &refs)
                     .await
                     .map_err(|e| driver_err(&e))?;
+                row += n;
             }
+
             tx.commit().await.map_err(|e| driver_err(&e))?;
             Ok::<_, Error>(())
         })
@@ -411,11 +453,18 @@ fn build_copy_sql(
     )
 }
 
-fn build_insert_sql(
+/// `chunk_rows` 行ぶんの multi-row VALUES INSERT 文を組み立てる。
+///
+/// 1 行ぶんの param 数は `attr_count + 1` (属性 + EWKB)。EWKB は SRID を埋め込んでいるので
+/// 第 2 引数の SRID は不要。`$1..${chunk_rows*params_per_row}` を行ごとに連番で振り、
+/// `ST_GeomFromEWKB($N)` で geometry を組み立てる。`chunk_rows = 1` のときは従来の 1 行
+/// INSERT と同じ shape になる。
+fn build_insert_sql_chunk(
     schema: &SchemaRef,
     attr_indices: &[usize],
     geom_index: usize,
     qualified: &str,
+    chunk_rows: usize,
 ) -> String {
     let mut col_names: Vec<String> = attr_indices
         .iter()
@@ -423,16 +472,23 @@ fn build_insert_sql(
         .collect();
     col_names.push(quote_ident(schema.field(geom_index).name()));
 
-    let mut placeholders: Vec<String> = (1..=attr_indices.len()).map(|i| format!("${i}")).collect();
-    // geometry 列は ST_GeomFromEWKB でラップする。EWKB は SRID を埋め込んでいるので
-    // 第 2 引数の SRID は不要。
-    let geom_param = attr_indices.len() + 1;
-    placeholders.push(format!("ST_GeomFromEWKB(${geom_param})"));
+    let attr_count = attr_indices.len();
+    let params_per_row = attr_count + 1;
+
+    let mut tuples: Vec<String> = Vec::with_capacity(chunk_rows);
+    for r in 0..chunk_rows {
+        let base = r * params_per_row; // 行 r の最初の $ 番号は base+1
+        let mut placeholders: Vec<String> =
+            (1..=attr_count).map(|i| format!("${}", base + i)).collect();
+        let geom_param = base + attr_count + 1;
+        placeholders.push(format!("ST_GeomFromEWKB(${geom_param})"));
+        tuples.push(format!("({})", placeholders.join(", ")));
+    }
 
     format!(
-        "INSERT INTO {qualified} ({}) VALUES ({})",
+        "INSERT INTO {qualified} ({}) VALUES {}",
         col_names.join(", "),
-        placeholders.join(", ")
+        tuples.join(", ")
     )
 }
 
@@ -638,17 +694,36 @@ mod tests {
     }
 
     #[test]
-    fn build_insert_sql_uses_st_geom_from_ewkb() {
+    fn build_insert_sql_chunk_one_row_matches_legacy_shape() {
+        // chunk_rows=1 は従来の 1 行 INSERT と同じ output になるべき (regression guard)
         let s = schema_with_geom(
             vec![AField::new("v", DataType::Int32, true)],
             GeometryType::Point,
             Some(Crs::from_epsg(4326)),
         );
         let attrs = vec![0];
-        let sql = build_insert_sql(&s, &attrs, 1, "\"public\".\"t\"");
+        let sql = build_insert_sql_chunk(&s, &attrs, 1, "\"public\".\"t\"", 1);
         assert_eq!(
             sql,
             "INSERT INTO \"public\".\"t\" (\"v\", \"geom\") VALUES ($1, ST_GeomFromEWKB($2))"
+        );
+    }
+
+    #[test]
+    fn build_insert_sql_chunk_three_rows_increments_param_numbers() {
+        let s = schema_with_geom(
+            vec![AField::new("v", DataType::Int32, true)],
+            GeometryType::Point,
+            Some(Crs::from_epsg(4326)),
+        );
+        let attrs = vec![0];
+        let sql = build_insert_sql_chunk(&s, &attrs, 1, "\"public\".\"t\"", 3);
+        assert_eq!(
+            sql,
+            "INSERT INTO \"public\".\"t\" (\"v\", \"geom\") VALUES \
+             ($1, ST_GeomFromEWKB($2)), \
+             ($3, ST_GeomFromEWKB($4)), \
+             ($5, ST_GeomFromEWKB($6))"
         );
     }
 
