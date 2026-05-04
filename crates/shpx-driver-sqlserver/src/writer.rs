@@ -32,12 +32,19 @@ use crate::util::{
     quote_qualified, timestamp_to_nanos,
 };
 
+/// SQL Server (TDS) は 1 RPC あたり 2100 param が上限。`sp_executesql` 呼び出しの内部
+/// 予約を含めた本値を超えると `RPC has too many parameters` で失敗する。
+const SQLSERVER_MAX_PARAMS_PER_RPC: usize = 2100;
+
+/// 上限への defensive な余白。tiberius が将来 RPC 周辺で param を予約する余地を確保する。
+/// 現状 0 でも動くが 16 程度なら chunk 行数への影響は微小。
+const SQLSERVER_PARAM_SAFETY_MARGIN: usize = 16;
+
 pub struct SqlServerWriter {
     client: Option<SqlClient>,
     schema: SchemaRef,
     geom_index: usize,
     attr_indices: Vec<usize>,
-    insert_sql: String,
     qualified: String,
     srid: i32,
     /// `finish()` での SPATIAL INDEX 発行時に `geometry` のみ BOUNDING_BOX を要求する分岐に使う。
@@ -47,6 +54,9 @@ pub struct SqlServerWriter {
     /// から逆引きする方が解が無くなるため)。
     geom_col_name: String,
     table_name: String,
+    /// multi-row VALUES INSERT で 1 RPC に詰める行数。schema 確定時に 1 回算出する。
+    /// 2100 param 上限と attrs+2 (WKB + SRID) から決まる定数。`write_batch` で chunk loop に使う。
+    chunk_rows: usize,
 }
 
 impl SqlServerWriter {
@@ -116,12 +126,13 @@ impl SqlServerWriter {
             }
         }
 
-        let insert_sql = build_insert_sql(
-            &schema,
-            &attr_indices,
-            geom_index,
-            &qualified,
-            resolved.geom_type,
+        // attrs + (WKB + SRID) = attr_indices.len() + 2 param/row。
+        // SQL Server の 1 RPC 上限 2100 param から chunk 行数を 1 回だけ算出する。
+        let params_per_row = attr_indices.len() + 2;
+        let chunk_rows = shpx_rdb_common::multirow_chunk_rows(
+            params_per_row,
+            SQLSERVER_MAX_PARAMS_PER_RPC,
+            SQLSERVER_PARAM_SAFETY_MARGIN,
         );
 
         Ok(Self {
@@ -129,13 +140,13 @@ impl SqlServerWriter {
             schema,
             geom_index,
             attr_indices,
-            insert_sql,
             qualified,
             srid,
             geom_kind: resolved.geom_type,
             create_index: resolved.create_index,
             geom_col_name: geom_field_name,
             table_name: resolved.table,
+            chunk_rows,
         })
     }
 
@@ -202,10 +213,14 @@ impl LayerWriter for SqlServerWriter {
             schema,
             geom_index,
             attr_indices,
-            insert_sql,
+            qualified,
+            geom_kind,
             srid,
+            chunk_rows,
             ..
         } = self;
+        let chunk_rows = *chunk_rows;
+        let geom_kind = *geom_kind;
         let client = client
             .as_mut()
             .ok_or_else(|| driver_msg("write_batch called after finish"))?;
@@ -214,6 +229,7 @@ impl LayerWriter for SqlServerWriter {
         rt.block_on(async {
             // tiberius に generic な transaction API は無いため BEGIN / COMMIT を文字列で発行する。
             // 1 batch = 1 トランザクションにすることで失敗時の roll-back 単位を batch に揃える。
+            // chunk 境界では COMMIT しない (途中失敗でも batch 全体が roll-back される契約)。
             client
                 .simple_query("BEGIN TRAN")
                 .await
@@ -222,13 +238,36 @@ impl LayerWriter for SqlServerWriter {
                 .await
                 .map_err(|e| driver_err(&e))?;
 
-            for row in 0..batch.num_rows() {
-                let owned = build_row_params(schema, batch, attr_indices, *geom_index, row, *srid)?;
+            let total = batch.num_rows();
+            let params_per_row = attr_indices.len() + 2;
+            let mut row = 0;
+            let mut sql_cache = String::new();
+            let mut last_n: usize = 0;
+            while row < total {
+                let n = (total - row).min(chunk_rows);
+                if n != last_n {
+                    sql_cache = build_insert_sql_chunk(
+                        schema,
+                        attr_indices,
+                        *geom_index,
+                        qualified,
+                        geom_kind,
+                        n,
+                    );
+                    last_n = n;
+                }
+                let mut owned: Vec<BoxedToSql> = Vec::with_capacity(n * params_per_row);
+                for r in row..row + n {
+                    let mut params =
+                        build_row_params(schema, batch, attr_indices, *geom_index, r, *srid)?;
+                    owned.append(&mut params);
+                }
                 let refs: Vec<&dyn ToSql> = owned.iter().map(|b| &**b as &dyn ToSql).collect();
                 let _ = client
-                    .execute(insert_sql.as_str(), &refs)
+                    .execute(sql_cache.as_str(), &refs)
                     .await
                     .map_err(|e| driver_err(&e))?;
+                row += n;
             }
 
             client
@@ -344,12 +383,18 @@ fn build_create_table_sql(
     Ok(format!("CREATE TABLE {qualified} ({})", cols.join(", ")))
 }
 
-fn build_insert_sql(
+/// `chunk_rows` 行ぶんの multi-row VALUES INSERT 文を組み立てる。
+///
+/// 1 行ぶんの param 数は `attr_count + 2` (属性 + WKB + SRID)。`@P1..@P{chunk_rows*params_per_row}`
+/// を行ごとに連番で振り、`STGeomFromWKB(@P_wkb, @P_srid)` で geometry を組み立てる。
+/// `chunk_rows = 1` のときは従来の 1 行 INSERT と同じ shape になる。
+fn build_insert_sql_chunk(
     schema: &SchemaRef,
     attr_indices: &[usize],
     geom_index: usize,
     qualified: &str,
     geom_kind: GeomKind,
+    chunk_rows: usize,
 ) -> String {
     let mut col_names: Vec<String> = attr_indices
         .iter()
@@ -357,23 +402,27 @@ fn build_insert_sql(
         .collect();
     col_names.push(quote_ident(schema.field(geom_index).name()));
 
-    // T-SQL parameter は @P1 から始まり、attr 数 + 2 (WKB + SRID) まで使う。
     let attr_count = attr_indices.len();
-    let attr_placeholders: Vec<String> = (1..=attr_count).map(|i| format!("@P{i}")).collect();
-    let wkb_param = format!("@P{}", attr_count + 1);
-    let srid_param = format!("@P{}", attr_count + 2);
-    let geom_expr = format!(
-        "{}::STGeomFromWKB({wkb_param}, {srid_param})",
-        geom_kind.t_sql_name()
-    );
+    let params_per_row = attr_count + 2;
+    let geom_t_sql = geom_kind.t_sql_name();
 
-    let mut value_parts = attr_placeholders;
-    value_parts.push(geom_expr);
+    let mut tuples: Vec<String> = Vec::with_capacity(chunk_rows);
+    for r in 0..chunk_rows {
+        let base = r * params_per_row; // 行 r の最初の @P 番号は base+1
+        let mut value_parts: Vec<String> =
+            (1..=attr_count).map(|i| format!("@P{}", base + i)).collect();
+        let wkb_param = format!("@P{}", base + attr_count + 1);
+        let srid_param = format!("@P{}", base + attr_count + 2);
+        value_parts.push(format!(
+            "{geom_t_sql}::STGeomFromWKB({wkb_param}, {srid_param})"
+        ));
+        tuples.push(format!("({})", value_parts.join(", ")));
+    }
 
     format!(
-        "INSERT INTO {qualified} ({}) VALUES ({})",
+        "INSERT INTO {qualified} ({}) VALUES {}",
         col_names.join(", "),
-        value_parts.join(", ")
+        tuples.join(", ")
     )
 }
 
@@ -640,9 +689,11 @@ mod tests {
     }
 
     #[test]
-    fn build_insert_sql_uses_stgeomfromwkb() {
+    fn build_insert_sql_chunk_one_row_matches_legacy_shape() {
+        // chunk_rows=1 は従来の 1 行 INSERT と同じ output になるべき (regression guard)
         let schema = sample_schema();
-        let sql = build_insert_sql(&schema, &[0, 1], 2, "[dbo].[t]", GeomKind::Geometry);
+        let sql =
+            build_insert_sql_chunk(&schema, &[0, 1], 2, "[dbo].[t]", GeomKind::Geometry, 1);
         assert_eq!(
             sql,
             "INSERT INTO [dbo].[t] ([id], [name], [geom]) \
@@ -651,9 +702,23 @@ mod tests {
     }
 
     #[test]
-    fn build_insert_sql_geography_changes_udt_only() {
+    fn build_insert_sql_chunk_two_rows_increments_param_numbers() {
         let schema = sample_schema();
-        let sql = build_insert_sql(&schema, &[0, 1], 2, "[dbo].[t]", GeomKind::Geography);
+        let sql =
+            build_insert_sql_chunk(&schema, &[0, 1], 2, "[dbo].[t]", GeomKind::Geometry, 2);
+        assert_eq!(
+            sql,
+            "INSERT INTO [dbo].[t] ([id], [name], [geom]) VALUES \
+             (@P1, @P2, geometry::STGeomFromWKB(@P3, @P4)), \
+             (@P5, @P6, geometry::STGeomFromWKB(@P7, @P8))"
+        );
+    }
+
+    #[test]
+    fn build_insert_sql_chunk_geography_changes_udt_only() {
+        let schema = sample_schema();
+        let sql =
+            build_insert_sql_chunk(&schema, &[0, 1], 2, "[dbo].[t]", GeomKind::Geography, 1);
         assert!(sql.contains("geography::STGeomFromWKB(@P3, @P4)"));
     }
 

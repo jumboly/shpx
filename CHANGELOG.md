@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### Performance (v1.x RDB writer batch 経路の multi-row VALUES 化)
+
+- **shpx-driver-sqlserver / shpx-driver-postgis: `LayerWriter::write_batch` を multi-row `VALUES` で 1 RPC に複数行詰めて round-trip を桁違いに削減**: 旧実装は 1 行 1 RPC を発行していたため、`--insert-mode=batch` および bench-rss SQL Server prepare で round-trip 待ちが支配的だった。`shpx-rdb-common::multirow_chunk_rows(params_per_row, max_params_per_rpc, safety_margin)` を共通ヘルパとして導入し、SQL Server (param 上限 2100、属性 6 列で `chunk_rows ≈ 260`、~175× 削減) と PostGIS (PostgreSQL extended protocol Bind の Int16 上限 32767、`chunk_rows ≈ 4680`、~6500× 削減) の双方で同 helper を呼ぶ対称実装。トランザクション境界は 1 batch = 1 トランザクションを維持し chunk 境界では COMMIT しない。bulk 経路 (`COPY FROM STDIN BINARY` / staging + `tiberius::bulk_insert`) は変更なし。SpatiaLite / GPKG はローカル SQLite で network round-trip 無しのため対象外。MySQL / Oracle が後続で追加されるときは同 helper を再利用する。詳細は `docs/SQLSERVER.md`、`docs/POSTGIS.md`、`docs/ROADMAP.md`。
+
 ### Fixed (v1.x SQL Server 戦略 — 中期)
 
 - **shpx-driver-sqlserver: `Daten` COLMETADATA length バイトの bulk insert bug を修正**: `tiberius 0.12.3` の `bulk_insert` 経路で `DataType::Date32` 列を含む schema を送ると、`Daten` の COLMETADATA に length バイトが余分に 1 個書かれて後続列の type info を破壊し、SQL Server が `Invalid column type from bcp client for colid N` (error 4816) を返していた。**最小再現は 3 列 / 1 行** (`id Int64 + created Date32 + geom`)、含意は `bench-rss` SQL Server prepare の 1h+ 待ちと `bulk_all_types_together` の `#[ignore]` 化。修正方針として upstream の closed PR #346 (`Daten` 分岐で `dst.put_u8(self.len())` を発行しない) を `jumboly/tiberius` の `shpx-patches` branch に backport し、workspace `Cargo.toml` の `tiberius` dep を `crates.io` 0.12 から git fork 参照に切り替えた。`bulk_all_types_together` の `#[ignore]` も解除済み (`tests/bulk_roundtrip.rs:343`)。詳細は `docs/SQLSERVER_BULK_BUG_REPRO.md` および `docs/ROADMAP.md` v1.x の SQL Server 戦略節。
