@@ -48,7 +48,7 @@ pub fn run_with_app_name(app_name: &str) -> ExitCode {
     // `From<String>` が無い (= `&'static str` か `&Str` のみ受け付ける) ため、
     // 起動時 1 回だけ `Box::leak` で `'static` 化する。CLI process は数秒で
     // 終了するためリークは無害。
-    let app_name_static: &'static str = Box::leak(app_name.to_string().into_boxed_str());
+    let app_name_static: &'static str = Box::leak(Box::<str>::from(app_name));
     let cmd = cli::Cli::command()
         .name(app_name_static)
         .bin_name(app_name_static);
