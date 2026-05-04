@@ -132,8 +132,11 @@ jobs:
             install-cmd: brew install cmake
           - label: windows
             os: windows-latest
-            install-cmd: choco install llvm -y --no-progress
-            continue-on-error: true
+            # Why sqlite: proj-sys 0.25.0 (libproj 9.4) の cmake configure が
+            # sqlite3.exe を PATH 上に要求する (proj.db を build 時に生成するため)。
+            # Linux/macOS は apt/brew が `sqlite3` バイナリを同梱、Windows runner image
+            # には libsqlite3 のみで .exe が無いため choco で別途入れる。
+            install-cmd: choco install llvm sqlite -y --no-progress
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
