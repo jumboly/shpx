@@ -72,7 +72,7 @@ fn load_mod_spatialite(conn: &Connection) -> Result<()> {
 #[cfg(feature = "bundled-spatialite")]
 #[allow(unsafe_code)]
 fn load_bundled(conn: &Connection) -> Result<()> {
-    use std::sync::Once;
+    use std::sync::{Mutex, Once};
 
     // libspatialite を `-DLOADABLE_EXTENSION` なし (ordinary lib モード) で link しており、
     // `sqlite3_modspatialite_init` は build されない。代わりに static-link API を呼ぶ。
@@ -92,6 +92,14 @@ fn load_bundled(conn: &Connection) -> Result<()> {
     // 誤解されがちなので、最初の load 時に 1 回だけ警告する。
     static WARN_ENV: Once = Once::new();
     static GLOBAL_INIT: Once = Once::new();
+    // Why: libspatialite の `spatialite_alloc_connection` / `spatialite_init_ex` は
+    // 内部で global PROJ / GEOS context や allocator caches を変更するが、
+    // 公式 docs はスレッドセーフを保証していない (5.1.0 時点)。`cargo test` の
+    // 並列実行で複数 connection を同時 init すると glibc malloc が `double free
+    // or corruption (fasttop)` で SIGABRT する flaky 失敗を CI で観測したため、
+    // process 単一の Mutex で alloc + init を serialize する。実害は init 直後の
+    // 数 ms ロックのみで、SQL 実行中は Mutex を握らない。
+    static INIT_LOCK: Mutex<()> = Mutex::new(());
 
     WARN_ENV.call_once(|| {
         if std::env::var_os(ENV_SPATIALITE_PATH).is_some() {
@@ -103,9 +111,11 @@ fn load_bundled(conn: &Connection) -> Result<()> {
     });
 
     // SAFETY: `Connection::handle()` の raw pointer は conn 生存期間有効。
-    // `spatialite_alloc_connection` の cache は接続 drop 時に leak する
-    // (TODO(v0.6 post-cycle3 / v1.0): owned wrapper で `spatialite_cleanup_ex` を呼ぶ。
-    // 接続あたり数 KB なので単発 CLI / 通常テスト数では実害なし)。
+    // `spatialite_alloc_connection` で確保された cache は `spatialite_init_ex` 経由で
+    // libspatialite 側に extension data として登録され、`sqlite3_close` 時に
+    // libspatialite の destructor 経由で自動解放される (`spatialite_cleanup_ex` を
+    // shpx 側から明示的に呼んではならない、二重解放になる)。
+    let _guard = INIT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     unsafe {
         GLOBAL_INIT.call_once(|| spatialite_initialize());
         let cache = spatialite_alloc_connection();
