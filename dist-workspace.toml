@@ -21,6 +21,13 @@ install-path = "CARGO_HOME"
 hosting = "github"
 # Whether to install an updater program
 install-updater = false
+# cargo-dist 0.4+ で追加された設定。default true (= Rust 側に `+crt-static` を注入) のままだと
+# proj-sys 0.25.0 の cmake build (Windows MSVC で `/MD` = MultiThreadedDLL がデフォルト) と
+# C runtime が衝突し、`__imp_hypot` 等 31 件の LNK2019 unresolved external で release build が
+# 失敗する (libcmt.lib vs ucrt dllimport の混在)。Rust 側を /MD 相当に倒すことで proj-sys と
+# 整合させる。利用者環境の vcruntime140.dll は rustup 環境では既存、Windows 10+ の ucrt は
+# OS 同梱のため追加 redist 配布は不要 (axodotdev/cargo-dist#496 / georust/proj#192 参照)。
+msvc-crt-static = false
 # Note: 配布対象 shpx-cli の `bundled-spatialite` feature は
 # `crates/shpx-cli/Cargo.toml` の `[package.metadata.dist].features` で宣言する
 # (cargo-dist 0.31 は workspace 側の `features` を読まないため)。
