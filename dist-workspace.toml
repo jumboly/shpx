@@ -9,7 +9,11 @@ cargo-dist-version = "0.31.0"
 ci = "github"
 # The installers to generate for each app
 installers = ["shell"]
-# Target platforms to build apps for (Rust target-triple syntax)
+# Target platforms to build apps for (Rust target-triple syntax). 5 triples × 3 OS。
+# `bundled-spatialite` は Release から外したため (Windows MSVC 互換問題のため)、
+# proj-sys (cmake + sqlite3.exe) のみが Windows MSVC build の関門で、これは検証済み。
+# SpatiaLite 機能を使うユーザーには各 OS の package manager で `mod_spatialite` を
+# 別途 install してもらう運用 (`docs/SPATIALITE.md` 参照)。
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
@@ -21,21 +25,22 @@ install-updater = false
 # `crates/shpx-cli/Cargo.toml` の `[package.metadata.dist].features` で宣言する
 # (cargo-dist 0.31 は workspace 側の `features` を読まないため)。
 
-# bundled-spatialite build に必要な system dep を OS 別に宣言する。release.yml の
-# build matrix が各 runner で自動 install する。CI smoke job (`.github/workflows/ci.yml`)
-# も対応する choco/brew/apt コマンドを matrix.install-cmd で並走させる。
+# bundled-proj build に必要な system dep を OS 別に宣言する。release.yml の build matrix
+# が各 runner で自動 install する。CI smoke job (`.github/workflows/ci.yml`) も対応する
+# choco/brew/apt コマンドを matrix.install-cmd で並走させる。
 #
-# - cmake / clang: GEOS の C++ vendor build (geos-src 0.2 経由) に必須
-# - sqlite (Windows): proj-sys 0.25 (libproj 9.4) の cmake configure が sqlite3.exe を
-#   PATH 上に要求する。Linux apt と macOS Homebrew は sqlite3 binary を同梱するが、
-#   Windows runner image には libsqlite3 のみで .exe が無いため choco で別途入れる。
+# - cmake: proj-sys 0.25 (libproj 9.4) の C ソース vendor build に必須
+# - sqlite (Windows): proj-sys の cmake configure が sqlite3.exe を PATH 上に要求する
+#   (proj.db を build 時に SQL から生成するため)。Linux apt と macOS Homebrew は
+#   `sqlite3` binary を package に同梱するが、Windows runner image には libsqlite3 のみで
+#   .exe が無いため choco で別途入れる。
+# - clang / llvm は GEOS C++ build 用だったが `bundled-spatialite` を Release から外した
+#   ことで不要になった (geos-src は build されない)。
 [dist.dependencies.apt]
 cmake = '*'
-clang = '*'
 
 [dist.dependencies.homebrew]
 cmake = '*'
 
 [dist.dependencies.chocolatey]
-llvm = '*'
 sqlite = '*'
