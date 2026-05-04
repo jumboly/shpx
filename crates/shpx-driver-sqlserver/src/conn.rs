@@ -191,8 +191,7 @@ mod tests {
     #[test]
     fn build_config_rejects_integrated_auth_without_feature() {
         // feature 無効時は build_config 段階で明示エラー (TCP 接続には進まない)。
-        let parsed =
-            ParsedUrl::parse("mssql://localhost/shpx_test?auth=integrated").unwrap();
+        let parsed = ParsedUrl::parse("mssql://localhost/shpx_test?auth=integrated").unwrap();
         let err = build_config(&parsed).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("windows-auth"), "msg was: {msg}");
@@ -213,8 +212,7 @@ mod tests {
     #[test]
     fn build_config_rejects_windows_auth_on_unix() {
         // Unix では `?auth=windows` (NTLM) は使えない。`?auth=integrated` を案内する。
-        let parsed =
-            ParsedUrl::parse("mssql://u:p@h/db?auth=windows").unwrap();
+        let parsed = ParsedUrl::parse("mssql://u:p@h/db?auth=windows").unwrap();
         let err = build_config(&parsed).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("only supported on Windows"), "msg was: {msg}");
@@ -225,8 +223,7 @@ mod tests {
     fn build_config_accepts_integrated_auth_on_unix_with_feature() {
         // `?auth=integrated` は feature 有効な Unix で `AuthMethod::Integrated` を生成。
         // 実際の Kerberos ticket 取得は libgssapi 任せで本テストでは検証しない。
-        let parsed =
-            ParsedUrl::parse("mssql://localhost/shpx_test?auth=integrated").unwrap();
+        let parsed = ParsedUrl::parse("mssql://localhost/shpx_test?auth=integrated").unwrap();
         let cfg = build_config(&parsed).unwrap();
         assert_eq!(cfg.get_addr(), "localhost:1433");
     }

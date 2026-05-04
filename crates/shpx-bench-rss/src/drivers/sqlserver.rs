@@ -10,7 +10,9 @@
 
 use std::path::Path;
 
-use shpx_core::{CreateTable, Driver, Error, LayerReader, OnLoss, ReadOpts, Result, Uri, WriteOpts};
+use shpx_core::{
+    CreateTable, Driver, Error, LayerReader, OnLoss, ReadOpts, Result, Uri, WriteOpts,
+};
 use shpx_driver_parquet::ParquetDriver;
 use shpx_driver_sqlserver::SqlServerDriver;
 

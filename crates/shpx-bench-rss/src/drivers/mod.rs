@@ -82,9 +82,7 @@ pub fn dispatch(
         DriverKind::GeojsonFc => Ok(Box::new(geojson::GeoJsonBench(
             geojson::Variant::FeatureCollection,
         ))),
-        DriverKind::GeojsonNdjson => {
-            Ok(Box::new(geojson::GeoJsonBench(geojson::Variant::Ndjson)))
-        }
+        DriverKind::GeojsonNdjson => Ok(Box::new(geojson::GeoJsonBench(geojson::Variant::Ndjson))),
         DriverKind::Gpkg => Ok(Box::new(gpkg::GpkgBench)),
         DriverKind::Spatialite => Ok(Box::new(spatialite::SpatialiteBench)),
         DriverKind::Postgis => {
@@ -165,7 +163,11 @@ pub(crate) fn prepare_via_writer(
 /// `open_bulk_write` が `None` を返した場合は通常 writer にフォールバック。RDB は
 /// 全列ロスレス想定なので `OnLoss::Error`、テーブルは毎回 DROP→CREATE するため
 /// `CreateTable::Always` を強制する。
-pub(crate) fn prepare_via_bulk(driver: &dyn Driver, parquet_input: &Path, out_uri: &Uri) -> Result<()> {
+pub(crate) fn prepare_via_bulk(
+    driver: &dyn Driver,
+    parquet_input: &Path,
+    out_uri: &Uri,
+) -> Result<()> {
     let pq_uri = Uri::from_path(parquet_input.display().to_string());
     let mut pq = ParquetDriver.open_read(&pq_uri, &ReadOpts::default())?;
     let schema = pq.schema();
@@ -176,9 +178,7 @@ pub(crate) fn prepare_via_bulk(driver: &dyn Driver, parquet_input: &Path, out_ur
         create_table: shpx_core::CreateTable::Always,
         ..Default::default()
     };
-    if let Some(mut bulk) =
-        driver.open_bulk_write(out_uri, schema.clone(), crs.clone(), &opts)?
-    {
+    if let Some(mut bulk) = driver.open_bulk_write(out_uri, schema.clone(), crs.clone(), &opts)? {
         let mut iter = pq.batches();
         bulk.bulk_write(&mut iter)?;
         bulk.finish()?;

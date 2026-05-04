@@ -348,7 +348,10 @@ fn multirow_values_chunk_boundary_roundtrip() {
         .expect("open_read");
     let batches: Vec<_> = r.batches().collect::<Result<_, _>>().expect("read");
     let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
-    assert_eq!(row_count, total, "all rows must roundtrip across chunk boundary");
+    assert_eq!(
+        row_count, total,
+        "all rows must roundtrip across chunk boundary"
+    );
 
     // 末尾 remainder 行 (chunk 境界の +1 行) を検証して param 番号ズレが無いことを確認する。
     let last_batch = batches.last().expect("at least one batch");

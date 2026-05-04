@@ -137,10 +137,8 @@ impl ShpReader {
                     Ok(t) => {
                         buf.push(t);
                         if buf.len() >= READ_BATCH_SIZE {
-                            let chunk = std::mem::replace(
-                                &mut buf,
-                                Vec::with_capacity(READ_BATCH_SIZE),
-                            );
+                            let chunk =
+                                std::mem::replace(&mut buf, Vec::with_capacity(READ_BATCH_SIZE));
                             if tx.send(Ok(chunk)).is_err() {
                                 return; // receiver dropped, exit cleanly
                             }

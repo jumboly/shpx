@@ -127,7 +127,10 @@ impl<'a> KeysetRowsIter<'a> {
 
         let mut out: Vec<Vec<Value>> = Vec::with_capacity(self.batch_size);
         let mut last_rowid_in_batch = self.last_rowid;
-        while let Some(row) = rows.next().map_err(|e| Error::driver(self.driver_name, e))? {
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| Error::driver(self.driver_name, e))?
+        {
             let attr_cols = n_cols - 1;
             let mut values: Vec<Value> = Vec::with_capacity(attr_cols);
             for i in 0..attr_cols {
@@ -221,7 +224,10 @@ impl<'a> OffsetRowsIter<'a> {
             .map_err(|e| Error::driver(self.driver_name, e))?;
 
         let mut out: Vec<Vec<Value>> = Vec::with_capacity(self.batch_size);
-        while let Some(row) = rows.next().map_err(|e| Error::driver(self.driver_name, e))? {
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| Error::driver(self.driver_name, e))?
+        {
             let mut values: Vec<Value> = Vec::with_capacity(n_cols);
             for i in 0..n_cols {
                 let v: Value = row
@@ -240,9 +246,9 @@ impl<'a> OffsetRowsIter<'a> {
             self.done = true;
         }
         // i64 加算オーバーフローはテーブルサイズ的に起こり得ないが defensively saturate する。
-        self.offset = self.offset.saturating_add(
-            i64::try_from(out.len()).unwrap_or(i64::MAX),
-        );
+        self.offset = self
+            .offset
+            .saturating_add(i64::try_from(out.len()).unwrap_or(i64::MAX));
         Ok(Some(RowBatch { rows: out }))
     }
 }
