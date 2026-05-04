@@ -357,7 +357,9 @@ fn multirow_values_chunk_boundary_roundtrip() {
     let last_row = last_batch.num_rows() - 1;
     let idx_back = last_batch.column(0).as_primitive::<Int32Type>();
     assert_eq!(idx_back.value(last_row), (total - 1) as i32);
-    let geom_back = last_batch.column(2).as_binary::<i32>();
+    // schema_with_geom は extras + geom の順なので geom 列は index 1 (column 0 = idx, column 1 = geom)。
+    // commit 9a33962 で test 追加時 column(2) と書いていたが SQL Server CI が初運転で OOB panic。
+    let geom_back = last_batch.column(1).as_binary::<i32>();
     assert_eq!(
         wkb::decode(geom_back.value(last_row)).unwrap(),
         Geom::Point((total - 1) as f64, -((total - 1) as f64))
