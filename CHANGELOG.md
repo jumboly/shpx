@@ -2,6 +2,17 @@
 
 本プロジェクトの変更履歴。フォーマットは [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) に準拠し、バージョン番号は [Semantic Versioning](https://semver.org/spec/v2.0.0.html) に従う。
 
+## [1.1.0] - 2026-05-04
+
+### Added
+
+- **`shpx-cli` を lib + bin の二本立てに再構成し、`pub fn run()` / `pub fn run_with_app_name(name)` を export**: 業務固有 / 社内 driver を OSS 本体に持ち込まずに 1 バイナリで同居させたい派生プロジェクトが、`[dependencies] shpx-cli = "1.1"` を追加して `shpx_cli::run()` を呼ぶだけで標準 9 driver 込みの shpx CLI を再利用できる。標準 driver の linker pin は `shpx-cli` lib 内の `registry` モジュールが担い、派生側は追加 driver の `use my_extra_driver as _;` 1 行のみで `inventory` 経由の自動登録が成立する。argv\[0\] の file_stem を `clap::Command::name` / `bin_name` に注入する経路で `--help` の "Usage:" 行も派生バイナリ名 (`my-shpx` 等) に切り替わる。詳細は [`docs/EMBEDDING.md`](docs/EMBEDDING.md)。
+- **`crates/shpx-cli/examples/embedded.rs`**: 派生バイナリの最小例。`cargo run --example embedded -p shpx-cli -- drivers` で動作確認可。CI が `shpx_cli::run` の API 契約 / argv\[0\] 由来の表示名切替 / inventory rlib pin を smoke test として常時検証する。
+
+### Changed
+
+- **`shpx --help` の `about` 文字列を更新**: v0.3 系のままだった `"v0.3: SHP / GeoParquet / CSV / GeoJSON / GPKG / FlatGeobuf / PostGIS + --reproject"` を、SQL Server / SpatiaLite を含む現状の 9 driver 列挙に修正。
+
 ## [1.0.0] - 2026-05-04
 
 v1.0 マイルストーン「仕上げと配布」のリリース。`cargo-dist` ベースの 5 target × 3 OS 配布工程 (`aarch64-apple-darwin` / `aarch64-unknown-linux-gnu` / `x86_64-apple-darwin` / `x86_64-unknown-linux-gnu` / `x86_64-pc-windows-msvc`) を整備し、shell installer と GitHub Releases から単一バイナリで shpx を入手できる体制が整った。同梱するのは 0.8.0 以降に積まれた v1.0 cycle 1〜4 (LICENSE / NOTICE / 進捗バー / examples / README 5 分チュートリアル / `--format=json` / cargo-dist + multi-OS smoke) と v1.x 系の中期改善 (SQL Server tiberius fork で bulk insert bug 修正 + LOGIN7 packet_size 引き上げ + RDB writer batch 経路の multi-row VALUES 化)。9 driver (SHP / Parquet / GPKG / GeoJSON+NDJSON / CSV / FGB / PostGIS / SQL Server / SpatiaLite) のすべてが reader streaming + 統一 OnLoss + LICENSE 整備済みの状態で 1.0 を切る。
