@@ -188,8 +188,19 @@ libspatialite は **MPL 1.1 / GPL 2.0 / LGPL 2.1** の triple-licensed。bundled
 
 ### サポート OS
 
-- **Linux x86_64**: CI の `bundled-spatialite-smoke` job で常時検証（`.github/workflows/ci.yml`）。`cmake` / `clang` のみ apt 導入する cleanroom 状態で `cargo build -p shpx-cli --features bundled-spatialite --release` と `cargo test -p shpx-driver-spatialite --features bundled-spatialite` が緑であることを保証
-- **macOS (Apple Silicon / Intel)** / **Windows**: cycle 当初は best-effort。ローカルで cmake と C++ コンパイラ適合バージョンが揃っていれば動く想定だが、CI で常時検証していない。v1.0 の `cargo-dist` 配信タイミングで追加 OS の smoke job を整備予定
+v1.0 cycle 4 で `cargo-dist` 配布対象 OS と CI smoke の対応を以下に整理した。`○` は GitHub Releases の Release artifact 対象、`△` は build を試みるが失敗時は当該 OS の artifact のみ欠落させて他 OS の publish を継続する best-effort 扱い。
+
+| Target triple                  | Release artifact | CI smoke job (`.github/workflows/ci.yml`)              | system dep                         |
+| ------------------------------ | ---------------- | ------------------------------------------------------ | ---------------------------------- |
+| `x86_64-unknown-linux-gnu`     | ○                | `bundled-spatialite-smoke (linux)`                     | apt: `cmake`, `clang`              |
+| `aarch64-unknown-linux-gnu`    | ○                | (cargo-dist 側 cross compile のみ、ci.yml smoke なし)  | cargo-dist が cross 環境を準備     |
+| `aarch64-apple-darwin`         | ○                | `bundled-spatialite-smoke (macos-arm64)` (`macos-14`)  | brew: `cmake`、Apple LLVM 同梱     |
+| `x86_64-apple-darwin`          | △ best-effort    | (smoke job なし、cargo-dist 側で build のみ)           | brew: `cmake`、Apple LLVM 同梱     |
+| `x86_64-pc-windows-msvc`       | △ best-effort    | `bundled-spatialite-smoke (windows)` (`continue-on-error: true`) | choco: `llvm` (clang)、MSVC 同梱  |
+
+縮退判断: Windows / macOS x64 で `bundled-spatialite` build が安定しないことが確定した場合は、`Cargo.toml` の `[workspace.metadata.dist] targets` から該当 triple を外し、本表でも `× (build from source)` に格下げする。詳細は `docs/ROADMAP.md` v1.0 リスク節参照。
+
+best-effort target を必要とする利用者は当面 `cargo install --path crates/shpx-cli --features bundled-spatialite` でソースから build してほしい。`bundled-spatialite` feature は driver の `bundled-spatialite` と `shpx-geom/bundled-proj` を implies するため、`--features bundled-spatialite,bundled-proj` のように両方を書く必要は無い。
 
 ### 静的初期化経路
 
