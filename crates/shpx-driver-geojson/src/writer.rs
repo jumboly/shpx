@@ -238,10 +238,10 @@ fn plan_skipped_columns(
             continue;
         }
         match f.data_type() {
-            DataType::Binary | DataType::LargeBinary => {
-                if !apply_on_loss(loss_kind::BINARY_ON_GEOJSON, f.name(), on_loss)? {
-                    skipped.push(i);
-                }
+            DataType::Binary | DataType::LargeBinary
+                if !apply_on_loss(loss_kind::BINARY_ON_GEOJSON, f.name(), on_loss)? =>
+            {
+                skipped.push(i);
             }
             DataType::List(_)
             | DataType::LargeList(_)
@@ -257,15 +257,15 @@ fn plan_skipped_columns(
                 }
                 skipped.push(i);
             }
-            DataType::Decimal128(_, _) => {
-                if !apply_on_loss(loss_kind::DECIMAL_ON_GEOJSON, f.name(), on_loss)? {
-                    skipped.push(i);
-                }
+            DataType::Decimal128(_, _)
+                if !apply_on_loss(loss_kind::DECIMAL_ON_GEOJSON, f.name(), on_loss)? =>
+            {
+                skipped.push(i);
             }
-            DataType::Timestamp(TimeUnit::Nanosecond | TimeUnit::Microsecond, _) => {
-                if !apply_on_loss(loss_kind::TIMESTAMP_PRECISION_ON_GEOJSON, f.name(), on_loss)? {
-                    skipped.push(i);
-                }
+            DataType::Timestamp(TimeUnit::Nanosecond | TimeUnit::Microsecond, _)
+                if !apply_on_loss(loss_kind::TIMESTAMP_PRECISION_ON_GEOJSON, f.name(), on_loss)? =>
+            {
+                skipped.push(i);
             }
             _ => {}
         }
