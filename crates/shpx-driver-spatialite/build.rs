@@ -83,6 +83,10 @@ fn main() {
         // `#ifdef PROJ_NEW ... #include <proj.h> #else #include <proj_api.h>` を評価する。
         // proj_api.h は PROJ 8+ で削除された legacy header のためここで build が落ちる)。
         .define("PROJ_NEW", "1")
+        // Windows MSVC: flex 生成 lex.*.c (gg_*.c が `#include` する) は `#include <unistd.h>`
+        // を unconditional に発行するため、`YY_NO_UNISTD_H` を define して skip させる。
+        // POSIX 系 (Linux/macOS) では unistd.h が存在するので define しても no-op。
+        .define("YY_NO_UNISTD_H", "1")
         .warnings(false);
     for omit in OMIT_FEATURES {
         build.define(&format!("OMIT_{omit}"), None);
@@ -311,13 +315,18 @@ fn write_generated_headers(out_dir: &std::path::Path) {
     let spatialite_dir = out_dir.join("spatialite");
     std::fs::create_dir_all(&spatialite_dir).expect("create OUT_DIR/spatialite");
     write_if_changed(&out_dir.join("config.h"), &config_h_body());
-    write_if_changed(&out_dir.join("config-msvc.h"), MSVC_STUB);
+    // Windows MSVC は `#if defined(_WIN32) && !defined(__MINGW32__)` 経路で
+    // `config-msvc.h` を読む (`gg_shape.c` 他)。`gaiaconfig.h` 経由 OMIT_*/SPATIALITE_VERSION
+    // の Windows 等価物として `gaiaconfig-msvc.h` も同様に必要。空 stub だと SPATIALITE_VERSION
+    // / OMIT_* が未定義になり MSVC build が落ちる。本 build.rs では POSIX/MSVC で「ほぼ同じ
+    // 内容」を書き、HAVE_DLFCN_H / HAVE_UNISTD_H など POSIX-only の差分のみ調整する。
+    write_if_changed(&out_dir.join("config-msvc.h"), &config_msvc_h_body());
     write_if_changed(&spatialite_dir.join("gaiaconfig.h"), &gaiaconfig_h_body());
-    write_if_changed(&spatialite_dir.join("gaiaconfig-msvc.h"), MSVC_STUB);
+    write_if_changed(
+        &spatialite_dir.join("gaiaconfig-msvc.h"),
+        &gaiaconfig_h_body(),
+    );
 }
-
-#[cfg(feature = "bundled-spatialite")]
-const MSVC_STUB: &str = "/* shpx: non-MSVC build, intentionally empty */\n";
 
 /// 内容差分があるときだけ書き込む。毎ビルド `fs::write` で mtime を更新すると、
 /// cc-rs の incremental 判定 (timestamp 比較) と相性が悪くなるため。
@@ -373,6 +382,46 @@ fn config_h_body() -> String {
 #endif
 "
     .to_string()
+}
+
+#[cfg(feature = "bundled-spatialite")]
+fn config_msvc_h_body() -> &'static str {
+    // Windows MSVC 用の最小 config。`config_h_body` から POSIX 専用 (DLFCN_H / UNISTD_H /
+    // FDATASYNC / FTRUNCATE / LOCALTIME_R / STRCASECMP) を落とし、Windows MSVC で
+    // 利用可能な C 標準ヘッダのみ宣言する。文字列比較は libspatialite 側で `_stricmp`
+    // (Windows) / `strcasecmp` (POSIX) を `#ifdef` で切り替えるため定義不要。
+    "#ifndef SPATIALITE_BUNDLED_CONFIG_MSVC_H
+#define SPATIALITE_BUNDLED_CONFIG_MSVC_H
+
+#define HAVE_FCNTL_H 1
+#define HAVE_FLOAT_H 1
+#define HAVE_INTTYPES_H 1
+#define HAVE_LIMITS_H 1
+#define HAVE_LOCALE_H 1
+#define HAVE_MATH_H 1
+#define HAVE_MEMORY_H 1
+#define HAVE_STDINT_H 1
+#define HAVE_STDIO_H 1
+#define HAVE_STDLIB_H 1
+#define HAVE_STRING_H 1
+#define HAVE_SYS_STAT_H 1
+#define HAVE_SYS_TYPES_H 1
+#define HAVE_SQLITE3EXT_H 1
+#define HAVE_SQLITE3_H 1
+
+#define HAVE_GETCWD 1
+#define HAVE_GETTIMEOFDAY 1
+#define HAVE_MEMMOVE 1
+#define HAVE_MEMSET 1
+#define HAVE_STRERROR 1
+
+#define HAVE_DECL_SQLITE_INDEX_CONSTRAINT_LIKE 1
+
+#define _LARGEFILE_SOURCE 1
+#define NDEBUG 1
+
+#endif
+"
 }
 
 #[cfg(feature = "bundled-spatialite")]
