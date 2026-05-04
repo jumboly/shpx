@@ -341,10 +341,6 @@ fn all_types_schema() -> SchemaRef {
 }
 
 #[allow(clippy::too_many_lines, clippy::many_single_char_names)]
-#[ignore = "tiberius 0.12 + SQL Server 2022 で多列 + decimal + 連続 varbinary(max) の組み合わせ \
-            で colid 9 (event_at) が 'Invalid column type from bcp client' を踏む。完了基準の \
-            各型 (decimal(38,10) / timestamptz / bytea) は個別テストで bit-identical を確認済み。\
-            tiberius 上流バグの可能性が高く別 issue で調査予定"]
 #[test]
 fn bulk_all_types_together() {
     let Some(url) = mssql_url() else {
