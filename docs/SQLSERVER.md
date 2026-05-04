@@ -68,7 +68,7 @@ feature 無効時に `?auth=integrated` / `?auth=windows` を指定するとビ�
 
 ### 配布バイナリでの状況
 
-`cargo-dist` の Release artifact では (v1.0 段階での想定):
+`cargo-dist` の Release artifact (v1.0):
 
 | OS | `windows-auth` | 備考 |
 |---|---|---|

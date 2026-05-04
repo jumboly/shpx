@@ -130,7 +130,7 @@ shpx drivers --format=json | jq '.[].name'  # CI / scripting 向け
 
 ## ステータス
 
-v0.8.0 リリース済み（2026-05-03）。reader 全 9 driver の真ストリーミング化 (eager-load 撲滅) を完了し、10M 行入力でもピーク RSS が `batch_size + 接続バッファ` に収まる。次マイルストーンは **v1.0 (仕上げと配布)** で、cargo-dist による単一バイナリ配布、進捗バー、examples / README 整備、`shpx schema` / `shpx drivers` の `--format=json` を順次取り込んでいる。詳細は [docs/ROADMAP.md](docs/ROADMAP.md) と [CHANGELOG.md](CHANGELOG.md)。
+v1.0.0 リリース済み（2026-05-04）。reader 全 9 driver の真ストリーミング化に加え、`cargo-dist` による 5 target × 3 OS 単一バイナリ配布、進捗バー、examples / README 5 分チュートリアル、`shpx schema` / `shpx drivers --format=json` まで一通り揃った。次マイルストーンは **v1.x** で、crates.io 公開 / Homebrew tap / Docker image を順次検討する。詳細は [docs/ROADMAP.md](docs/ROADMAP.md) と [CHANGELOG.md](CHANGELOG.md)。
 
 ## ライセンス
 
