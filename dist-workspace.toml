@@ -20,3 +20,22 @@ install-updater = false
 # Note: 配布対象 shpx-cli の `bundled-spatialite` feature は
 # `crates/shpx-cli/Cargo.toml` の `[package.metadata.dist].features` で宣言する
 # (cargo-dist 0.31 は workspace 側の `features` を読まないため)。
+
+# bundled-spatialite build に必要な system dep を OS 別に宣言する。release.yml の
+# build matrix が各 runner で自動 install する。CI smoke job (`.github/workflows/ci.yml`)
+# も対応する choco/brew/apt コマンドを matrix.install-cmd で並走させる。
+#
+# - cmake / clang: GEOS の C++ vendor build (geos-src 0.2 経由) に必須
+# - sqlite (Windows): proj-sys 0.25 (libproj 9.4) の cmake configure が sqlite3.exe を
+#   PATH 上に要求する。Linux apt と macOS Homebrew は sqlite3 binary を同梱するが、
+#   Windows runner image には libsqlite3 のみで .exe が無いため choco で別途入れる。
+[dist.dependencies.apt]
+cmake = '*'
+clang = '*'
+
+[dist.dependencies.homebrew]
+cmake = '*'
+
+[dist.dependencies.chocolatey]
+llvm = '*'
+sqlite = '*'
