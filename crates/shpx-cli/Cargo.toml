@@ -35,12 +35,19 @@ windows-auth = ["shpx-driver-sqlserver/windows-auth"]
 name = "shpx"
 path = "src/main.rs"
 
-# cargo-dist 0.31 の Release build で `bundled-spatialite` を有効化する。
-# Why: 配布バイナリで system dep (libspatialite / GEOS / libproj / SQLite) を不要にするため。
+# cargo-dist 0.31 の Release build で `bundled-proj` のみ有効化する。
+# Why: 配布バイナリで `--reproject` を確実に動かすため、libproj を C ソースから
+# static link する。`bundled-spatialite` は Windows MSVC 互換 (libspatialite 5.1.0 の
+# `gg_shape.c::gaia_win_fopen` 周辺の `GAIAGEO_DECLARE` parser 問題) が本 PR の範囲を
+# 超えるため Release から外し、SpatiaLite を使うユーザーには各 OS の package manager
+# で `mod_spatialite` を別途 install してもらう (`docs/SPATIALITE.md` 参照)。
+# Linux/macOS は元々 system libspatialite が apt/brew で容易に入るため UX 影響少。
+# 完全 single binary が必要な場合は `cargo install --path crates/shpx-cli
+# --features bundled-spatialite` でソース build する経路を案内する。
 # dist-workspace.toml 側の `[dist] features` は cargo-dist 0.31 が読まないので
 # package metadata 側に置く。
 [package.metadata.dist]
-features = ["bundled-spatialite"]
+features = ["bundled-proj"]
 
 [dependencies]
 shpx-core           = { path = "../shpx-core" }
