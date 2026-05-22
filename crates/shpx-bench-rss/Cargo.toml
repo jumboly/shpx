@@ -18,12 +18,6 @@ workspace = true
 
 [features]
 default = []
-# `cargo-dist` 同様に SpatiaLite を vendored ビルドする。Linux CI で
-# `apt-get install libspatialite-dev` を避けたい場合に有効化する。
-bundled-spatialite = [
-    "shpx-driver-spatialite/bundled-spatialite",
-    "shpx-geom/bundled-proj",
-]
 bundled-proj = ["shpx-geom/bundled-proj"]
 
 [[bin]]

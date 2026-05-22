@@ -148,6 +148,8 @@
 
 ## v0.6 — bundled-spatialite + 配布バイナリ準備
 
+> **撤回済み（[ADR-0006](adr/0006-spatialite-system-dependency-not-bundled.md)）**: 本マイルストーンで実装した `bundled-spatialite` 一式（in-tree vendor・`build.rs` の static link 経路・`geos-src`/`libz-sys`/`link-cplusplus`・CLI feature・CI smoke job）は v1.x で **完全撤去**した。SpatiaLite は `mod_spatialite` をユーザーが用意する system 依存とする。以下は当時の記録として残す。
+
 **スコープ**:
 - `crates/shpx-driver-spatialite/build.rs` を新規作成し、libspatialite C ソースを vendor して `cc` で static link
 - `shpx-cli/Cargo.toml` の `bundled-spatialite` feature 伝播は v0.5 で枠組み済みのため、本実装の中身を埋めるのみ

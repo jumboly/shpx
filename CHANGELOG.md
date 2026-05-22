@@ -2,6 +2,17 @@
 
 本プロジェクトの変更履歴。フォーマットは [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) に準拠し、バージョン番号は [Semantic Versioning](https://semver.org/spec/v2.0.0.html) に従う。
 
+## [Unreleased]
+
+### Removed
+
+- **`bundled-spatialite` feature 一式を撤去し、SpatiaLite は `mod_spatialite` をユーザー供給の system 依存に一本化**（[ADR-0006](docs/adr/0006-spatialite-system-dependency-not-bundled.md)）: in-tree vendor（libspatialite 5.1.0、約 11MB / 195 ファイル）・`build.rs` の static link 経路・`geos-src` / `libz-sys` / `link-cplusplus` deps・driver / CLI / bench-rss の `bundled-spatialite` feature・CI の `bundled-spatialite-smoke` job・`NOTICE` を削除した。libspatialite を単一バイナリへ static link する経路は提供しなくなり、ソース build でも静的 spatialite を得る手段は無い。撤去の恒久的理由は「重さ」（GEOS の C++ 依存・vendor 肥大・脆い build.rs・libspatialite fork の保守コストが long-tail driver の価値に対して過大）と「接続経路の標準化」（static link は SQLite 標準の `load_extension` を使えず、生の `Connection::handle()` への独自 `unsafe` FFI 初期化を要し dynamic 経路と二重保守になる）。具体的引き金は libspatialite 5.1.0 の Windows MSVC build 破綻（`gg_shape.c::gaia_win_fopen` 付近の `GAIAGEO_DECLARE` C2054）。副次的にライセンスも単純化する（bundle が要した LGPL 2.1 / MPL 1.1 / GPL 2.0 再リンク義務が、runtime ロードでは消える）。`bundled-proj`（reprojection 用 libproj static link、配布バイナリで有効）は独立しており影響なし。
+- **vendored libspatialite を git 履歴からも除去**: HEAD からの削除に加え、`git filter-repo` で全履歴から `crates/shpx-driver-spatialite/vendor/` を浄化し clone サイズを縮小した（履歴改変のため commit hash が変化）。
+
+### Changed
+
+- **`docs/SPATIALITE.md` を全面改訂**: 「mod_spatialite を用意する（system 依存）」節を新設し、Linux（apt）/ macOS（Homebrew + SIP による `DYLD_LIBRARY_PATH` 失効の起動別表）/ Windows（依存 DLL 同梱の自己完結 zip をインストーラ不要・環境非汚染で導入する手順）を整理。`SHPX_SPATIALITE_PATH` は「OS 既定検索パスに無いときの任意 override（通常は不要、固有の実利は macOS SIP 回避のみ）」と正直化した。
+
 ## [1.1.0] - 2026-05-04
 
 ### Added

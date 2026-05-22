@@ -6,27 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "shpx 用 SpatiaLite (sqlite://) ドライバ"
-build = "build.rs"
-# Cargo の duplicate `links` 検出を有効化するため named link を宣言する。
-# proj-sys が `links = "proj"` を独占しているため、本 crate は別名 `spatialite_bundled` を使う。
-links = "spatialite_bundled"
 
 [lints]
 workspace = true
-
-[features]
-# 配布バイナリ (cargo-dist) 用に libspatialite を vendor から `cc` で static link する。
-# 詳細スコープと cycle 構成は build.rs / docs/ROADMAP.md の v0.6 セクション参照。
-# bundle 経路は libgeos (geos-src) / libproj (shpx-geom/bundled-proj 経由 proj-sys) /
-# C++ stdlib (link-cplusplus) を要求する。
-# v0.6 cycle 3 で `shpx-geom/bundled-proj` を implies に追加し、driver 単体ビルドでも
-# proj-sys の bundled build がトリガされ build.rs の `locate_proj_root` が必ず成功する状態にする。
-bundled-spatialite = [
-    "dep:geos-src",
-    "dep:link-cplusplus",
-    "dep:libz-sys",
-    "shpx-geom/bundled-proj",
-]
 
 [dependencies]
 shpx-core       = { path = "../shpx-core" }
@@ -39,26 +21,10 @@ serde        = { workspace = true }
 serde_json   = { workspace = true }
 tracing      = { workspace = true }
 # `bundled` で SQLite をソースから同梱ビルドする (GPKG driver と同方針)。
-# `load_extension` で mod_spatialite を runtime ロードする。
+# `load_extension` で mod_spatialite を runtime ロードする (ADR-0006: libspatialite は
+# bundle せず、ユーザーが用意した mod_spatialite を runtime ロードするのが唯一の経路)。
 # `blob` / `chrono` は GPKG driver と同じく値 bind を simplify するため。
 rusqlite     = { workspace = true, features = ["bundled", "blob", "chrono", "load_extension"] }
-# build.rs が `DEP_SQLITE3_INCLUDE` (Cargo の `links = "sqlite3"` 伝搬) を読むため
-# rusqlite 経由ではなく direct dep として再宣言する (DEP_* env は直接依存にのみ渡る)。
-libsqlite3-sys = { version = "0.28", features = ["bundled"] }
-# C++ stdlib リンク (GEOS は C++)。`bundled-spatialite` 有効時のみ pull する。
-link-cplusplus = { workspace = true, optional = true }
-# libspatialite 5.1.0 の `gg_relations.c::evalGeosCache` が zlib の crc32 を要求する。
-# Linux apt の zlib1g-dev / macOS Apple SDK は zlib.h を同梱するが、Windows MSVC は同梱しない。
-# `static` feature で vendored zlib を build / link し、3 OS 共通の bundled 戦略にする。
-# `cargo:include` 経由で build.rs から `DEP_Z_INCLUDE` で受け取り、cc::Build の include に
-# 追加する。`links = "z"` 経由でリンクは Cargo が自動で発行するため、build.rs 側で
-# `cargo:rustc-link-lib=z` を出さない (二重リンクを避けるため)。
-libz-sys = { version = "1", default-features = false, features = ["static"], optional = true }
-
-[build-dependencies]
-cc = { workspace = true }
-# libgeos の vendor build。`bundled-spatialite` 有効時のみ pull する。
-geos-src = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile           = { workspace = true }

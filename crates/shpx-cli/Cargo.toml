@@ -15,14 +15,6 @@ workspace = true
 [features]
 default       = []
 bundled-proj  = ["shpx-geom/bundled-proj"]
-# SpatiaLite driver の bundled-spatialite feature を CLI から伝播させる。
-# v0.6 cycle 3 で libspatialite が PROJ を要求するようになったため、`bundled-proj`
-# を CLI レイヤでも明示的に implies する (driver 側でも implies しているが、ROADMAP
-# の宣言意図を CLI feature 表面で見えるようにするための保険)。
-bundled-spatialite = [
-    "shpx-driver-spatialite/bundled-spatialite",
-    "shpx-geom/bundled-proj",
-]
 # SQL Server driver の Windows 認証 (integrated / NTLM) を CLI から伝播。
 # Windows: pure Rust の tiberius `winauth` 経路。Linux/macOS: tiberius
 # `integrated-auth-gssapi` 経路で system libgssapi-krb5 を要求するため、
@@ -37,13 +29,9 @@ path = "src/main.rs"
 
 # cargo-dist 0.31 の Release build で `bundled-proj` のみ有効化する。
 # Why: 配布バイナリで `--reproject` を確実に動かすため、libproj を C ソースから
-# static link する。`bundled-spatialite` は Windows MSVC 互換 (libspatialite 5.1.0 の
-# `gg_shape.c::gaia_win_fopen` 周辺の `GAIAGEO_DECLARE` parser 問題) が本 PR の範囲を
-# 超えるため Release から外し、SpatiaLite を使うユーザーには各 OS の package manager
-# で `mod_spatialite` を別途 install してもらう (`docs/SPATIALITE.md` 参照)。
-# Linux/macOS は元々 system libspatialite が apt/brew で容易に入るため UX 影響少。
-# 完全 single binary が必要な場合は `cargo install --path crates/shpx-cli
-# --features bundled-spatialite` でソース build する経路を案内する。
+# static link する。SpatiaLite (libspatialite) は bundle しない (ADR-0006) ため、
+# 配布バイナリで `mod_spatialite` を使うには各 OS の package manager で別途 install
+# してもらう (`docs/SPATIALITE.md` 参照)。
 # dist-workspace.toml 側の `[dist] features` は cargo-dist 0.31 が読まないので
 # package metadata 側に置く。
 [package.metadata.dist]
