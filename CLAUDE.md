@@ -56,7 +56,7 @@ Reader (Driver) → Iterator<RecordBatch>（lazy・schema 付き）→ CRS 変�
 | `shpx-core` | `Driver`/`LayerReader`/`LayerWriter`/`BulkLoadWriter` trait、`Capabilities`、`Uri`、`Crs`、Arrow schema helper、エラー型 |
 | `shpx-geom` | WKB/WKT コーデック、CRS、reprojection（libproj） |
 | `shpx-rdb-common` | RDB ドライバ共通ヘルパー（URI パース、on-loss、CRS→SRID） |
-| `shpx-driver-*` | フォーマット 1 つにつき 1 クレート（shp, gpkg, parquet, fgb, geojson, csv, postgis, sqlserver, spatialite） |
+| `shpx-driver-*` | Driver 1 つにつき 1 クレート（shp, gpkg, parquet, fgb, geojson, csv, postgis, sqlserver, spatialite）。Driver ≠ Format（SQLite に gpkg / spatialite の 2 Driver）— 用語は `CONTEXT.md` 参照 |
 | `shpx-cli` | clap CLI。**lib + bin**（`shpx_cli::run()` を派生バイナリで再利用可能 — `docs/EMBEDDING.md`） |
 | `shpx-bench-rss` | ピーク RSS ベンチハーネス |
 
