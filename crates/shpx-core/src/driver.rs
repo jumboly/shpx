@@ -12,7 +12,12 @@ use arrow_schema::SchemaRef;
 
 use crate::{Capabilities, Crs, ReadOpts, Result, Uri, WriteOpts};
 
-/// 入出力フォーマット 1 種を表すドライバ。
+/// 1 つの読み書き戦略を表すドライバ。
+///
+/// Driver は Format（オンディスク/ワイヤ形式）と 1:1 ではない — 同一 Format に
+/// 複数 Driver が存在しうる（例: SQLite に対し gpkg / spatialite）。どの Driver で
+/// 解決するかは内容判別ではなく Scheme（拡張子・URL scheme）で決まる。
+/// 用語の境界は repo ルートの `CONTEXT.md` 参照。
 ///
 /// 「ドライバ」はステートレスな factory として実装することを推奨する。
 /// 実際の I/O 状態は [`LayerReader`] / [`LayerWriter`] が保持する。
