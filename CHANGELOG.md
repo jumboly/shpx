@@ -2,7 +2,7 @@
 
 本プロジェクトの変更履歴。フォーマットは [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) に準拠し、バージョン番号は [Semantic Versioning](https://semver.org/spec/v2.0.0.html) に従う。
 
-## [Unreleased]
+## [1.2.0] - 2026-05-23
 
 ### Removed
 
