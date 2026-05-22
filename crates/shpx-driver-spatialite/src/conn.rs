@@ -4,11 +4,12 @@
 //! SpatiaLite を有効化するには SQLite に `mod_spatialite` 共有ライブラリをロードする
 //! 必要があるため、shpx は接続直後に必ず本モジュール経由で extension をロードする。
 //!
-//! ロード経路:
-//! 1. `feature = "bundled-spatialite"`: vendor から static link した API を直接呼ぶ
-//!    (`SHPX_SPATIALITE_PATH` env は無視される)。
-//! 2. 環境変数 `SHPX_SPATIALITE_PATH` で指定された絶対パス / 相対パスを `load_extension`。
-//! 3. 既定: `mod_spatialite` を SQLite に渡し、OS のライブラリ検索パスから dlopen。
+//! libspatialite は bundle しない（[ADR-0006]）。ユーザーが用意した `mod_spatialite` を
+//! `load_extension` で runtime ロードするのが唯一の経路:
+//! 1. 環境変数 `SHPX_SPATIALITE_PATH` で指定された絶対パス / 相対パスを `load_extension`。
+//! 2. 既定: `mod_spatialite` を SQLite に渡し、OS のライブラリ検索パスから dlopen。
+//!
+//! [ADR-0006]: ../../../docs/adr/0006-spatialite-system-dependency-not-bundled.md
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -19,13 +20,12 @@ use shpx_core::Result;
 use crate::meta::SQL_GEOMETRY_COLUMNS_EXISTS;
 use crate::util::{driver_err, driver_msg};
 
-/// Why: libspatialite (5.1.0) は extension load (`spatialite_init_ex` /
-/// `sqlite3_modspatialite_init`) と `InitSpatialMetadata()` の双方で global PROJ /
-/// GEOS context や allocator caches を変更するが、公式 docs はスレッドセーフを
-/// 保証していない。`cargo test` の並列実行で複数 connection が同時に load + init
-/// すると glibc malloc が `double free or corruption` で SIGABRT する flaky 失敗を
-/// CI で観測したため、process 単一の Mutex で load + init を serialize する。
-/// bundled / dynamic 両経路と open_read / open_write_new の双方で共通利用する。
+/// Why: libspatialite は extension load (`spatialite_init_ex`) と
+/// `InitSpatialMetadata()` の双方で global PROJ / GEOS context や allocator caches を
+/// 変更するが、公式 docs はスレッドセーフを保証していない。`cargo test` の並列実行で
+/// 複数 connection が同時に load + init すると glibc malloc が `double free or
+/// corruption` で SIGABRT する flaky 失敗を CI で観測したため、process 単一の Mutex で
+/// load + init を serialize する。open_read / open_write_new の双方で共通利用する。
 /// 実害は init 直後の数 ms ロックのみで、SQL 実行中は Mutex を握らない。
 static LIBSPATIALITE_INIT_LOCK: Mutex<()> = Mutex::new(());
 
@@ -78,71 +78,6 @@ pub fn verify_geometry_columns(conn: &Connection) -> Result<()> {
 }
 
 fn load_mod_spatialite(conn: &Connection) -> Result<()> {
-    #[cfg(feature = "bundled-spatialite")]
-    {
-        load_bundled(conn)
-    }
-    #[cfg(not(feature = "bundled-spatialite"))]
-    {
-        load_dynamic(conn)
-    }
-}
-
-#[cfg(feature = "bundled-spatialite")]
-#[allow(unsafe_code)]
-fn load_bundled(conn: &Connection) -> Result<()> {
-    use std::sync::Once;
-
-    // libspatialite を `-DLOADABLE_EXTENSION` なし (ordinary lib モード) で link しており、
-    // `sqlite3_modspatialite_init` は build されない。代わりに static-link API を呼ぶ。
-    // `sqlite3_modspatialite_init` の loadable 経路は `pApi` が NULL の場合 SIGSEGV する。
-    extern "C" {
-        fn spatialite_initialize();
-        fn spatialite_alloc_connection() -> *mut std::os::raw::c_void;
-        fn spatialite_init_ex(
-            db_handle: *mut libsqlite3_sys::sqlite3,
-            p_cache: *const std::os::raw::c_void,
-            verbose: std::os::raw::c_int,
-        );
-    }
-
-    // bundled feature 経路では `SHPX_SPATIALITE_PATH` を解釈する余地がない (extension は
-    // 静的 link 済みで dlopen しない)。env が誤設定で残っていると挙動が変わったように
-    // 誤解されがちなので、最初の load 時に 1 回だけ警告する。
-    static WARN_ENV: Once = Once::new();
-    static GLOBAL_INIT: Once = Once::new();
-
-    WARN_ENV.call_once(|| {
-        if std::env::var_os(ENV_SPATIALITE_PATH).is_some() {
-            tracing::warn!(
-                env = ENV_SPATIALITE_PATH,
-                "bundled-spatialite feature is enabled; ignoring env override (libspatialite is statically linked)"
-            );
-        }
-    });
-
-    // SAFETY: `Connection::handle()` の raw pointer は conn 生存期間有効。
-    // `spatialite_alloc_connection` で確保された cache は `spatialite_init_ex` 経由で
-    // libspatialite 側に extension data として登録され、`sqlite3_close` 時に
-    // libspatialite の destructor 経由で自動解放される (`spatialite_cleanup_ex` を
-    // shpx 側から明示的に呼んではならない、二重解放になる)。
-    // 並列スレッド競合は呼び出し側 (`open_read` / `open_write_new`) で
-    // `LIBSPATIALITE_INIT_LOCK` を握っているのでここでは Mutex 不要。
-    unsafe {
-        GLOBAL_INIT.call_once(|| spatialite_initialize());
-        let cache = spatialite_alloc_connection();
-        if cache.is_null() {
-            return Err(driver_msg(
-                "bundled libspatialite: spatialite_alloc_connection returned null",
-            ));
-        }
-        spatialite_init_ex(conn.handle().cast(), cache, 0);
-    }
-    Ok(())
-}
-
-#[cfg(not(feature = "bundled-spatialite"))]
-fn load_dynamic(conn: &Connection) -> Result<()> {
     let path = std::env::var(ENV_SPATIALITE_PATH).unwrap_or_else(|_| "mod_spatialite".to_string());
 
     // SAFETY: 開発者が指定する extension path のみをロードする。実行中に他クエリは

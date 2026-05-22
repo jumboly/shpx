@@ -2,6 +2,8 @@
 
 SQLite + SpatiaLite 拡張の geometry テーブルを `shpx-driver-spatialite` が担当する。GDAL 非依存方針に従い、`rusqlite` (`bundled` SQLite) と `mod_spatialite` 動的ロードのみで構成される。
 
+> **配布方針（[ADR-0006](adr/0006-spatialite-system-dependency-not-bundled.md)）**: SpatiaLite は **shpx の単一バイナリへ bundle しない**唯一の driver である。`mod_spatialite` 共有ライブラリは **runtime に `load_extension` で読み込む**ことだけを前提とし、ユーザーが各 OS の package manager で別途用意する。libspatialite を static link する経路（`bundled-spatialite` feature・in-tree vendor・`build.rs`）は提供しない。理由は「GEOS の C++ 依存・vendor 肥大・脆い build.rs・libspatialite fork の保守コストが long-tail driver の価値に対して過大」（恒久理由）と「libspatialite 5.1.0 が Windows MSVC で C ソース patch なしには build できない」（具体的引き金）。詳細は ADR-0006。
+
 GPKG driver と同じ「ファイルベースの SQLite」だが、メタテーブル (`gpkg_*` vs `geometry_columns` / `spatial_ref_sys`) と geometry 列の blob format (GPKG binary header vs SpatiaLite blob) が異なる。`*.gpkg` は GPKG driver、`*.sqlite` / `*.db` / `*.spatialite` / `sqlite://` は SpatiaLite driver と URI scheme で完全に分離されている。
 
 ## 対応範囲（v0.5 リリース時点）
@@ -142,8 +144,7 @@ driver 固有の補助動作: 未登録 EPSG の SRID 解決時には `spatial_r
 - **Z / M 座標**、`GeometryCollection`、`EMPTY`
 - **複数レイヤ append**（同一ファイルに複数 geometry テーブルを段階的に追加するワークフロー）
 - **bulk writer**（`Capabilities::bulk_load = false` 固定。SQLite 単体では行単位 INSERT が pragmatic な最速ルート）
-
-`bundled-spatialite` の本実装は v0.6.0 で対応済み（本ドキュメント「bundled-spatialite ビルド」節を参照）。
+- **libspatialite の static link / 単一バイナリ同梱**（[ADR-0006](adr/0006-spatialite-system-dependency-not-bundled.md)。`mod_spatialite` は runtime 供給を唯一の前提とする）
 
 ## 環境変数まとめ
 
@@ -151,86 +152,91 @@ driver 固有の補助動作: 未登録 EPSG の SRID 解決時には `spatial_r
 |---|---|
 | `SHPX_SPATIALITE_TABLE` | 入力（および書き出しの fallback）テーブル名（URI クエリ `?table=` が優先） |
 | `SHPX_SPATIALITE_OUT_TABLE` | 書き出し時のテーブル名 override |
-| `SHPX_SPATIALITE_PATH` | `mod_spatialite` 共有ライブラリの絶対 / 相対パス上書き（macOS の `/opt/homebrew/lib/mod_spatialite.dylib` など） |
+| `SHPX_SPATIALITE_PATH` | `mod_spatialite` 共有ライブラリのパスを明示する**任意の override**。通常は不要（後述「`SHPX_SPATIALITE_PATH` は必要か」） |
 | `SHPX_TEST_SPATIALITE` | integration test の有効化フラグ（未設定 / `0` / 空文字列なら test を skip） |
 
-## bundled-spatialite ビルド
+## mod_spatialite を用意する（system 依存）
 
-v0.6.0 で `crates/shpx-driver-spatialite/build.rs` に libspatialite / GEOS / PROJ の vendor + `cc` static link 経路が入った。`bundled-spatialite` feature を有効化することで「配布バイナリ受け取り側にシステム libspatialite を入れさせない」ユースケース（`cargo install shpx --features bundled-spatialite`）に対応する。default ビルド（feature 未指定）はこれまで通りシステム libspatialite（apt の `libsqlite3-mod-spatialite` / brew の `libspatialite`）を `load_extension` で見る挙動のまま。
+shpx は SpatiaLite 機能を **bundle しない**（[ADR-0006](adr/0006-spatialite-system-dependency-not-bundled.md)）。`shpx convert spatialite://...` を使うには、各 OS で `mod_spatialite` 共有ライブラリを別途 install する。shpx は起動時にこれを `load_extension` で runtime ロードする。
 
-**v1.0 cargo-dist 配布バイナリでは `bundled-spatialite` を有効化していない**。理由は本ページ末尾「v1.0 配布バイナリでの方針」節を参照。`shpx convert spatialite://...` を v1.0 リリースバイナリで使うには、各 OS の package manager で `mod_spatialite` を別途 install する必要がある (Linux: `apt install libsqlite3-mod-spatialite`、macOS: `brew install libspatialite`、Windows: 後述)。完全な single binary が必要な利用者は `cargo install --path crates/shpx-cli --features bundled-spatialite` でソースから build してほしい。
+| OS / Target | 入手方法 | 備考 |
+|---|---|---|
+| Linux | `sudo apt install libsqlite3-mod-spatialite` | OS のライブラリ検索パスから自動 dlopen。追加設定不要 |
+| macOS | `brew install libspatialite` | Homebrew prefix（Apple Silicon `/opt/homebrew/lib`、Intel `/usr/local/lib`）は dlopen 既定検索に含まれないため指定が要る（下記） |
+| Windows | 自己完結 zip を展開（下記） | OSGeo4W も可だが GIS スタック一式を入れるため重い |
 
-### 有効化
+`mod_spatialite` が見つからない場合は driver から `failed to load mod_spatialite at \`...\`: ...` 形式の明示エラーが出る。その案内に従って install し、OS の既定検索パスに無い場合のみ場所を shpx に教える（次節）。
+
+### `SHPX_SPATIALITE_PATH` は必要か
+
+**通常は不要。** shpx は既定で裸の名前 `mod_spatialite` を SQLite に渡し、OS の動的ローダの既定検索パスから解決させる。`mod_spatialite` がそのパス上にあれば（Linux の `apt` 配置など）何も設定しなくてよい。検索パス外にある場合は、次のどちらでも解決できる:
+
+- **OS 標準のローダ変数** — Linux `LD_LIBRARY_PATH=/path`、macOS `DYLD_LIBRARY_PATH=/path`、Windows は `PATH` にフォルダを追加。
+- **`SHPX_SPATIALITE_PATH`** — `mod_spatialite` の絶対 / 相対パスを直接指定（shpx がそのパスを `load_extension` に渡す）。
+
+`SHPX_SPATIALITE_PATH` が標準のローダ変数より優れる**唯一の実利は macOS**。`DYLD_LIBRARY_PATH` は SIP（System Integrity Protection）により、Apple 署名の保護バイナリ（`/bin`・`/usr/bin`・`/System` 配下など。`/usr/local` と Homebrew prefix は対象外）を `exec` する瞬間に環境ごと消される。**変数を設定した地点と shpx 起動の間に保護バイナリが 1 つでも挟まると `DYLD_*` は失われる**。`SHPX_SPATIALITE_PATH` は `DYLD_` 系ではない通常の app env なので消されず、shpx が絶対パスを直接 `dlopen` に渡すため SIP の影響を受けない。
+
+| 起動経路 | `DYLD_LIBRARY_PATH` | 必要なもの |
+|---|---|---|
+| Terminal で直接 `export …; shpx …`（`~/.zshrc` 設定含む） | 効く | どちらでも可 |
+| `#!/bin/sh`・`#!/bin/bash` ラッパ / `sh -c '…'` / `env shpx …` | 消える | `SHPX_SPATIALITE_PATH` |
+| `make` / npm scripts など `/bin/sh` 経由 | 消える | `SHPX_SPATIALITE_PATH` |
+| launchd（LaunchAgents / LaunchDaemons）/ cron | 消える | `SHPX_SPATIALITE_PATH` |
+| Finder / `open` / Automator など GUI 起動 | 消える | `SHPX_SPATIALITE_PATH` |
+| system の `/usr/bin/python3` 等から `subprocess` 起動 | 消える | `SHPX_SPATIALITE_PATH` |
+
+要するに**対話で手打ちする以外のほぼ全ての自動化・常駐・GUI 経路**で剥がれる。オンプレ本番（launchd / cron / 常駐サービス）はこれに該当しがちなので、macOS では `SHPX_SPATIALITE_PATH` を常用するのが最も堅い:
 
 ```sh
-cargo build -p shpx-cli --features bundled-spatialite --release
+export SHPX_SPATIALITE_PATH=/opt/homebrew/lib/mod_spatialite.dylib   # Apple Silicon
 ```
 
-CLI の `bundled-spatialite` feature は driver の `bundled-spatialite` と `shpx-geom/bundled-proj` を implies するため、`--features bundled-spatialite,bundled-proj` のように両方を書く必要は無い。
+なお Homebrew の dylib は依存（libgeos / libproj）を install name / `@rpath` の絶対パスで参照するため、`mod_spatialite.dylib` を絶対パスでロードすれば依存も解決される。Windows のような「依存 DLL が別途見つからない」follow-on 問題は起きにくい。
 
-### vendor 範囲
+**Linux / Windows では `SHPX_SPATIALITE_PATH` 固有の利点はない**（OS のローダ変数で等価。特に Windows は依存 DLL 解決のため `PATH` 設定が必須で、それを行えば裸の名前も解決するため `SHPX_SPATIALITE_PATH` は冗長）。非標準なファイル名や複数バージョンの中から特定の 1 つを名指ししたいときの利便性のみ。
 
-| 依存ライブラリ | 取得元 | 備考 |
-|---|---|---|
-| libspatialite 5.1.0 | `crates/shpx-driver-spatialite/vendor/libspatialite-5.1.0/` に in-tree commit | SHA256 は `vendor/SHA256SUMS` で再現性固定。release tarball を bit-identical に近い状態で保持（cycle 1-2 の局所 patch は cycle 2 末で物理削除済み） |
-| libgeos 3.x | `geos-src` crate (CMake build) | `[build-dependencies] geos-src = "0.2"` |
-| libproj | `proj-sys` crate (`shpx-geom/bundled-proj` 経由) | shpx-geom の `bundled-proj` と libspatialite で 1 つの libproj を共有（symbol の二重リンクを回避） |
-| libsqlite3 | `rusqlite` の `bundled` feature | v0.5 cycle 1 で既に有効化済み |
+`bundled-proj`（reprojection 用の libproj static link）は SpatiaLite とは独立しており、v1.0 配布バイナリでも有効。`--reproject` や GeoJSON の WGS84 自動変換はバイナリ単体で動く。
 
-### 必要なビルドツール
+### Windows: 自己完結 zip での導入（インストーラ不要・環境を汚さない）
 
-- **CMake** （`geos-src` が要求）
-- **C++ コンパイラ** （clang or gcc / Apple LLVM、`link-cplusplus` で C++ stdlib を確実にリンク）
-- **C コンパイラ** （`cc` crate が解決、libspatialite 自体は純 C）
-- libsqlite3 / libproj / libsqlite3-mod-spatialite / libgeos の **システムインストールは不要**
+オンプレ本番など「レジストリ・システム PATH を変更したくない」環境向けの推奨手順。SpatiaLite 公式が **依存 DLL（libproj / libgeos / libtiff …）を全て同梱した自己完結アーカイブ** [`mod_spatialite-5.1.0-win-amd64.7z`](https://www.gaia-gis.it/gaia-sins/windows-bin-amd64/mod_spatialite-5.1.0-win-amd64.7z)（[配布元 Gaia-SINS](http://www.gaia-gis.it/gaia-sins/)）を配布している。
 
-### ライセンス制約
+> **Windows 固有の注意（依存 DLL 解決）**: `mod_spatialite.dll` をロードする際、その依存 DLL は **dll と同じフォルダからは自動検索されない**。Windows の依存解決順は「`shpx.exe` のあるフォルダ → システムディレクトリ → カレント → `PATH`」であり、`mod_spatialite.dll` 自身のフォルダは含まれない。よって同梱フォルダを **`shpx.exe` と同居させる**か **`PATH` に乗せる**必要がある。どちらの方式でも、フォルダが解決対象に入れば裸の名前 `mod_spatialite` で見つかるので **`SHPX_SPATIALITE_PATH` は不要**（指定しても害はないが冗長）。
 
-libspatialite は **MPL 1.1 / GPL 2.0 / LGPL 2.1** の triple-licensed。bundled で配布する shpx バイナリは LGPL 2.1 (or later) 適合のため、(a) 再リンク可能な `.o` ファイル提供 もしくは (b) MPL 1.1 / GPL 2.0 のいずれかを選択して配布する。詳細は `crates/shpx-driver-spatialite/NOTICE` を参照。
+1. 7z を任意フォルダに展開（管理者権限・レジストリ不要）。例: `C:\tools\mod_spatialite\`
+2. 次の 2 方式どちらか:
 
-### v1.0 配布バイナリでの方針
+**方式A — 完全ポータブル（最も汚さない・本番推奨）**: `shpx.exe` を同梱フォルダに置いて実行。`mod_spatialite.dll` と依存 DLL が exe のフォルダから解決されるため `PATH` すら触らない。撤去はフォルダ削除のみ。
 
-v1.0 cycle 4 で `cargo-dist` ベースの 5 target × 3 OS Release を整備したが、**`bundled-spatialite` 経由の libspatialite 同梱は Release バイナリには含めない**運用とした。
+```cmd
+copy shpx.exe C:\tools\mod_spatialite\
+cd /d C:\tools\mod_spatialite
+shpx.exe convert input.shp output.sqlite
+```
 
-**経緯**: cycle 4 で 3 OS bundled smoke の整備を試み、Linux + macOS arm64 は緑にしたが、Windows MSVC build が次の 4 段の修正 (cmake 確保 / proj-sys が要求する sqlite3.exe / libz-sys vendor / `config-msvc.h` + `YY_NO_UNISTD_H`) を経た後に **libspatialite 5.1.0 の `gg_shape.c::gaia_win_fopen` 周辺で `GAIAGEO_DECLARE` macro 展開時に MSVC parser C2054 を踏む**地点で停止した。vendored libspatialite ソースの patch (上流 fork レベル) が必要な領域で、本 PR の範囲を大きく超える。3 OS バイナリ提供を優先するため `bundled-spatialite` を Release から外し、Spatialite を使うユーザーは各 OS の package manager で `mod_spatialite` を別途 install する運用に切り替えた。`bundled-proj` (PROJ の vendor static link) は Release で有効化を継続する (3 OS とも build 通過済み)。
+**方式B — `shpx.exe` を動かさず、セッション限定で `PATH` を通す**: PATH 変更はそのシェルプロセス内だけで、ウィンドウを閉じれば消える（システム環境変数は不変）。
 
-**v1.0 Release バイナリの bundle / system dep 対応表**:
+```powershell
+# PowerShell（このセッションのみ）
+$env:PATH = "C:\tools\mod_spatialite;$env:PATH"
+shpx convert input.shp output.sqlite
+```
 
-| Target triple                  | Release artifact | bundled-proj | mod_spatialite (要 system install)                                  |
-| ------------------------------ | ---------------- | ------------ | ------------------------------------------------------------------- |
-| `x86_64-unknown-linux-gnu`     | ○                | static link  | `sudo apt install libsqlite3-mod-spatialite`                        |
-| `aarch64-unknown-linux-gnu`    | ○                | static link  | `sudo apt install libsqlite3-mod-spatialite`                        |
-| `aarch64-apple-darwin`         | ○                | static link  | `brew install libspatialite`                                        |
-| `x86_64-apple-darwin`          | ○                | static link  | `brew install libspatialite`                                        |
-| `x86_64-pc-windows-msvc`       | ○                | static link  | OSGeo4W 経由 (mod_spatialite.dll を取得し `SHPX_SPATIALITE_PATH` で指定) |
+依存 DLL 欠落で落ちる場合（Windows 10+ はどの DLL が欠けたか報告しない）、公式は [Dependency Walker での診断](https://www.gaia-gis.it/fossil/libspatialite/wiki?name=Lodable+Modules+in+5.0)を案内している。
 
-`shpx convert spatialite://...` 実行時に `mod_spatialite` が見つからない場合は driver から `failed to load mod_spatialite at \`...\`: ...` 形式の明示エラーが出るので、その案内に従って install + 必要なら `SHPX_SPATIALITE_PATH` env で path を指定する。
+### なぜ bundle しないのか
 
-**完全な single binary を求める利用者**: `cargo install --path crates/shpx-cli --features bundled-spatialite` でソースから build する。Linux/macOS は確実に動作する (CI smoke green)。Windows は best-effort (上記 GAIAGEO_DECLARE 問題のため詰まる可能性あり)。
+libspatialite を単一バイナリへ static link する経路（過去の `bundled-spatialite` feature）は **撤去した**。理由は ADR-0006 を参照。要約:
 
-### CI smoke job
-
-v1.0 配布バイナリでは `bundled-spatialite` を使わないが、上流 libspatialite の Windows 互換が改善した時点で再導入できるよう `bundled-spatialite-smoke` job (3 OS matrix、Windows のみ `continue-on-error: true`) は regression detection 用に残す (`.github/workflows/ci.yml`)。Linux / macOS arm64 は緑必須で `bundled-spatialite` の動作保証を継続する。
-
-### 静的初期化経路
-
-bundled feature 有効時は `extern "C" fn sqlite3_modspatialite_init` を `rusqlite::Connection::handle()` の raw pointer に直接呼ぶ（`load_extension` 経路は経由しない）。`SHPX_SPATIALITE_PATH` env は warn ログを出して無視される（bundled で static link されている前提のため）。手元の system mod_spatialite を読みたいケースは default ビルド（feature 未指定）を使う。
-
-### smoke test
-
-`crates/shpx-driver-spatialite/tests/` 以下に bundled feature gate 付きの smoke test が 2 件:
-
-- `bundled_geos_smoke.rs`: `SELECT ST_Buffer(GeomFromWKB(?, 4326), 0.1)` で GEOS リンクを確認
-- `bundled_proj_smoke.rs`: EPSG:4326 → 3857 の transform で PROJ リンクを確認
-
-両者とも `#![cfg(feature = "bundled-spatialite")]` で gate されるため、default ビルドでは test 数に出ない。CI の `bundled-spatialite-smoke` job がこれらを毎回検証する。
+- **重さ（恒久理由）**: libspatialite は GEOS（C++）を引き込み、`unsafe_code = "deny"` の pure-Rust workspace に CMake ビルドの C++ stdlib リンクと脆い build.rs、11MB の in-tree vendor を抱えることになる。long-tail driver の価値に対して保守コストが過大。
+- **接続経路の標準化（恒久理由）**: static link では SQLite 標準の `load_extension` を使えず、生の `Connection::handle()` への独自 `unsafe` FFI 初期化（`spatialite_init_ex` + cache の手動管理）が必要で、dynamic 経路との二重保守を強いた。dynamic のみにすることで接続は常に標準経路 1 本に収束する。
+- **Windows MSVC 破綻（具体的引き金）**: libspatialite 5.1.0 が `gg_shape.c::gaia_win_fopen` 付近の `GAIAGEO_DECLARE` マクロ展開で C2054 を踏み、上流 fork レベルの C ソース patch なしには build できない。
+- **ライセンス（副次的利点）**: bundle すると libspatialite の LGPL 2.1 / MPL 1.1 / GPL 2.0 triple-license 再リンク配布義務が発生するが、ユーザー供給ライブラリの runtime ロードなら shpx は配布しないため義務は消える。
 
 ## 内部実装メモ
 
 - `Capabilities { read: true, write: true, bulk_load: false, supports_blob: true, supports_decimal: false, supports_timestamp_tz: true, string_encoding: Fixed("utf-8") }`
-- `mod_spatialite` ロード経路:
-  - `feature = "bundled-spatialite"` 有効時は static link した `sqlite3_modspatialite_init` を `rusqlite::Connection::handle()` の raw pointer に直接呼ぶ（v0.6.0 で実装。動的経路への fallback は無く、`SHPX_SPATIALITE_PATH` env は warn で無視）
-  - default ビルド（feature 未指定）時は以下の優先順:
+- `mod_spatialite` ロード経路（`load_extension` のみ。static link 経路は持たない — ADR-0006）:
     1. `SHPX_SPATIALITE_PATH` env で指定された絶対 / 相対パスを `load_extension`
     2. 既定: `mod_spatialite` を SQLite に渡し、OS のライブラリ検索パス (`LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH` / `/etc/ld.so.conf`) から dlopen
 - `open_write_new` は `journal_mode=WAL` / `synchronous=NORMAL` を pragma 設定して、空 DB で `InitSpatialMetadata(1)` を idempotent 発行する。`FastInit (=1)` は WGS84 系のみ seed する選択肢で、全 EPSG seed (`InitSpatialMetadata(0)`) は数秒かかるため空 DB を頻繁に作る用途では使わない
@@ -244,6 +250,5 @@ bundled feature 有効時は `extern "C" fn sqlite3_modspatialite_init` を `rus
 
 - Z / M 座標と `GeometryCollection` の対応（`shpx-geom::wkb` 側の拡張と同期）
 - `--where` / `--select` / `--query` reader 拡張（PostGIS と同形）
-- `bundled-spatialite` の本実装（v0.6 セクション参照）
 - 複数 geometry テーブルの一括書き出し
 - `spatialite_history` 等の SpatiaLite 固有 metadata の取り扱い

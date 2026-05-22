@@ -133,16 +133,6 @@ tempfile      = "3"
 assert_cmd    = "2"
 predicates    = "3"
 
-# build.rs 用 C コンパイラ呼び出しラッパ。`shpx-driver-spatialite` の
-# `bundled-spatialite` で利用。GEOS / PROJ / freexl などの bundled 化で他 driver も
-# 引く可能性を見越して workspace dep にしておく。
-cc            = "1"
-
-# `bundled-spatialite` で libgeos を CMake 経由で vendor する (`shpx-driver-spatialite/build.rs`)。
-geos-src        = "0.2"
-# libgeos は C++ 実装。最終バイナリで C++ stdlib を確実にリンクするため direct dep にする。
-link-cplusplus  = "1"
-
 [workspace.lints.rust]
 # `unsafe` は明示的に許可するモジュール以外で禁止。
 unsafe_code = "deny"

@@ -62,9 +62,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # libsqlite3-mod-spatialite を入れて動的 link で動かす。bundled-spatialite
-      # feature ではビルド時間が大きく増える (cmake+clang vendor build) ので、
-      # CI 計測用途は dynamic link で十分。
+      # libsqlite3-mod-spatialite を入れて `load_extension` で runtime ロードする。
+      # shpx は libspatialite を bundle しない (ADR-0006) ため、これが唯一の経路。
       - run: |
           sudo apt-get update && sudo apt-get install -y \
             libproj-dev pkg-config libsqlite3-mod-spatialite

@@ -1,7 +1,7 @@
 //! SpatiaLite driver の bench 経路。GPKG と同じく URI `?table=` でテーブル指定。
 //!
-//! 動的 link 環境では `mod_spatialite` が `SPATIALITE_LIBRARY_PATH` 等で発見できる
-//! 必要がある。CI ではビルド時に `--features bundled-spatialite` を有効化する。
+//! `mod_spatialite` を runtime ロードするため、実行環境に install されている必要が
+//! ある（`SHPX_SPATIALITE_PATH` env か OS のライブラリ検索パス。ADR-0006）。
 
 use std::path::Path;
 

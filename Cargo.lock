@@ -1221,15 +1221,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "geos-src"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63ee625c548bdf7ead03c75779d156ddfe48dc57820d336eeb39407c19f9a3b5"
-dependencies = [
- "cmake",
-]
-
-[[package]]
 name = "geozero"
 version = "0.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1671,17 +1662,6 @@ name = "libsqlite3-sys"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c10584274047cb335c23d3e61bcef8e323adae7c5c8c760540f73610177fc3f"
-dependencies = [
- "cc",
- "pkg-config",
- "vcpkg",
-]
-
-[[package]]
-name = "libz-sys"
-version = "1.1.28"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc3a226e576f50782b3305c5ccf458698f92798987f551c6a02efe8276721e22"
 dependencies = [
  "cc",
  "pkg-config",
@@ -2956,12 +2936,7 @@ version = "1.1.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
- "cc",
  "chrono",
- "geos-src",
- "libsqlite3-sys",
- "libz-sys",
- "link-cplusplus",
  "rusqlite",
  "serde",
  "serde_json",

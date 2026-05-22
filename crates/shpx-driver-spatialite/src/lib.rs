@@ -2,14 +2,8 @@
 //!
 //! `rusqlite` + `mod_spatialite` 動的ロードで SpatiaLite 4.x の geometry 列を読み書きする。
 //! GPKG driver と同じファイルベース DB だが、blob format / メタテーブル / 必要 extension が異なる。
-//! 詳細は v0.5 cycle で追加される `docs/SPATIALITE.md` を参照。
-
-// `bundled-spatialite` 有効時に libgeos (C++) を static link する。`link-cplusplus`
-// crate の build.rs が C++ stdlib リンク指定を出すが、この crate を実コードから
-// 参照していないと Rust 1.x の autolink が build script のメタデータを最終バイナリの
-// link graph に伝搬しないため、明示的に no-op で参照する。
-#[cfg(feature = "bundled-spatialite")]
-use link_cplusplus as _;
+//! libspatialite は bundle せず、ユーザーが用意した `mod_spatialite` を runtime ロードする
+//! （`docs/adr/0006-spatialite-system-dependency-not-bundled.md`）。詳細は `docs/SPATIALITE.md`。
 
 use arrow_schema::SchemaRef;
 use shpx_core::{
